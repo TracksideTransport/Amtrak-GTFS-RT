@@ -465,8 +465,12 @@ pub async fn run_combined() -> Result<(), Box<dyn std::error::Error + Send + Syn
     let worker_root = std::path::Path::new(worker::DEFAULT_WORKER_ROOT);
     let fleet_trains_file = config.output_dir.join("tracks").join("fleet-trains.json");
     let worker_plan =
-        worker::WorkerPlan::from_configs(&track_config, &advisory_config, worker_root)
-            .map(|plan| plan.with_fleet_trains_file(fleet_trains_file.clone()));
+        worker::WorkerPlan::from_configs(&track_config, &advisory_config, worker_root).map(
+            |plan| {
+                plan.with_fleet_trains_file(fleet_trains_file.clone())
+                    .with_output_dir(config.output_dir.clone())
+            },
+        );
     if worker_plan.is_none()
         && worker::WorkerPlan::wanted(&track_config, &advisory_config, worker_root).is_some()
     {
