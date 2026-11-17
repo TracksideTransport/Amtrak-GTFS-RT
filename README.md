@@ -53,19 +53,20 @@ flowchart LR
 
 ## Release and deployment status
 
-- **Source:** `main` contains the Rust service, the Playwright `advisory-fetcher` (with advisory
-  detail text in `alerts.pb`), the `track-fetcher` sidecar for Amtrak's own track numbers, the
-  `amtrak-status` station and train CLI, root-level Compose and Bake packaging, and live track and
-  platform assignments, with Amtrak's boarding gates (on by default; `AMTRAK_TRACKS=off` turns
-  them off). Changes merged after a release are
-  listed under **Unreleased** in [CHANGELOG.md](CHANGELOG.md).
-- **Releases:** `v0.7.1` (2026-10-21) is the current release. A release is complete when its
-  GitHub Release carries `image-release.txt` with the tag, revisions, manifest digest, and both
-  platform digests; until then, `v0.6.2` stays the stable image. Through `v0.6.2` the release
-  workflow publishes the service image only. From `v0.7.0` a release publishes all three images:
-  the service, track-fetcher, and advisory-fetcher. `image-release.txt` records the sidecar
-  digests after the service's. Pull the version tag, and pin the manifest digest from that
-  release's `image-release.txt`:
+- **Source:** `main` contains the Rust service and its built-in Playwright browser worker (Amtrak's
+  own track numbers and boarding gates, and advisory detail text in `alerts.pb`) in
+  [one image](docs/one-container.md), the `amtrak-status` station and train CLI, root-level
+  Compose and Bake packaging, and live track and platform assignments (on by default;
+  `AMTRAK_TRACKS=off` turns them off). Changes merged after a release are listed under
+  **Unreleased** in [CHANGELOG.md](CHANGELOG.md).
+- **Releases:** `v0.7.1` (2026-10-21) is the current complete release. A release is complete when
+  its GitHub Release carries `image-release.txt` with the tag, revisions, manifest digest, and both
+  platform digests; until then, the previous complete release stays the stable image. Through
+  `v0.6.2` the release workflow published the service image only; `v0.7.0` and `v0.7.1` also
+  published the two browser sidecars, which are now [deprecated](#deprecated-packages). From the
+  next release, a release publishes one package, `amtrak-gtfs-rt`, and `image-release.txt` records
+  only its digests. Pull the version tag, and pin the manifest digest from that release's
+  `image-release.txt`:
 
   ```bash
   docker pull ghcr.io/sohampatwardhan/amtrak-gtfs-rt:0.7.1
@@ -211,32 +212,34 @@ without a registry login:
 docker pull ghcr.io/sohampatwardhan/amtrak-gtfs-rt:0.7.1
 ```
 
-From `v0.7.0` the two browser sidecars are released beside it, for the same platforms and with the
-same tags (`0.7.1`, `0.7`, and `latest`) and OCI labels:
+This is the repository's only package:
 
 | Image | Built from |
 |-------|------------|
-| `ghcr.io/sohampatwardhan/amtrak-gtfs-rt` | root `Dockerfile`, `runtime` stage (scratch) |
-| `ghcr.io/sohampatwardhan/amtrak-gtfs-rt-track-fetcher` | [`browser-worker/`](browser-worker/README.md), target `track-fetcher` |
-| `ghcr.io/sohampatwardhan/amtrak-gtfs-rt-advisory-fetcher` | [`browser-worker/`](browser-worker/README.md), target `advisory-fetcher` |
+| `ghcr.io/sohampatwardhan/amtrak-gtfs-rt` | root `Dockerfile`, `runtime` stage |
 
-Pull all three, on a Raspberry Pi or any other host; Docker picks the native architecture:
+On a Raspberry Pi or any other host, Docker picks the native architecture. The
+[Compose stack](#compose-stack) names this image, so `docker compose pull` fetches it. The package
+links to this repository through its `org.opencontainers.image.source` label.
 
-```bash
-for image in amtrak-gtfs-rt amtrak-gtfs-rt-track-fetcher amtrak-gtfs-rt-advisory-fetcher; do
-  docker pull "ghcr.io/sohampatwardhan/${image}:0.7.1"
-done
-```
+#### Deprecated packages
 
-The [Compose stack](#compose-stack) names these images, so `docker compose pull` fetches them.
-Each sidecar's digests are in `image-release.txt`, after the service's.
+`ghcr.io/sohampatwardhan/amtrak-gtfs-rt-track-fetcher` and
+`ghcr.io/sohampatwardhan/amtrak-gtfs-rt-advisory-fetcher` are **deprecated**. They were the two
+browser sidecars of `v0.7.0` and `v0.7.1`, and they get no new versions: the release workflow no
+longer builds them, and the repository no longer has their Dockerfile. Their replacement is
+`ghcr.io/sohampatwardhan/amtrak-gtfs-rt`, whose built-in browser worker does both jobs (see
+[Upgrading from the three-container layout](#upgrading-from-the-three-container-layout) for the
+Compose change). Their published `0.7.1` tags stay pullable until the owner deletes them.
 
-> [!NOTE]
-> GHCR creates a new package as private. After the first release that publishes the sidecars,
-> a maintainer sets `amtrak-gtfs-rt-track-fetcher` and `amtrak-gtfs-rt-advisory-fetcher` to
-> public once (the package's **Package settings**, then **Change visibility**). Until then,
-> pulling them needs `docker login ghcr.io`. Each package links to this repository through its
-> `org.opencontainers.image.source` label.
+Owner steps, done by hand in GitHub and not by any workflow:
+
+1. On each fetcher package's page, set the description to say it is deprecated and that
+   `ghcr.io/sohampatwardhan/amtrak-gtfs-rt` replaces it.
+2. After the first release that publishes the one image, and only once the owner confirms,
+   unlink both packages from this repository and delete them, from each package's
+   **Package settings**. Deleting a package cannot be undone, and anyone still pulling their
+   `0.7.1` tags loses them.
 
 > [!TIP]
 > `latest` is a convenience pointer that can move. For reproducible production deployment, pin the
@@ -312,8 +315,8 @@ The [Compose stack](#compose-stack) adds the hardening defaults: read-only root 
 `docker build --build-arg BROWSER_BUNDLE=full` adds full Chromium and Xvfb for
 `BROWSER_MODE=xvfb-headful`, the fallback if Amtrak blocks the headless shell.
 
-[`docker-bake.hcl`](docker-bake.hcl) still builds the two standalone fetcher images until they
-are retired (#74). The `service` target is this image.
+[`docker-bake.hcl`](docker-bake.hcl) builds this image as its only target, `service`
+(`FETCHER_BROWSER_BUNDLE=full docker buildx bake` for the full bundle).
 
 ### Health, readiness, manifest, and artifacts
 
@@ -431,17 +434,30 @@ only then assembles the public version tags. The final multi-platform digest rec
 attestation. The GitHub Release records that digest and attaches per-platform SPDX SBOMs,
 vulnerability reports, and license evidence. No release workflow deploys a running service.
 
-The two sidecar images go through the same flow, built natively on amd64 and arm64 runners. Each
-platform digest must pass an offline smoke test (OCI labels and architecture, Chromium rendering a
-page under the Compose confinement, `/healthz`, and a prompt exit on `SIGTERM`) and the fixable
-Critical and High policy above. No image's version tags are created until every gate on every
-image and platform has passed. Recovering a release tagged before `v0.7.0` publishes the service
-image alone, as before.
+Before its smoke test, each platform digest must pass
+[`scripts/verify-release-image.sh`](scripts/verify-release-image.sh): the OCI labels (title,
+description, source, documentation, license, base image, version, revision), the architecture,
+user, entrypoint, healthcheck, port, and volume, and every license notice listed below. CI runs the
+same check on both architectures for every pull request. Only `amtrak-gtfs-rt` is published; no
+version tag is created until both platforms have passed every gate.
 
 The project is licensed `AGPL-3.0-only`. The complete project license and generated Rust
 third-party notices are available inside every released image at `/licenses/`, in the repository,
-and as GitHub Release assets. The minimized Java runtime and validator JAR retain their own legal
-notices. OCI labels identify the exact source repository, revision, version, and project license.
+and as GitHub Release assets. The image also ships the notices of everything else in it, and
+`/licenses/README` ([`container/licenses/README`](container/licenses/README)) is the index:
+
+| Component | Notices in the image |
+|-----------|----------------------|
+| Rust service and its crates | `/licenses/AGPL-3.0-only.txt`, `/licenses/THIRD_PARTY_LICENSES.html` |
+| MobilityData validator (Apache-2.0) | `/licenses/gtfs-validator/LICENSE`; bundled libraries in the JAR's `META-INF/` |
+| Chromium headless shell and ffmpeg (Playwright downloads) | `/licenses/playwright-browsers/` |
+| Debian packages, including `tini` | `/usr/share/doc/<package>/copyright` |
+| CPython and the Python packages | `/usr/local/lib/python3.12/LICENSE.txt`, `site-packages/*.dist-info/licenses/` |
+| Node.js bundled with Playwright | `site-packages/playwright/driver/LICENSE` and `driver/package/ThirdPartyNotices.txt` |
+| Java 17 runtime (Temurin, `jlink`) | `/opt/java/legal/<module>/` |
+
+OCI labels identify the exact source repository, revision, version, base image, and project
+license.
 
 > [!NOTE]
 > Still out of scope: anonymous public exposure of a running feed service, reverse-proxy or
@@ -458,11 +474,11 @@ Compose plugin installed, from a checkout of the release tag:
 ```bash
 git clone --branch v0.7.1 https://github.com/sohampatwardhan/Amtrak-GTFS-RT.git
 cd Amtrak-GTFS-RT
-docker compose pull   # amtrak-gtfs-rt, -track-fetcher, and -advisory-fetcher at 0.7.1
+docker compose pull   # the release this checkout names
 docker compose up -d
 ```
 
-Without Compose, pull the three images as in [Container](#container). Check that a pulled image is
+Without Compose, pull the image as in [Container](#container). Check that a pulled image is
 the arm64 build with `docker image inspect --format '{{.Architecture}}' <image>`. A 32-bit OS
 cannot run these images; there is no `linux/arm/v7` build. To build on the Pi instead, use
 `AMTRAK_IMAGE_TAG=local docker compose up -d --build`.
@@ -503,7 +519,7 @@ Restart=on-failure
 | `AMTRAK_GENERATION_MAX` | `20` | Most generations kept on disk and in memory, current included. Must be at least `1`; wins over the retention window |
 | `AMTRAK_VALIDATOR_CACHE` | on | Skip the Java GTFS validator when the static ZIP's SHA-256 already has an accept or standards-reject result. `off` validates every fetch |
 | `AMTRAK_ADVISORIES` | on | Merges Service Alerts & Notices into `alerts.pb`. Set `off`, `false`, `0`, or `no` to turn it off; any other value is a startup error. Fail-open: without a reachable browser worker, only the ASM and Surfliner alerts publish |
-| `AMTRAK_ADVISORIES_URL` | `http://127.0.0.1:8081/service-alerts-and-notices` (built-in browser worker) | Override for the notices snapshot, for example a separately run advisory-fetcher. Plain HTTP to `www.amtrak.com` is Akamai-blocked |
+| `AMTRAK_ADVISORIES_URL` | `http://127.0.0.1:8081/service-alerts-and-notices` (built-in browser worker) | Override for the notices snapshot, for example a separately run browser worker. Plain HTTP to `www.amtrak.com` is Akamai-blocked |
 | `AMTRAK_ADVISORIES_TTL_SECS` | `900` | Minimum seconds between advisory page fetches |
 | `AMTRAK_TRACKS` | on | Publishes live platform/track and gate assignments. Set `off`, `false`, `0`, or `no` to turn them off; any other value is a startup error. Fail-open |
 | `AMTRAK_TRACKS_PLATFORMS` | `NYP=1-21;NWK=A,1-5;NHV=1-4,8,10,12,14` | Covered stations and their real tracks (`STOP=labels`, ranges allowed, `track@gate` for a gated track). Each becomes a platform stop |
@@ -794,8 +810,8 @@ flowchart TD
 Amtrak's own status covers every station where Amtrak posts a track. The service does not call
 `www.amtrak.com` itself: it reads the track source of the
 [browser worker](browser-worker/README.md), which serves `GET /tracks.json`, at
-`AMTRAK_TRACKS_AMTRAK_URL` (default `http://127.0.0.1:8081/tracks.json`). The trip-updates image
-starts the worker in its own container. Run directly on a host, nothing listens there until the
+`AMTRAK_TRACKS_AMTRAK_URL` (default `http://127.0.0.1:8081/tracks.json`). In the image, the service
+starts the worker itself. Run directly on a host, nothing listens there until the
 worker is started too; the source fails open, and `AMTRAK_TRACKS_AMTRAK=off` silences it.
 
 Where Amtrak posts a boarding gate beside the track (`departure.gate.number`), the gate from that
@@ -862,10 +878,10 @@ stylesheet, and media requests, and every host outside `amtrak.com`. The maps fe
 track field, is decrypted without a browser and only decides who is near a stop. A browser failure
 ends that cycle's fetches, and relaunches back off from 1 to 15 minutes. If every fetch in a cycle
 fails, `/tracks.json` goes `503` after five minutes instead of serving old documents as current. In
-Compose the sidecar runs read-only, with no capabilities, a 768 MB memory limit, and no published
-port. The image uses the same headless-shell build the advisory sidecar's on-device notes ran on a
-Raspberry Pi 5 (`linux/arm64`), and releases publish it for `linux/arm64` as
-`ghcr.io/sohampatwardhan/amtrak-gtfs-rt-track-fetcher`.
+Compose the worker runs inside the one hardened service, on `127.0.0.1:8081` only, with no
+published port. The image uses the same headless-shell build the advisory sidecar's on-device notes
+ran on a Raspberry Pi 5 (`linux/arm64`), and releases publish it for `linux/arm64` as part of
+`ghcr.io/sohampatwardhan/amtrak-gtfs-rt`.
 
 ```bash
 docker compose pull && docker compose up -d
@@ -1021,8 +1037,8 @@ smoke test.
 
 The feeds are verified two ways in the suite: RT protobuf round-trips through the decoder, and a
 live end-to-end test fetches real Amtrak data and asserts non-empty, statically-bound output.
-CI also builds both standalone browser-worker images, in both browser bundles, natively on amd64
-and arm64.
+CI also builds the one image, in both browser bundles, natively on amd64 and arm64, and runs the
+offline smoke test and the release contract check (labels and license notices) on each.
 
 The [release gates](.github/workflows/release-gates.yml) workflow runs the release's per-platform
 image checks on pull requests before a tag is pushed: it builds the linux/amd64 service image, runs

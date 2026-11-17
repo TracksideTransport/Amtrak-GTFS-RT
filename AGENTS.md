@@ -31,7 +31,7 @@ Target image, from `docs/one-container.md`:
 
 `feed-set.json` stays on `127.0.0.1:8090` in Compose. A generation that is missing any of the four files is not current. The previous complete generation keeps being served.
 
-Checked-in paths, until the split replaces them:
+Checked-in paths:
 
 | Path | Role |
 | --- | --- |
@@ -51,8 +51,9 @@ Checked-in paths, until the split replaces them:
 | `src/schedule.rs` | Debounced early track refreshes from `train`/`station` queries, queued as one file per flush under `tracks/early-refresh/` for the worker |
 | `src/fleet_trains.rs` | The `amtrak-fleet-trains/v1` train list; combined mode writes it to `{AMTRAK_OUTPUT_DIR}/tracks/fleet-trains.json` after each generation so the worker never polls the map |
 | `src/bin/amtrak_status.rs`, `src/bin/status/` | `amtrak-status` CLI (`--features status`) |
-| `browser-worker/` | The one Python/Playwright browser worker (`python -m worker`): the track source (`worker/tracks/`) and the notices source (`worker/notices/`) share one Chromium (`worker/browser.py`) and one listener on `127.0.0.1:8081`. Notices-only settings carry `NOTICES_`. `browser-worker/Dockerfile` builds the two standalone images (targets `track-fetcher`, `advisory-fetcher`) until #74 retires them. |
-| `scripts/` | Feed validation, container smoke, release controls |
+| `browser-worker/` | The one Python/Playwright browser worker (`python -m worker`): the track source (`worker/tracks/`) and the notices source (`worker/notices/`) share one Chromium (`worker/browser.py`) and one listener on `127.0.0.1:8081`. Notices-only settings carry `NOTICES_`. The root `Dockerfile` copies `worker/` into the one image; there is no standalone worker image. |
+| `scripts/` | Feed validation, container smoke, release controls. `verify-release-image.sh` checks the image's OCI labels, runtime config, and license notices |
+| `container/licenses/` | The project license and `README`, the index of every license notice in the image (`/licenses/README`) |
 | `Dockerfile`, `docker-compose.yml` | The one image (`tini`, the service, the browser worker and Chromium, the glibc Java runtime and validator, on `python:3.12-slim-bookworm`) and its one hardened Compose service, `amtrak-gtfs-rt`. |
 | `docs/one-container.md` | The one-container design and the PR plan. Follow it. |
 | `docs/rearchitecture.md` | Superseded three-container design. Kept for its research sections. |
@@ -71,7 +72,7 @@ HTTP contract. Do not add other feed URLs.
 | `/v1/generations/{id}/platform-addon.zip` | controlled | Overlay (`addon.txt` plus changed GTFS files) that rebuilds `static.zip` |
 | `/v1/generations/{id}/{trip-updates,vehicle-positions,alerts}.pb` | controlled | One GTFS-Realtime product, `application/x-protobuf` |
 
-`static.zip` remains the single file existing consumers load. It is the official download with the dangling-stop repair and platform stops applied. Consumers who want the pieces unzip `official-static.zip` and replace each name on the add-on's `files=` line. The Java validator stays in the vehicle-positions image until that open question is decided. Vehicle-positions still serves the public URLs. An optional Caddy proxy is the Compose `proxy` profile and is off by default. Do not assume nginx or Tailscale Serve is in front.
+`static.zip` remains the single file existing consumers load. It is the official download with the dangling-stop repair and platform stops applied. Consumers who want the pieces unzip `official-static.zip` and replace each name on the add-on's `files=` line. The Java validator is in the one image, and the one service serves the public URLs. An optional Caddy proxy is the Compose `proxy` profile and is off by default. Do not assume nginx or Tailscale Serve is in front.
 
 Controlled routes authorize the direct socket peer. An empty allowlist admits loopback only. `Forwarded` and `X-Forwarded-For` are ignored. A non-loopback bind with no `AMTRAK_ALLOWED_PEER_IPS` refuses to start. `403` is an unauthorized peer, `404` is an unknown generation or artifact, `503` is no current or fresh generation.
 
@@ -99,7 +100,7 @@ Download the official JAR from the MobilityData v8.0.1 release to `tools/gtfs-va
 
 ## Build, test, and lint
 
-CI (`.github/workflows/ci.yml`) builds and tests the Rust crate without ignored tests, runs the browser worker suite, builds the one image natively on amd64 and arm64 and runs `scripts/test-image-offline.sh` on it, runs `scripts/test-release-controls.sh`, and checks Compose/Bake config. Release-quality Rust changes also pass fmt and clippy.
+CI (`.github/workflows/ci.yml`) builds and tests the Rust crate without ignored tests, runs the browser worker suite, builds the one image natively on amd64 and arm64 and runs `scripts/test-image-offline.sh` and `scripts/verify-release-image.sh` on it, runs `scripts/test-release-controls.sh`, and checks Compose/Bake config. Release-quality Rust changes also pass fmt and clippy.
 
 ```bash
 cargo build --locked
@@ -188,8 +189,8 @@ Release workflow:
 
 - User-visible feed, config, or image changes go under `## [Unreleased]` in `CHANGELOG.md` (Keep a Changelog, semver).
 - `Cargo.toml` `version` is the released version. A release commit moves Unreleased into `## [X.Y.Z] - YYYY-MM-DD` and must pass `scripts/check-release-metadata.sh` (version, tag form `vX.Y.Z`, changelog heading, `AGPL-3.0-only`, and `THIRD_PARTY_LICENSES.html`).
-- Pushing a `v*.*.*` tag starts `.github/workflows/release.yml`. It publishes the scratch service image, `linux/amd64` and `linux/arm64`, to `ghcr.io/sohampatwardhan/amtrak-gtfs-rt`. It also publishes the `amtrak-gtfs-rt-track-fetcher` and `amtrak-gtfs-rt-advisory-fetcher` images. `docs/one-container.md` retires those, so that `amtrak-gtfs-rt` is the only package.
-- A release is complete only when the GitHub Release carries `image-release.txt` with the tag, revisions, manifest digest, and both platform digests. Until then the previous complete release stays the stable image. Current complete release is `v0.6.2`. Tags `v0.3.0`, `v0.6.0`, and `v0.6.1` never finished publication; do not deploy them or their partial images.
+- Pushing a `v*.*.*` tag starts `.github/workflows/release.yml`. It publishes one package, the one image, `linux/amd64` and `linux/arm64`, to `ghcr.io/sohampatwardhan/amtrak-gtfs-rt`, after each exact platform digest passes `scripts/verify-release-image.sh` (OCI labels, runtime config, and license notices), the smoke test, the SBOM check, and the fixable Critical and High Grype policy. The `amtrak-gtfs-rt-track-fetcher` and `amtrak-gtfs-rt-advisory-fetcher` packages are deprecated: they were last published at v0.7.1, no workflow builds them, and do not publish new versions. Their GHCR package descriptions, unlinking, and deletion are manual owner steps (README, "Deprecated packages"); deleting cannot be undone, so never do it from an agent.
+- A release is complete only when the GitHub Release carries `image-release.txt` with the tag, revisions, manifest digest, and both platform digests. Until then the previous complete release stays the stable image. Current complete release is `v0.7.1`. Tags `v0.3.0`, `v0.6.0`, and `v0.6.1` never finished publication; do not deploy them or their partial images.
 - Pull requests that touch image inputs (`Dockerfile`, `.dockerignore`, `container/`, any file in `src/`, `Cargo.toml`, `Cargo.lock`, or the smoke, scanner, and policy scripts) run `.github/workflows/release-gates.yml`: a linux/amd64 image build, `scripts/test-container.sh` (live Amtrak fetch), and the pinned Grype policy (no Critical or High match that has a fix; the zero-match policy ended with the scratch image, #71). arm64 is still checked only by the release itself.
 - `./scripts/validate-feeds.sh` runs on a schedule and on pushes that touch the pipeline, not on every pull request, so an Amtrak outage does not block unrelated work.
 

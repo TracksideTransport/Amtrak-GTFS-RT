@@ -1,7 +1,7 @@
 # Build context exclusions.
 #
-# The image build only consumes Cargo.toml, Cargo.lock, src/, the reviewed validator inputs under
-# container/, and the release license notices. These rules are defense-in-depth: an excluded file
+# The image build only consumes Cargo.toml, Cargo.lock, src/, browser-worker/worker/, the reviewed
+# validator inputs and license index under container/, and the release license notices. These rules are defense-in-depth: an excluded file
 # cannot be sent in the context or mounted at all, even if a future stage switches from a bind
 # mount to COPY. Keep this list conservative; it must not exclude those inputs.
 
@@ -59,9 +59,11 @@ id_ed25519
 *.swp
 *~
 
-# Browser worker: only browser-worker/worker/ is copied into an image
+# Browser worker: only browser-worker/worker/ is copied into the image
 /browser-worker/tests
 /browser-worker/spike
+/browser-worker/conftest.py
+/browser-worker/requirements.txt
 **/__pycache__
 **/*.pyc
 **/.pytest_cache
@@ -69,5 +71,3 @@ id_ed25519
 /.claude
 /.agents
 /.kiro
-/track-fetcher
-/advisory-fetcher

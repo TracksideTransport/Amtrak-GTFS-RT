@@ -74,7 +74,7 @@ services:
     networks: [amtrak]
 
   # Optional edge. Off unless started with `docker compose --profile proxy up`.
-  # Vehicle-positions keeps publishing 127.0.0.1:8090. This does not replace it.
+  # The service keeps publishing 127.0.0.1:8090. This does not replace it.
   proxy:
     profiles: ["proxy"]
     build:
