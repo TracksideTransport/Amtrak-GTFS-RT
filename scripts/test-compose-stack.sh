@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
-# Bring up the three-role Compose stack on a clean volume and prove it publishes.
-#
-# VehiclePositions advances /v1/feed-set.json only after TripUpdates and Alerts both
-# contribute, so one downloaded manifest proves all three roles start, share /data,
-# and agree on a generation. Fetches live Amtrak data. Logs survive failure.
+# Bring up the Compose stack (one hardened amtrak-gtfs-rt service) on a clean volume and prove
+# it publishes through 127.0.0.1:8090 under the Compose confinement: read-only root filesystem,
+# tmpfs /tmp and home, no capabilities, and the memory and PID limits. The browser worker must be
+# running inside it. Fetches live Amtrak data. Logs survive failure.
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
@@ -32,7 +31,7 @@ fi
 manifest="$report_dir/feed-set.json"
 start=$(date +%s)
 while :; do
-  for service in vehicle-positions trip-updates alerts; do
+  for service in amtrak-gtfs-rt; do
     state=$("${compose[@]}" ps -a --format '{{.State}}' "$service" 2>/dev/null || true)
     if [ "$state" = exited ] || [ "$state" = dead ]; then
       printf '%s exited before the first generation\n' "$service" >&2
@@ -77,3 +76,9 @@ print(f"generation {manifest['generation_id']}: static {manifest['static_version
 if counts["vehicle_positions"] == 0:
     sys.exit("generation published with no vehicle positions")
 PY
+
+# The browser worker runs inside the confined container.
+"${compose[@]}" top amtrak-gtfs-rt >"$report_dir/top.txt"
+grep -q 'python3 -m worker' "$report_dir/top.txt" \
+  || { echo "no browser worker inside the amtrak-gtfs-rt service" >&2; cat "$report_dir/top.txt" >&2; exit 1; }
+echo "browser worker running inside the confined service"

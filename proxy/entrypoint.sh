@@ -60,7 +60,7 @@ ${SITE} {
 		}
 	}
 ${TLS_DIRECTIVE}
-	reverse_proxy vehicle-positions:8080 {
+	reverse_proxy amtrak-gtfs-rt:8080 {
 		flush_interval -1
 		header_up If-None-Match {forward_inm}
 		header_up If-Modified-Since {http.request.header.If-Modified-Since}

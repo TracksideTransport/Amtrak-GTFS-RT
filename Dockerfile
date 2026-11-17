@@ -1,17 +1,25 @@
 # syntax=docker/dockerfile:1
 #
-# Hardened multi-stage image for the Amtrak GTFS-RT service.
+# The one Amtrak GTFS-RT image: the service, the browser worker with one headless Chromium, and the
+# validator's Java runtime (docs/one-container.md). linux/amd64 and linux/arm64.
 #
-# The final image is assembled from scratch. Build tools, package databases, shells, download
-# clients, and the source tree stay in disposable stages. The only executable application
-# artifacts copied forward are the locked Rust service and a byte-reproducible validator built
-# from the pinned MobilityData v8.0.1 source with reviewed dependency fixes.
+# Build tools, package caches, and the source tree stay in disposable stages. The final stage is a
+# slim Debian Python base, because headless Chromium needs glibc and its shared libraries. It holds:
 #
-# This file's last stage is `runtime`, so `docker build .` stays the scratch service image.
-# The browser worker's images are built from browser-worker/Dockerfile. They are not stages
-# here: Chromium must not be copied into `runtime`. From the repo root, build and
-# run both images with `docker compose up -d --build`, or build them without starting them
-# with `docker buildx bake`. See docker-compose.yml and docker-bake.hcl.
+#   tini                      PID 1. Reaps zombies and forwards signals.
+#   amtrak-gtfs-rt-service    static musl binary, combined mode, HTTP API on :8080. It starts the
+#                             browser worker only when AMTRAK_TRACKS_AMTRAK or AMTRAK_ADVISORIES is
+#                             on, restarts it with backoff, and stops it on SIGTERM.
+#   python -m worker          browser-worker/worker, on 127.0.0.1:8081 only.
+#   /opt/java                 a jlink'd glibc Java 17 runtime for the validator.
+#   the validator JAR         rebuilt from pinned MobilityData v8.0.1 source, digest-checked.
+#
+# `docker build .` builds it; the last stage is `runtime`. Run it with:
+#
+#   docker run -d -p 127.0.0.1:8090:8080 -v amtrak-data:/data amtrak-gtfs-rt:local
+#
+# The image binds 0.0.0.0:8080 and admits the container's default gateway (the published-port
+# path), so the -p binding decides who can reach it. See README "Container".
 
 ARG OCI_VERSION=dev
 ARG OCI_REVISION=unknown
@@ -33,8 +41,9 @@ RUN --mount=type=cache,target=/var/cache/apk,sharing=locked \
 
 WORKDIR /build
 
-# Build against musl and statically link the inherited native-tls/OpenSSL path. The only native
-# runtime dependency is then musl itself, shared with the Java runtime below.
+# Build against musl and statically link the inherited native-tls/OpenSSL path.
+# The Rust musl target links musl statically too, so the binary needs no loader and runs on the
+# glibc base below; the runtime stage checks that.
 RUN --mount=type=bind,source=Cargo.toml,target=Cargo.toml \
     --mount=type=bind,source=Cargo.lock,target=Cargo.lock \
     --mount=type=bind,source=src,target=src \
@@ -95,56 +104,142 @@ RUN --mount=type=cache,target=/root/.gradle \
       /out/gtfs-validator-v8.0.1-amtrak-hardened.1-cli.jar
 
 # -------------------------------------------------------------------------------------------------
-# Stage 3 — construct the package-manager-free runtime filesystem
+# Stage 3 — glibc Java 17 runtime for the validator
 # -------------------------------------------------------------------------------------------------
-FROM amazoncorretto:17-alpine-jdk@sha256:e1138bf0cca62e04692de650ffe8923f35c39fcb554458c7acd98efc2d135144 AS runtime-files
-
-USER 0
-
-# `jlink --strip-debug` strips native symbols with objcopy, which the Alpine JDK image lacks.
-# binutils stays in this disposable stage; nothing from it reaches the final image.
-RUN --mount=type=cache,target=/var/cache/apk,sharing=locked \
-    apk add binutils
-
-# Generate a Java 17 runtime containing only the modules the validator CLI actually loads, then
-# copy its musl/zlib closure and minimal identity/configuration files. BusyBox, apk, libssl, and
-# libcrypto are intentionally excluded from the final image.
+# Temurin's Linux binaries are built for an old glibc baseline, so the jlink'd runtime runs on the
+# Debian bookworm base below. The modules are the ones the validator CLI loads:
 #
 # java.sql is required: Gson initializes java.sql.Time while parsing GTFS dates, and without that
 # class the CLI's worker pool never writes report.json (measured on the official 8.0.1 jar).
-# java.desktop stays because notice introspection loads java.beans. Debug symbols are stripped.
-RUN set -eu; \
-    /usr/lib/jvm/java-17-amazon-corretto/bin/jlink \
-      --module-path /usr/lib/jvm/java-17-amazon-corretto/jmods \
+# java.desktop stays because notice introspection loads java.beans. Debug symbols are stripped,
+# which needs objcopy from binutils; binutils stays in this stage. java.desktop's X11 display
+# libraries are removed: the validator runs headless, and they would pull X libraries into the
+# image only to fail the ldd check below.
+# Pinned separately from the validator stage: this JDK's runtime ships in the image, so it tracks
+# Temurin's security releases (17.0.21 here; 17.0.19 has fixable High advisories), while the
+# validator stage keeps the JDK its reproducible JAR digest was measured with.
+FROM eclipse-temurin:17-jdk@sha256:5465815640e10433422217335e15a523a3e57021a1f2ae0fc3849380d237979f AS jre
+
+RUN apt-get update && \
+    apt-get install --yes --no-install-recommends binutils && \
+    rm -rf /var/lib/apt/lists/*
+
+RUN "${JAVA_HOME}/bin/jlink" \
+      --module-path "${JAVA_HOME}/jmods" \
       --add-modules java.base,java.desktop,java.logging,java.sql,java.xml \
       --no-man-pages \
       --no-header-files \
       --strip-debug \
       --compress=2 \
-      --output /runtime/opt/java; \
-    mkdir -p \
-      /runtime/opt/amtrak \
-      /runtime/usr/lib \
-      /runtime/lib \
-      /runtime/etc/ssl/certs \
-      /runtime/data \
-      /runtime/tmp; \
-    chmod 0555 /runtime/opt/amtrak; \
-    cp -a /lib/ld-musl-*.so.1 /runtime/lib/; \
-    cp -a /usr/lib/libz.so.1* /runtime/usr/lib/; \
-    cp /etc/ssl/certs/ca-certificates.crt /runtime/etc/ssl/certs/ca-certificates.crt; \
-    printf 'amtrak:x:10001:10001:Amtrak service:/data:/sbin/nologin\n' > /runtime/etc/passwd; \
-    printf 'amtrak:x:10001:\n' > /runtime/etc/group; \
-    chown 10001:10001 /runtime/data; \
-    chmod 1777 /runtime/tmp
+      --output /out/java && \
+    rm -f /out/java/lib/libawt_xawt.so /out/java/lib/libjawt.so /out/java/lib/libsplashscreen.so
 
 # -------------------------------------------------------------------------------------------------
-# Stage 4 — final scratch image
+# Stage 4 — the one runtime image
 # -------------------------------------------------------------------------------------------------
-FROM scratch AS runtime
+FROM python:3.12-slim-bookworm@sha256:935c3c5b12357a7e10caa9c1e6ca5692344d97cf229832ef584be2cec9fc03df AS runtime
 
 ARG OCI_VERSION
 ARG OCI_REVISION
+# 1.64.1 bundles Node 24.22.1. 1.64.0's Node 24.21.0 has fixable High advisories
+# (CVE-2026-105482, CVE-2026-105483, CVE-2026-106069, CVE-2026-111497).
+ARG PLAYWRIGHT_VERSION=1.64.1
+ARG CRYPTOGRAPHY_VERSION=50.0.2
+# `headless-shell` (default) installs only chromium-headless-shell. `full` also installs full
+# Chromium and Xvfb for BROWSER_MODE=xvfb-headful, the fallback if Amtrak blocks the headless
+# shell. It makes the image larger, so build it only when that mode is needed.
+ARG BROWSER_BUNDLE=headless-shell
+
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1
+
+# Debian 12 names from Playwright's chromium nativeDeps, a small Latin font set, CA certificates,
+# and tini. `playwright install --with-deps` would also pull Xvfb and large font packs that
+# headless-shell capture does not need. Upgrade first: the slim tag can lag Debian security fixes.
+RUN apt-get update \
+    && apt-get upgrade --yes --no-install-recommends \
+    && apt-get install --yes --no-install-recommends \
+        ca-certificates \
+        fonts-liberation \
+        libasound2 \
+        libatk-bridge2.0-0 \
+        libatk1.0-0 \
+        libatspi2.0-0 \
+        libcairo2 \
+        libcups2 \
+        libdbus-1-3 \
+        libdrm2 \
+        libfontconfig1 \
+        libfreetype6 \
+        libgbm1 \
+        libglib2.0-0 \
+        libnspr4 \
+        libnss3 \
+        libpango-1.0-0 \
+        libx11-6 \
+        libxcb1 \
+        libxcomposite1 \
+        libxdamage1 \
+        libxext6 \
+        libxfixes3 \
+        libxkbcommon0 \
+        libxrandr2 \
+        tini \
+    && if [ "${BROWSER_BUNDLE}" = "full" ]; then \
+        apt-get install --yes --no-install-recommends xvfb; \
+    elif [ "${BROWSER_BUNDLE}" != "headless-shell" ]; then \
+        echo "BROWSER_BUNDLE must be headless-shell or full" >&2; exit 1; \
+    fi \
+    && rm -rf /var/lib/apt/lists/*
+
+# `--only-shell` installs chromium-headless-shell and skips full Chromium; the `full` bundle
+# installs both and checks full Chromium's libraries too. pip is removed afterwards: nothing
+# installs packages at runtime.
+RUN pip install --no-cache-dir \
+        "playwright==${PLAYWRIGHT_VERSION}" \
+        "cryptography==${CRYPTOGRAPHY_VERSION}" \
+    && if [ "${BROWSER_BUNDLE}" = "full" ]; then \
+        python -m playwright install chromium \
+        && full="$(find /ms-playwright -type f -name chrome -path '*chrome-linux*' -print -quit)" \
+        && test -n "${full}" \
+        && ! ldd "${full}" | grep 'not found' \
+        && command -v Xvfb; \
+    else \
+        python -m playwright install --only-shell chromium; \
+    fi \
+    && shell="$(find /ms-playwright -type f \( -name chrome-headless-shell -o -name headless_shell \) -print -quit)" \
+    && test -n "${shell}" \
+    && ! ldd "${shell}" | grep 'not found' \
+    && chmod -R a+rX /ms-playwright \
+    && python -m pip uninstall --yes pip
+
+# One unprivileged user. Its home holds Chromium's profile and caches (a tmpfs under Compose's
+# read-only root filesystem). /data is the only volume; owning the mount point keeps a
+# first-mounted empty volume writable.
+RUN groupadd --gid 10001 amtrak \
+    && useradd --uid 10001 --gid 10001 --create-home --home-dir /home/amtrak \
+        --shell /usr/sbin/nologin amtrak \
+    && mkdir -p /data /opt/amtrak \
+    && chown 10001:10001 /data \
+    && chmod 0555 /opt/amtrak
+
+COPY --from=jre /out/java /opt/java
+# libjvm.so sits in lib/server and the JDK finds it through its own RPATH; ldd needs the hint.
+RUN ! LD_LIBRARY_PATH=/opt/java/lib/server ldd /opt/java/bin/java /opt/java/lib/*.so \
+        /opt/java/lib/server/*.so 2>/dev/null | grep 'not found' \
+    && /opt/java/bin/java -version
+
+COPY --from=builder --chmod=0555 /out/amtrak-gtfs-rt-service /usr/local/bin/amtrak-gtfs-rt-service
+RUN ldd /usr/local/bin/amtrak-gtfs-rt-service 2>&1 | grep -Eq 'statically linked|not a dynamic executable'
+COPY --from=validator --chmod=0444 \
+    /out/gtfs-validator-v8.0.1-amtrak-hardened.1-cli.jar \
+    /opt/amtrak/gtfs-validator-v8.0.1-amtrak-hardened.1-cli.jar
+COPY --chmod=0444 container/licenses/AGPL-3.0-only.txt /licenses/AGPL-3.0-only.txt
+COPY --chmod=0444 THIRD_PARTY_LICENSES.html /licenses/THIRD_PARTY_LICENSES.html
+COPY browser-worker/worker/ /app/worker/
 
 LABEL org.opencontainers.image.title="Amtrak GTFS-RT" \
       org.opencontainers.image.description="Validated static and realtime GTFS feeds for Amtrak" \
@@ -154,29 +249,27 @@ LABEL org.opencontainers.image.title="Amtrak GTFS-RT" \
       org.opencontainers.image.version="$OCI_VERSION" \
       org.opencontainers.image.revision="$OCI_REVISION"
 
-COPY --from=runtime-files /runtime/ /
-COPY --from=builder --chmod=0555 /out/amtrak-gtfs-rt-service /usr/local/bin/amtrak-gtfs-rt-service
-COPY --from=validator --chmod=0444 \
-    /out/gtfs-validator-v8.0.1-amtrak-hardened.1-cli.jar \
-    /opt/amtrak/gtfs-validator-v8.0.1-amtrak-hardened.1-cli.jar
-COPY --chmod=0444 container/licenses/AGPL-3.0-only.txt /licenses/AGPL-3.0-only.txt
-COPY --chmod=0444 THIRD_PARTY_LICENSES.html /licenses/THIRD_PARTY_LICENSES.html
-
+# D1 (docs/one-container.md): bind every interface inside the container and admit the default
+# gateway, which is where requests through a published port arrive from. The `-p` binding decides
+# who can reach the service. A host binary keeps the loopback default.
 ENV JAVA_HOME=/opt/java \
-    PATH=/opt/java/bin \
+    PATH=/opt/java/bin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+    HOME=/home/amtrak \
     SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \
     AMTRAK_OUTPUT_DIR=/data \
     AMTRAK_GTFS_VALIDATOR_JAR=/opt/amtrak/gtfs-validator-v8.0.1-amtrak-hardened.1-cli.jar \
-    AMTRAK_BIND_ADDR=127.0.0.1:8080
+    AMTRAK_BIND_ADDR=0.0.0.0:8080 \
+    AMTRAK_ALLOWED_PEER_IPS=gateway
 
 VOLUME ["/data"]
 EXPOSE 8080/tcp
 
 USER 10001:10001
+WORKDIR /data
 
-# The service performs its own bounded loopback HTTP probe, so the production image does not need
-# curl, a shell, or another general-purpose utility.
-HEALTHCHECK --interval=30s --timeout=5s --start-period=120s --retries=3 \
+# /livez must answer 200, and when the service runs the browser worker, the worker's listener must
+# answer. A worker past its restart budget has already made the service exit non-zero.
+HEALTHCHECK --interval=30s --timeout=10s --start-period=120s --retries=3 \
     CMD ["/usr/local/bin/amtrak-gtfs-rt-service", "--healthcheck"]
 
-ENTRYPOINT ["/usr/local/bin/amtrak-gtfs-rt-service"]
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/amtrak-gtfs-rt-service"]

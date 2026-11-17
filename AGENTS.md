@@ -47,11 +47,14 @@ Checked-in paths, until the split replaces them:
 | `src/orchestrator.rs` | Source selection, one coherent generation, polling |
 | `src/writer.rs` | Immutable generations on disk |
 | `src/serve.rs` | axum HTTP API, peer check, and readiness |
+| `src/worker.rs` | Starts the built-in browser worker when a browser source needs it, restarts it with backoff, gives up after 5 exits in a row, and stops its process group on `SIGTERM` |
+| `src/fleet_trains.rs` | The `amtrak-fleet-trains/v1` train list; combined mode writes it to `{AMTRAK_OUTPUT_DIR}/tracks/fleet-trains.json` after each generation so the worker never polls the map |
 | `src/bin/amtrak_status.rs`, `src/bin/status/` | `amtrak-status` CLI (`--features status`) |
 | `src/roles.rs`, `src/cohort.rs` | Three-container roles and their shared-volume snapshots. To be removed (`docs/one-container.md`). |
 | `browser-worker/` | The one Python/Playwright browser worker (`python -m worker`): the track source (`worker/tracks/`) and the notices source (`worker/notices/`) share one Chromium (`worker/browser.py`) and one listener on `127.0.0.1:8081`. Notices-only settings carry `NOTICES_`. `browser-worker/Dockerfile` builds the two standalone images (targets `track-fetcher`, `advisory-fetcher`) until #74 retires them. |
 | `scripts/` | Feed validation, container smoke, release controls |
-| `Dockerfile`, `trip-updates.Dockerfile`, `alerts.Dockerfile`, `docker-compose.yml` | Today's scratch service image, the two browser role images, and the three-service Compose stack. Target: one root `Dockerfile` and one Compose service. |
+| `Dockerfile`, `docker-compose.yml` | The one image (`tini`, the service, the browser worker and Chromium, the glibc Java runtime and validator, on `python:3.12-slim-bookworm`) and its one hardened Compose service, `amtrak-gtfs-rt`. |
+| `trip-updates.Dockerfile`, `alerts.Dockerfile` | The two browser role images of the three-container split. Unused by Compose; removed with the roles (#72). |
 | `docs/one-container.md` | The one-container design and the PR plan. Follow it. |
 | `docs/rearchitecture.md` | Superseded three-container design. Kept for its research sections. |
 
@@ -73,7 +76,7 @@ HTTP contract. Do not add other feed URLs.
 
 Controlled routes authorize the direct socket peer. An empty allowlist admits loopback only. `Forwarded` and `X-Forwarded-For` are ignored. A non-loopback bind with no `AMTRAK_ALLOWED_PEER_IPS` refuses to start. `403` is an unauthorized peer, `404` is an unknown generation or artifact, `503` is no current or fresh generation.
 
-Host defaults are bind `127.0.0.1:8080`, output `./out`, and validator JAR `./tools/gtfs-validator-v8.0.1-cli.jar`. The container defaults differ (`/data`, the hardened JAR, still loopback). The full variable table is in the README section "Configuration (environment variables)".
+Host defaults are bind `127.0.0.1:8080`, output `./out`, and validator JAR `./tools/gtfs-validator-v8.0.1-cli.jar`. The container defaults differ: `/data`, the hardened JAR, bind `0.0.0.0:8080`, and `AMTRAK_ALLOWED_PEER_IPS=gateway`, a keyword that resolves at startup to the container's IPv4 default gateway (the published-port path). With no default route it admits nobody. The full variable table is in the README section "Configuration (environment variables)".
 
 ## Setup
 
@@ -123,13 +126,13 @@ cargo run --features status --bin amtrak-status -- station NYP --limit 10
 cargo run --features status --bin amtrak-status -- train 167
 ```
 
-Today's Compose file builds the three role containers (`vehicle-positions`, `trip-updates`, `alerts`), turns advisories and tracks on, and publishes only `vehicle-positions` on `127.0.0.1:8090`:
+Compose builds and runs one service, `amtrak-gtfs-rt`, with every source on, the hardening defaults, and `127.0.0.1:8090` published:
 
 ```bash
 docker compose up -d --build
 ```
 
-The service image alone, advisories off, is `docker build --tag amtrak-gtfs-rt:local .`. Once the one-container plan lands, Compose runs a single `amtrak-gtfs-rt` service on that same host port, and flags such as `AMTRAK_TRACKS=off` and `AMTRAK_ADVISORIES=off` turn sources off inside it.
+The image alone is `docker build --tag amtrak-gtfs-rt:local .` and `docker run -d -p 127.0.0.1:8090:8080 -v amtrak-data:/data amtrak-gtfs-rt:local`. Flags such as `AMTRAK_TRACKS=off` and `AMTRAK_ADVISORIES=off` turn sources off inside it; with `AMTRAK_TRACKS_AMTRAK=off` and `AMTRAK_ADVISORIES=off` no Python or Chromium process runs.
 
 Do not start Compose or the HTTP server in order to run the unit tests. They are offline.
 
@@ -188,7 +191,7 @@ Release workflow:
 - `Cargo.toml` `version` is the released version. A release commit moves Unreleased into `## [X.Y.Z] - YYYY-MM-DD` and must pass `scripts/check-release-metadata.sh` (version, tag form `vX.Y.Z`, changelog heading, `AGPL-3.0-only`, and `THIRD_PARTY_LICENSES.html`).
 - Pushing a `v*.*.*` tag starts `.github/workflows/release.yml`. It publishes the scratch service image, `linux/amd64` and `linux/arm64`, to `ghcr.io/sohampatwardhan/amtrak-gtfs-rt`. It also publishes the `amtrak-gtfs-rt-track-fetcher` and `amtrak-gtfs-rt-advisory-fetcher` images. `docs/one-container.md` retires those, so that `amtrak-gtfs-rt` is the only package.
 - A release is complete only when the GitHub Release carries `image-release.txt` with the tag, revisions, manifest digest, and both platform digests. Until then the previous complete release stays the stable image. Current complete release is `v0.6.2`. Tags `v0.3.0`, `v0.6.0`, and `v0.6.1` never finished publication; do not deploy them or their partial images.
-- Pull requests that touch image inputs (`Dockerfile`, `.dockerignore`, `container/`, any file in `src/`, `Cargo.toml`, `Cargo.lock`, or the smoke, scanner, and policy scripts) run `.github/workflows/release-gates.yml`: a linux/amd64 image build, `scripts/test-container.sh` (live Amtrak fetch), and the pinned Grype zero-match policy. arm64 is still checked only by the release itself.
+- Pull requests that touch image inputs (`Dockerfile`, `.dockerignore`, `container/`, any file in `src/`, `Cargo.toml`, `Cargo.lock`, or the smoke, scanner, and policy scripts) run `.github/workflows/release-gates.yml`: a linux/amd64 image build, `scripts/test-container.sh` (live Amtrak fetch), and the pinned Grype policy (no Critical or High match that has a fix; the zero-match policy ended with the scratch image, #71). arm64 is still checked only by the release itself.
 - `./scripts/validate-feeds.sh` runs on a schedule and on pushes that touch the pipeline, not on every pull request, so an Amtrak outage does not block unrelated work.
 
 ## What agents must not do

@@ -18,6 +18,7 @@ pub mod static_addon;
 pub mod static_augment;
 pub mod static_gtfs;
 pub mod static_repair;
+pub mod worker;
 pub mod writer;
 
 use crate::config::Config;
@@ -42,7 +43,12 @@ use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::task::JoinSet;
+use tokio::sync::watch;
+use tokio::task::{JoinHandle, JoinSet};
+
+/// How long shutdown waits for the browser worker before abandoning it. Inside Docker's default
+/// 10-second `docker stop` grace period, with the worker's own `SIGTERM` grace inside this.
+const WORKER_STOP_BUDGET: Duration = Duration::from_secs(8);
 
 /// One long-lived activity owned by the service supervisor.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -50,6 +56,7 @@ pub enum ServiceActivity {
     Poller,
     StaticRefresh,
     Http,
+    BrowserWorker,
     Supervisor,
 }
 
@@ -59,6 +66,7 @@ impl ServiceActivity {
             Self::Poller => "poller",
             Self::StaticRefresh => "static_refresh",
             Self::Http => "http",
+            Self::BrowserWorker => "browser_worker",
             Self::Supervisor => "supervisor",
         }
     }
@@ -72,14 +80,14 @@ pub struct ServiceError {
 }
 
 impl ServiceError {
-    fn stopped(activity: ServiceActivity) -> Self {
+    pub(crate) fn stopped(activity: ServiceActivity) -> Self {
         Self {
             activity,
             outcome: "stopped",
         }
     }
 
-    fn failed(activity: ServiceActivity) -> Self {
+    pub(crate) fn failed(activity: ServiceActivity) -> Self {
         Self {
             activity,
             outcome: "failed",
@@ -111,6 +119,50 @@ where
     S: Future<Output = Result<(), ServiceError>> + Send + 'static,
     H: Future<Output = Result<(), ServiceError>> + Send + 'static,
 {
+    supervise_with(
+        poller,
+        static_refresh,
+        http,
+        None::<WorkerActivity<std::future::Pending<Result<(), ServiceError>>>>,
+        std::future::pending(),
+    )
+    .await
+}
+
+type ActivityHandle = JoinHandle<Result<(), ServiceError>>;
+
+/// The optional browser-worker activity and the switch that asks it to stop.
+pub struct WorkerActivity<W> {
+    /// The worker supervisor, usually [`worker::run_worker`].
+    pub run: W,
+    /// Set to `true` to stop the worker gracefully.
+    pub stop: watch::Sender<bool>,
+}
+
+/// [`supervise`] plus an optional browser worker and a shutdown signal.
+///
+/// The worker is one more activity in the failure domain: when it returns (its restart budget is
+/// spent), the service stops. When `shutdown` completes, the worker is stopped first, then the
+/// other activities are aborted, and the result is `Ok(())`. On any failure the worker is also
+/// stopped before the others are aborted, so no Chromium outlives the service.
+///
+/// # Errors
+///
+/// Returns the closed [`ServiceError`] of the first activity that stopped, failed, or panicked.
+pub async fn supervise_with<P, S, H, W, T>(
+    poller: P,
+    static_refresh: S,
+    http: H,
+    worker: Option<WorkerActivity<W>>,
+    shutdown: T,
+) -> Result<(), ServiceError>
+where
+    P: Future<Output = Result<(), ServiceError>> + Send + 'static,
+    S: Future<Output = Result<(), ServiceError>> + Send + 'static,
+    H: Future<Output = Result<(), ServiceError>> + Send + 'static,
+    W: Future<Output = Result<(), ServiceError>> + Send + 'static,
+    T: Future<Output = ()>,
+{
     let mut tasks = JoinSet::new();
     let mut activities = HashMap::new();
     activities.insert(tasks.spawn(poller).id(), ServiceActivity::Poller);
@@ -119,26 +171,85 @@ where
         ServiceActivity::StaticRefresh,
     );
     activities.insert(tasks.spawn(http).id(), ServiceActivity::Http);
+    let mut worker: Option<(ActivityHandle, watch::Sender<bool>)> =
+        worker.map(|activity| (tokio::spawn(activity.run), activity.stop));
 
-    let failure = match tasks.join_next_with_id().await {
-        Some(Ok((id, Ok(())))) => ServiceError::stopped(
-            activities
-                .get(&id)
-                .copied()
-                .unwrap_or(ServiceActivity::Supervisor),
-        ),
-        Some(Ok((_id, Err(error)))) => error,
-        Some(Err(error)) => ServiceError::failed(
-            activities
-                .get(&error.id())
-                .copied()
-                .unwrap_or(ServiceActivity::Supervisor),
-        ),
-        None => ServiceError::failed(ServiceActivity::Supervisor),
+    let mut worker_finished = false;
+    let failure = tokio::select! {
+        joined = tasks.join_next_with_id() => Some(match joined {
+            Some(Ok((id, Ok(())))) => ServiceError::stopped(
+                activities
+                    .get(&id)
+                    .copied()
+                    .unwrap_or(ServiceActivity::Supervisor),
+            ),
+            Some(Ok((_id, Err(error)))) => error,
+            Some(Err(error)) => ServiceError::failed(
+                activities
+                    .get(&error.id())
+                    .copied()
+                    .unwrap_or(ServiceActivity::Supervisor),
+            ),
+            None => ServiceError::failed(ServiceActivity::Supervisor),
+        }),
+        result = async {
+            match worker.as_mut() {
+                Some((handle, _)) => handle.await,
+                None => std::future::pending().await,
+            }
+        } => {
+            worker_finished = true;
+            Some(match result {
+                Ok(Ok(())) => ServiceError::stopped(ServiceActivity::BrowserWorker),
+                Ok(Err(error)) => error,
+                Err(_) => ServiceError::failed(ServiceActivity::BrowserWorker),
+            })
+        }
+        () = shutdown => {
+            tracing::info!("shutdown requested; stopping");
+            None
+        }
     };
+    if let Some((mut handle, stop)) = worker {
+        if !worker_finished {
+            let _ = stop.send(true);
+            if tokio::time::timeout(WORKER_STOP_BUDGET, &mut handle)
+                .await
+                .is_err()
+            {
+                handle.abort();
+            }
+        }
+    }
     tasks.abort_all();
     while tasks.join_next().await.is_some() {}
-    Err(failure)
+    match failure {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
+}
+
+/// Completes on `SIGTERM` or `SIGINT`.
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        match signal(SignalKind::terminate()) {
+            Ok(mut terminate) => {
+                tokio::select! {
+                    _ = terminate.recv() => {}
+                    _ = tokio::signal::ctrl_c() => {}
+                }
+            }
+            Err(_) => {
+                let _ = tokio::signal::ctrl_c().await;
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
 }
 
 struct CapitalCorridorFiltered<S>(S);
@@ -177,25 +288,60 @@ async fn initial_snapshots(
     Ok(bootstrap_static(static_url, validator, platforms).await?)
 }
 
+/// `--healthcheck`: `/livez` must answer `200`, and when the service runs the built-in browser
+/// worker, the worker's listener must answer HTTP at all. Any status counts for the worker: its
+/// `/healthz` turns `503` while Amtrak rejects polls, and that is a source outage the service
+/// already fails open on, not a dead process. A worker past its restart budget has already
+/// stopped the service.
 fn container_healthcheck() -> std::io::Result<()> {
     let bind_address =
         std::env::var("AMTRAK_BIND_ADDR").unwrap_or_else(|_| "127.0.0.1:8080".to_string());
     let address = healthcheck_address(&bind_address)?;
+    let status = http_status_line(address, "/livez")?;
+    if !(status.starts_with(b"HTTP/1.1 200 ") || status.starts_with(b"HTTP/1.0 200 ")) {
+        return Err(std::io::Error::other("/livez did not return HTTP 200"));
+    }
+    if embedded_worker_plan().is_some() {
+        let worker = worker_address()?;
+        let status = http_status_line(worker, "/healthz")
+            .map_err(|_| std::io::Error::other("the browser worker is not answering"))?;
+        if !status.starts_with(b"HTTP/1.") {
+            return Err(std::io::Error::other("the browser worker is not answering"));
+        }
+    }
+    Ok(())
+}
+
+/// First bytes of the response to `GET path` on `address`, with a 4-second bound on each step.
+fn http_status_line(address: SocketAddr, path: &str) -> std::io::Result<Vec<u8>> {
     let timeout = Duration::from_secs(4);
     let mut stream = TcpStream::connect_timeout(&address, timeout)?;
     stream.set_read_timeout(Some(timeout))?;
     stream.set_write_timeout(Some(timeout))?;
-    stream.write_all(b"GET /livez HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")?;
-
+    stream.write_all(
+        format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n").as_bytes(),
+    )?;
     let mut response = [0_u8; 64];
     let bytes_read = stream.read(&mut response)?;
-    if response[..bytes_read].starts_with(b"HTTP/1.1 200 ")
-        || response[..bytes_read].starts_with(b"HTTP/1.0 200 ")
-    {
-        Ok(())
-    } else {
-        Err(std::io::Error::other("/livez did not return HTTP 200"))
-    }
+    Ok(response[..bytes_read].to_vec())
+}
+
+/// The built-in worker this process starts, from the same environment `run_combined` reads.
+fn embedded_worker_plan() -> Option<worker::WorkerPlan> {
+    let tracks = crate::config::TrackConfig::from_env().ok()?;
+    let advisories = crate::config::AdvisoryConfig::from_env().ok()?;
+    worker::WorkerPlan::from_configs(
+        &tracks,
+        &advisories,
+        std::path::Path::new(worker::DEFAULT_WORKER_ROOT),
+    )
+}
+
+fn worker_address() -> std::io::Result<SocketAddr> {
+    crate::config::WORKER_BASE_URL
+        .trim_start_matches("http://")
+        .parse()
+        .map_err(|_| std::io::Error::other("invalid built-in worker address"))
 }
 
 /// Shared track state: the store the board refresher fills, the platform table the static feed
@@ -318,6 +464,20 @@ pub async fn run_combined() -> Result<(), Box<dyn std::error::Error + Send + Syn
     // worker, and fail open, so a missing worker never risks generation publication. Their
     // flags (`AMTRAK_ADVISORIES`, `AMTRAK_TRACKS`, `AMTRAK_TRACKS_AMTRAK`, ...) turn them off.
     let advisory_config = crate::config::AdvisoryConfig::from_env()?;
+    // The built-in browser worker runs only for the browser sources that read it, and only when
+    // its package is installed (the container image). Elsewhere those sources fail open.
+    let worker_root = std::path::Path::new(worker::DEFAULT_WORKER_ROOT);
+    let fleet_trains_file = config.output_dir.join("tracks").join("fleet-trains.json");
+    let worker_plan =
+        worker::WorkerPlan::from_configs(&track_config, &advisory_config, worker_root)
+            .map(|plan| plan.with_fleet_trains_file(fleet_trains_file.clone()));
+    if worker_plan.is_none()
+        && worker::WorkerPlan::wanted(&track_config, &advisory_config, worker_root).is_some()
+    {
+        tracing::warn!(
+            "the browser worker is not installed here; Amtrak track numbers and notices fail open"
+        );
+    }
     let advisories = advisory_config.enabled.then_some(advisory_config);
     let banner_advisories = advisories.clone();
     if track_config.enabled && track_config.amtrak_enabled && track_config.amtrak_url.is_none() {
@@ -355,8 +515,16 @@ pub async fn run_combined() -> Result<(), Box<dyn std::error::Error + Send + Syn
     };
     let sources: Arc<Vec<Box<dyn RtSource>>> = Arc::new(vec![source]);
     let base_url = endpoints::base_url(config.bind_addr, config.public_url.as_deref());
+    // The worker's track poller reads the train list from this file instead of polling the map.
+    let train_list = worker_plan
+        .as_ref()
+        .is_some_and(|plan| plan.tracks)
+        .then_some(fleet_trains_file);
     let committer: Arc<dyn GenerationCommitter> = Arc::new(AnnounceFirstGeneration::new(
-        StoreGenerationCommitter::new(config.output_dir.clone(), store.clone()),
+        fleet_trains::WithFleetTrainsFile::new(
+            StoreGenerationCommitter::new(config.output_dir.clone(), store.clone()),
+            train_list,
+        ),
         base_url.clone(),
     ));
     let banner = endpoints::startup_banner(
@@ -381,7 +549,19 @@ pub async fn run_combined() -> Result<(), Box<dyn std::error::Error + Send + Syn
     let poll_interval = config.poll_interval;
     let static_url = config.static_url;
     let static_refresh_interval = config.static_refresh_interval;
-    supervise(
+    let worker = worker_plan.map(|plan| {
+        tracing::info!(sources = plan.describe(), "starting the browser worker");
+        let (stop, stopped) = watch::channel(false);
+        WorkerActivity {
+            run: worker::run_worker(
+                move || plan.command(),
+                worker::RestartPolicy::default(),
+                stopped,
+            ),
+            stop,
+        }
+    });
+    supervise_with(
         async move {
             orchestrator::run_poller(sources, poller_snapshots, committer, poll_interval).await;
             Ok(())
@@ -405,6 +585,8 @@ pub async fn run_combined() -> Result<(), Box<dyn std::error::Error + Send + Syn
             .await
             .map_err(|_| ServiceError::failed(ServiceActivity::Http))
         },
+        worker,
+        shutdown_signal(),
     )
     .await?;
     Ok(())
@@ -572,6 +754,203 @@ mod tests {
         assert_eq!(result, Err(ServiceError::failed(ServiceActivity::Poller)));
         assert!(refresh_cancelled.load(Ordering::SeqCst));
         assert!(http_cancelled.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn a_spent_worker_budget_fails_the_service_and_cancels_siblings() {
+        let dropped = [
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+        ];
+        let (stop, _stopped) = watch::channel(false);
+        let result = supervise_with(
+            activity_future(false, Ok(()), dropped[0].clone()),
+            activity_future(false, Ok(()), dropped[1].clone()),
+            activity_future(false, Ok(()), dropped[2].clone()),
+            Some(WorkerActivity {
+                run: async { Err(ServiceError::failed(ServiceActivity::BrowserWorker)) },
+                stop,
+            }),
+            std::future::pending(),
+        )
+        .await;
+        assert_eq!(
+            result,
+            Err(ServiceError::failed(ServiceActivity::BrowserWorker))
+        );
+        assert!(dropped.iter().all(|flag| flag.load(Ordering::SeqCst)));
+    }
+
+    #[tokio::test]
+    async fn shutdown_stops_the_worker_before_the_other_activities() {
+        let dropped = Arc::new(AtomicBool::new(false));
+        let worker_saw_service_running = Arc::new(AtomicBool::new(false));
+        let (stop, mut stopped) = watch::channel(false);
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        let poller_dropped = dropped.clone();
+        let observed = worker_saw_service_running.clone();
+        let supervisor = tokio::spawn(supervise_with(
+            activity_future(false, Ok(()), poller_dropped),
+            activity_future(false, Ok(()), Arc::new(AtomicBool::new(false))),
+            activity_future(false, Ok(()), Arc::new(AtomicBool::new(false))),
+            Some(WorkerActivity {
+                run: async move {
+                    let _ = stopped.changed().await;
+                    // The worker is asked to stop while the service's activities still run.
+                    observed.store(!dropped.load(Ordering::SeqCst), Ordering::SeqCst);
+                    Ok(())
+                },
+                stop,
+            }),
+            async {
+                let _ = shutdown_rx.await;
+            },
+        ));
+        shutdown_tx.send(()).unwrap();
+        let result = tokio::time::timeout(Duration::from_secs(5), supervisor)
+            .await
+            .expect("shutdown finished within the budget")
+            .unwrap();
+        assert_eq!(result, Ok(()));
+        assert!(worker_saw_service_running.load(Ordering::SeqCst));
+    }
+
+    /// The API answers from the warm generation while the worker is down and backing off.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn http_answers_while_the_browser_worker_is_down() {
+        let output = output_directory("worker-down");
+        let store = GenerationStore::open(&output).await.unwrap();
+        let snapshot: Arc<StaticSnapshot> = recover_static(static_zip(), "static".into())
+            .unwrap()
+            .active()
+            .await;
+        let generated_at = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let feed = encoded_feed(generated_at, &snapshot.version);
+        GenerationPublisher::publish(
+            &output,
+            &store,
+            ValidatedGeneration {
+                static_snapshot: snapshot,
+                generated_at_unix: generated_at,
+                source_name: "fixture",
+                trip_updates: feed.clone(),
+                vehicle_positions: feed.clone(),
+                alerts: feed,
+                entity_counts: EntityCounts::default(),
+            },
+        )
+        .await
+        .unwrap();
+        let app = serve::router(serve::AppState::new(
+            store,
+            crate::config::AccessPolicy::from_allowed_ips_for_test(Default::default()),
+            Duration::from_secs(300),
+            Arc::new(serve::SystemClock),
+        ));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (stop, stopped) = watch::channel(false);
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        let supervisor = tokio::spawn(supervise_with(
+            activity_future(false, Ok(()), Arc::new(AtomicBool::new(false))),
+            activity_future(false, Ok(()), Arc::new(AtomicBool::new(false))),
+            async move {
+                axum::serve(
+                    listener,
+                    app.into_make_service_with_connect_info::<SocketAddr>(),
+                )
+                .await
+                .map_err(|_| ServiceError::failed(ServiceActivity::Http))
+            },
+            Some(WorkerActivity {
+                run: worker::run_worker(
+                    || tokio::process::Command::new("/nonexistent/browser-worker"),
+                    worker::RestartPolicy {
+                        initial_backoff: Duration::from_secs(60),
+                        ..worker::RestartPolicy::default()
+                    },
+                    stopped,
+                ),
+                stop,
+            }),
+            async {
+                let _ = shutdown_rx.await;
+            },
+        ));
+        for path in ["/livez", "/readyz", "/v1/feed-set.json"] {
+            let status = tokio::task::spawn_blocking(move || http_status_line(address, path))
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(status.starts_with(b"HTTP/1.1 200 "), "{path}");
+        }
+        shutdown_tx.send(()).unwrap();
+        assert_eq!(supervisor.await.unwrap(), Ok(()));
+        std::fs::remove_dir_all(output).unwrap();
+    }
+
+    struct RefuseToPublish;
+
+    #[async_trait]
+    impl GenerationCommitter for RefuseToPublish {
+        async fn publish(
+            &self,
+            _candidate: ValidatedGeneration,
+        ) -> Result<Arc<crate::writer::PublishedGeneration>, crate::writer::PublishError> {
+            Err(crate::writer::PublishError("fixture refusal".into()))
+        }
+    }
+
+    /// The worker's train list follows published generations only, and replaces one file.
+    #[tokio::test]
+    async fn the_fleet_train_list_is_replaced_after_each_published_generation() {
+        let output = output_directory("fleet-trains");
+        let store = GenerationStore::open(&output).await.unwrap();
+        let snapshot: Arc<StaticSnapshot> = recover_static(static_zip(), "static".into())
+            .unwrap()
+            .active()
+            .await;
+        let list = output.join("tracks").join("fleet-trains.json");
+        let candidate = |generated_at: u64| {
+            let feed = encoded_feed(generated_at, &snapshot.version);
+            ValidatedGeneration {
+                static_snapshot: snapshot.clone(),
+                generated_at_unix: generated_at,
+                source_name: "fixture",
+                trip_updates: feed.clone(),
+                vehicle_positions: feed.clone(),
+                alerts: feed,
+                entity_counts: EntityCounts::default(),
+            }
+        };
+
+        let refused = fleet_trains::WithFleetTrainsFile::new(RefuseToPublish, Some(list.clone()));
+        assert!(refused.publish(candidate(1_786_588_800)).await.is_err());
+        assert!(
+            !list.exists(),
+            "a refused generation must not move the list"
+        );
+
+        let committer = fleet_trains::WithFleetTrainsFile::new(
+            StoreGenerationCommitter::new(output.clone(), store.clone()),
+            Some(list.clone()),
+        );
+        committer.publish(candidate(1_786_588_801)).await.unwrap();
+        committer.publish(candidate(1_786_588_802)).await.unwrap();
+        let body: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&list).unwrap()).unwrap();
+        assert_eq!(body["schema"], "amtrak-fleet-trains/v1");
+        let names: Vec<String> = std::fs::read_dir(list.parent().unwrap())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, vec!["fleet-trains.json".to_string()]);
+        std::fs::remove_dir_all(output).unwrap();
     }
 
     #[tokio::test]

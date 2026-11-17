@@ -1,12 +1,20 @@
-//! The train list the TripUpdates track poller reads instead of polling Amtrak.
+//! The train list the browser worker's track poller reads instead of polling Amtrak.
 //!
-//! VehiclePositions is the only process that fetches `getTrainsData`. It writes this list
-//! next to each fleet snapshot so the embedded track poller can pick trains near a stop
-//! without a second map poll. Only matched trains appear: track stamps apply only to
-//! matched trip updates.
+//! The service is the only process that fetches `getTrainsData`. After each published
+//! generation it writes this list, so the worker can pick trains near a stop without a second
+//! map poll. Only matched trains appear: track stamps apply only to matched trip updates.
+//!
+//! In combined mode the list is one file, replaced atomically ([`WithFleetTrainsFile`]). A
+//! failed write is logged and never fails the generation.
 
+use crate::orchestrator::{GenerationCommitter, ValidatedGeneration};
+use crate::writer::{PublishError, PublishedGeneration};
+use async_trait::async_trait;
 use gtfs_realtime::FeedMessage;
+use prost::Message;
 use serde_json::{json, Value};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 /// Builds `trains.json` from matched trip updates.
 ///
@@ -53,6 +61,67 @@ pub fn train_list(
         }));
     }
     json!({ "schema": "amtrak-fleet-trains/v1", "trains": trains })
+}
+
+/// `trains.json` bytes for one validated generation.
+pub fn generation_train_list(candidate: &ValidatedGeneration) -> Vec<u8> {
+    let trip_updates = FeedMessage::decode(candidate.trip_updates.as_ref()).unwrap_or_default();
+    let gtfs = &candidate.static_snapshot.parsed;
+    train_list(&trip_updates, |trip_id| {
+        gtfs.trips.get(trip_id)?.trip_short_name.clone()
+    })
+    .to_string()
+    .into_bytes()
+}
+
+/// Publishes through `inner`, then replaces `path` (when set) with that generation's train list.
+///
+/// The file is written only after the generation is published, through a temporary file and a
+/// rename, so the worker never reads a partial list. A write failure is logged and the
+/// generation still counts as published.
+pub struct WithFleetTrainsFile<C> {
+    inner: C,
+    path: Option<PathBuf>,
+}
+
+impl<C> WithFleetTrainsFile<C> {
+    /// Wraps `inner`; the list is written to `path`. `None` publishes through `inner` only.
+    pub fn new(inner: C, path: Option<PathBuf>) -> Self {
+        Self { inner, path }
+    }
+}
+
+#[async_trait]
+impl<C: GenerationCommitter> GenerationCommitter for WithFleetTrainsFile<C> {
+    async fn publish(
+        &self,
+        candidate: ValidatedGeneration,
+    ) -> Result<Arc<PublishedGeneration>, PublishError> {
+        let Some(path) = self.path.clone() else {
+            return self.inner.publish(candidate).await;
+        };
+        let list = generation_train_list(&candidate);
+        let published = self.inner.publish(candidate).await?;
+        let written = tokio::task::spawn_blocking(move || replace_file(&path, &list)).await;
+        if !matches!(written, Ok(Ok(()))) {
+            tracing::warn!(
+                "fleet train list was not written; Amtrak track polls keep the last one"
+            );
+        }
+        Ok(published)
+    }
+}
+
+fn replace_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    std::fs::create_dir_all(parent)?;
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("fleet-trains.json");
+    let temporary = parent.join(format!(".{name}.tmp"));
+    std::fs::write(&temporary, bytes)?;
+    std::fs::rename(&temporary, path)
 }
 
 /// `20261107` becomes `2026-11-07`; anything else is rejected.

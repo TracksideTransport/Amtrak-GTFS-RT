@@ -294,12 +294,7 @@ pub fn write_early_hint(
 
 /// `trains.json` for the track poller, so TripUpdates never polls `getTrainsData`.
 fn fleet_train_list(candidate: &ValidatedGeneration) -> Vec<u8> {
-    let trip_updates = FeedMessage::decode(candidate.trip_updates.as_ref()).unwrap_or_default();
-    let gtfs = &candidate.static_snapshot.parsed;
-    let list = crate::fleet_trains::train_list(&trip_updates, |trip_id| {
-        gtfs.trips.get(trip_id)?.trip_short_name.clone()
-    });
-    list.to_string().into_bytes()
+    crate::fleet_trains::generation_train_list(candidate)
 }
 
 struct FleetCommitter {

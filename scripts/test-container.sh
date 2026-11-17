@@ -5,6 +5,11 @@
 # WHAT it proves (one bounded run against a real Amtrak fetch):
 #   * the image builds a working service that reaches Docker "healthy", serves a coherent
 #     feed generation, and exposes four independently decodable artifacts;
+#   * with the image's own network defaults (0.0.0.0 bind, `gateway` allowlist), the feed set is
+#     reachable through a host-loopback published port with no other settings (D1);
+#   * the service supervises the built-in browser worker: it runs while a browser source is on,
+#     is restarted when killed, stops the service after repeated failures, and never runs with
+#     both browser sources off; `docker stop` exits cleanly inside the grace period;
 #   * direct-peer authorization admits only allow-listed socket peers and ignores forwarding
 #     headers, a wildcard bind without a policy refuses to start, and a non-writable /data
 #     refuses to start;
@@ -172,7 +177,8 @@ pass "network $NET ($SUBNET, gw $GATEWAY) and volume $VOL created"
 # Fail-closed configuration guards. Each must exit *before* opening a listener; run_guarded bounds
 # the wait so a regression that wrongly starts serving is reported, never left to hang the harness.
 step "wildcard bind without a peer policy must refuse to start"
-if run_guarded --network "$NET" -e AMTRAK_BIND_ADDR=0.0.0.0:8080 "$IMAGE"; then
+# The image defaults to AMTRAK_ALLOWED_PEER_IPS=gateway; clearing it restores the host rule.
+if run_guarded --network "$NET" -e AMTRAK_BIND_ADDR=0.0.0.0:8080 -e AMTRAK_ALLOWED_PEER_IPS= "$IMAGE"; then
   pass "startup rejected 0.0.0.0 bind without AMTRAK_ALLOWED_PEER_IPS"
 else
   guard_status=$?
@@ -216,14 +222,13 @@ else
 fi
 
 # -----------------------------------------------------------------------------------------------
-step "start the service (wildcard bind, exact allowlist, host-loopback publication)"
-# Allowlist admits the bridge gateway (host-published path) and the allow-listed peer container.
-# The port is published only on 127.0.0.1 so the feed boundary is never exposed on all host
-# interfaces.
+step "start the service (image bind default, gateway keyword plus one peer, host-loopback publication)"
+# The image binds 0.0.0.0:8080. `gateway` resolves to this network's gateway ($GATEWAY), the
+# host-published path, and the allow-listed peer container is added beside it. The port is
+# published only on 127.0.0.1 so the feed boundary is never exposed on all host interfaces.
 docker run -d --name "$SVC" --network "$NET" \
   -p "127.0.0.1:${HOST_PORT}:8080" \
-  -e AMTRAK_BIND_ADDR=0.0.0.0:8080 \
-  -e "AMTRAK_ALLOWED_PEER_IPS=${GATEWAY},${ALLOW_IP}" \
+  -e "AMTRAK_ALLOWED_PEER_IPS=gateway,${ALLOW_IP}" \
   -v "$VOL":/data \
   "$IMAGE" >/dev/null
 SVC_IP="$(docker inspect -f "{{(index .NetworkSettings.Networks \"$NET\").IPAddress}}" "$SVC")"
@@ -359,19 +364,69 @@ code="$(peer_status "$DENY_IP" "${DENY_PEER}-2" "http://${SVC_IP}:8080/v1/feed-s
   -H "X-Forwarded-For: ${ALLOW_IP}" -H "Forwarded: for=${GATEWAY}" -H "X-Real-IP: ${ALLOW_IP}")"
 [ "$code" = "403" ] && pass "spoofed forwarding headers still -> 403" || bad "spoofed headers got $code (want 403)"
 
-step "host-loopback publication: /livez reachable, observed host peer recorded"
+step "host-loopback publication: /livez and the manifest through the published port (D1)"
 host_livez="$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:${HOST_PORT}/livez" || echo 000)"
 [ "$host_livez" = "200" ] && pass "host 127.0.0.1:${HOST_PORT}/livez -> 200 (public liveness)" \
   || bad "host /livez got $host_livez (want 200)"
-# The manifest over the published port depends on the engine's SNAT source IP. Try it; if denied,
-# recover the observed peer from the audit log so the operator can set the correct allowlist.
+# The `gateway` keyword is the image's promise that `docker run -p 127.0.0.1:...:8080` just works.
 host_manifest="$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:${HOST_PORT}/v1/feed-set.json" || echo 000)"
 if [ "$host_manifest" = "200" ]; then
-  pass "host-published manifest -> 200 (observed peer is in the allowlist)"
+  pass "host-published manifest -> 200 through the gateway keyword"
 else
   observed="$(docker logs "$SVC" 2>&1 | grep -o 'peer=[0-9.]*' | tail -1 || true)"
-  printf 'NOTE  host-published manifest -> %s; observed %s (engine SNAT differs; set allowlist accordingly)\n' \
-    "$host_manifest" "${observed:-peer=unknown}"
+  bad "host-published manifest -> $host_manifest; observed ${observed:-peer=unknown} (gateway keyword did not admit it)"
+fi
+
+# -----------------------------------------------------------------------------------------------
+# Browser worker supervision. The production image has Python, so the probes run inside it.
+worker_pid() { # container -> pid of `python3 -m worker`, empty when none runs
+  docker exec "$1" python3 -I -c '
+import os
+for pid in filter(str.isdigit, os.listdir("/proc")):
+    try:
+        args = open(f"/proc/{pid}/cmdline", "rb").read().split(b"\0")
+    except OSError:
+        continue
+    if args[:3] == [b"python3", b"-m", b"worker"]:
+        print(pid)
+        break
+' 2>/dev/null || true
+}
+wait_for_worker() { # container old_pid deadline_secs -> prints a pid different from old_pid
+  local waited=0 pid
+  while [ "$waited" -lt "$3" ]; do
+    pid="$(worker_pid "$1")"
+    if [ -n "$pid" ] && [ "$pid" != "$2" ]; then
+      printf '%s' "$pid"
+      return 0
+    fi
+    sleep 1; waited=$((waited + 1))
+  done
+  return 1
+}
+
+step "the browser worker runs with the default sources and restarts when killed"
+if first_worker="$(wait_for_worker "$SVC" "" 30)"; then
+  pass "browser worker running (pid $first_worker)"
+  docker exec "$SVC" python3 -I -c "import os, signal; os.kill($first_worker, signal.SIGKILL)"
+  if second_worker="$(wait_for_worker "$SVC" "$first_worker" 30)"; then
+    pass "killed worker was restarted (pid $second_worker)"
+  else
+    bad "killed worker was not restarted within 30s"
+  fi
+else
+  bad "no browser worker process with the default sources on"
+fi
+
+step "docker stop exits cleanly inside the 10s grace period"
+stop_started="$(date +%s)"
+docker stop --time 10 "$SVC" >/dev/null
+stop_secs=$(( $(date +%s) - stop_started ))
+stop_code="$(docker inspect -f '{{.State.ExitCode}}' "$SVC")"
+if [ "$stop_code" = "0" ] && [ "$stop_secs" -lt 10 ]; then
+  pass "stopped in ${stop_secs}s with exit 0 (worker stopped before the service)"
+else
+  bad "docker stop took ${stop_secs}s with exit $stop_code (want exit 0 within 10s)"
 fi
 
 # -----------------------------------------------------------------------------------------------
@@ -390,9 +445,12 @@ docker run --rm --name "$SEED" --user 0 -v "$VOL":/data --entrypoint sh "$HELPER
 pass "planted incomplete newest generation candidate 9999999999999999999-0"
 
 # --network none removes all connectivity, so no refresh can succeed; the service must recover the
-# retained last-good generation from the volume. Default env => loopback bind + empty allowlist,
-# so a helper sharing the service network namespace is admitted as a loopback peer.
-docker run -d --name "$SVC" --network none -v "$VOL":/data "$IMAGE" >/dev/null
+# retained last-good generation from the volume. With no default route the `gateway` keyword
+# admits nobody, so the policy stays loopback-only and a helper sharing the service network
+# namespace is admitted as a loopback peer. Both browser sources are off here, so no worker runs.
+docker run -d --name "$SVC" --network none \
+  -e AMTRAK_TRACKS_AMTRAK=off -e AMTRAK_ADVISORIES=off \
+  -v "$VOL":/data "$IMAGE" >/dev/null
 started="$(date +%s)"
 while :; do
   status="$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$SVC" 2>/dev/null || echo gone)"
@@ -424,6 +482,39 @@ for name in $ARTIFACTS; do
   [ "$rec_sha" = "$good_sha" ] && pass "recovered $name bytes identical" \
     || bad "recovered $name differs (got $rec_sha, want $good_sha)"
 done
+
+step "with both browser sources off, no Python or Chromium process runs"
+# `docker top` needs the pid column, so take the default listing and keep the command column.
+procs="$(docker top "$SVC" -o pid,args 2>/dev/null | tail -n +2 | awk '{ $1 = ""; print }' || true)"
+if ! printf '%s\n' "$procs" | grep -q 'amtrak-gtfs-rt-service'; then
+  bad "could not list the container's processes (got: ${procs:-nothing})"
+elif printf '%s\n' "$procs" | grep -Eq 'python|chrom|headless_shell'; then
+  bad "browser process running with both browser sources off: $(printf '%s' "$procs" | tr '\n' ';')"
+else
+  pass "processes:$(printf '%s' "$procs" | tr '\n' ';')"
+fi
+
+step "a worker that keeps failing stops the service non-zero"
+# An invalid BROWSER_MODE makes every worker start exit at once. The retained volume skips the
+# static bootstrap, so the restart budget (5 exits, 2+4+8+16 s of backoff) is the whole wait.
+docker rm -f "$SVC" >/dev/null
+docker run -d --name "$SVC" --network none -e BROWSER_MODE=invalid -v "$VOL":/data "$IMAGE" >/dev/null
+budget_started="$(date +%s)"
+while :; do
+  state="$(docker inspect -f '{{.State.Status}}' "$SVC" 2>/dev/null || echo gone)"
+  [ "$state" = "running" ] || break
+  if [ $(( $(date +%s) - budget_started )) -ge 120 ]; then
+    break
+  fi
+  sleep 2
+done
+budget_code="$(docker inspect -f '{{.State.ExitCode}}' "$SVC" 2>/dev/null || echo unknown)"
+if [ "$state" = "exited" ] && [ "$budget_code" != "0" ]; then
+  pass "service exited $budget_code after $(( $(date +%s) - budget_started ))s of worker failures"
+else
+  docker logs --tail 30 "$SVC" || true
+  bad "service did not exit non-zero after repeated worker failures (state=$state exit=$budget_code)"
+fi
 
 # -----------------------------------------------------------------------------------------------
 step "image size, SBOM, and CVE evidence for the exact image"
