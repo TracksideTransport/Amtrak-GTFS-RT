@@ -37,10 +37,8 @@
         "required_status_checks": [
           { "context": "Build and test", "integration_id": 15368 },
           { "context": "Browser worker offline tests", "integration_id": 15368 },
-          { "context": "advisory-fetcher image (amd64)", "integration_id": 15368 },
-          { "context": "advisory-fetcher image (arm64)", "integration_id": 15368 },
-          { "context": "track-fetcher image (amd64)", "integration_id": 15368 },
-          { "context": "track-fetcher image (arm64)", "integration_id": 15368 },
+          { "context": "One image (amd64)", "integration_id": 15368 },
+          { "context": "One image (arm64)", "integration_id": 15368 },
           { "context": "Workflow lint (actionlint)", "integration_id": 15368 },
           { "context": "Repository release-control tests", "integration_id": 15368 },
           { "context": "Compose and bake config", "integration_id": 15368 }

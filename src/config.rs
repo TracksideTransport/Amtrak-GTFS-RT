@@ -45,6 +45,61 @@ pub fn is_worker_url(url: &str) -> bool {
         .is_some_and(|path| path.starts_with('/'))
 }
 
+/// Debounced early track refreshes that `train` and `station` queries on trip updates request.
+///
+/// The service queues them for the browser worker's track poller. Env
+/// `AMTRAK_TRACKS_BASE_INTERVAL_SECS` (default 900), `AMTRAK_TRACKS_DEBOUNCE_SECS` (default 5),
+/// `AMTRAK_TRACKS_MIN_GAP_SECS` (default 90), and `AMTRAK_TRACKS_MAX_EARLY` (default 24).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct EarlyRefreshConfig {
+    /// Time between full track polls.
+    pub base_interval: Duration,
+    /// Quiet period that collapses a burst of requests into one refresh.
+    pub debounce: Duration,
+    /// Minimum time between early refreshes of one train.
+    pub min_gap: Duration,
+    /// Most trains one early flush may release.
+    pub max_per_flush: usize,
+}
+
+impl EarlyRefreshConfig {
+    /// Parses the early-refresh tuning from the process environment.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError`] naming a value that is not a whole number.
+    pub fn from_env() -> Result<EarlyRefreshConfig, ConfigError> {
+        EarlyRefreshConfig::from_map(|key| std::env::var(key).ok())
+    }
+
+    /// Parses the early-refresh tuning from an injected environment lookup.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError`] naming a value that is not a whole number.
+    pub fn from_map<F: Fn(&str) -> Option<String>>(
+        get: F,
+    ) -> Result<EarlyRefreshConfig, ConfigError> {
+        use crate::schedule::{
+            DEFAULT_BASE_INTERVAL, DEFAULT_DEBOUNCE, DEFAULT_MAX_PER_FLUSH, DEFAULT_MIN_GAP,
+        };
+        let secs = |key, default: Duration| {
+            parse_u64(&get, key, default.as_secs()).map(Duration::from_secs)
+        };
+        let max_per_flush = parse_u64(
+            &get,
+            "AMTRAK_TRACKS_MAX_EARLY",
+            DEFAULT_MAX_PER_FLUSH as u64,
+        )?;
+        Ok(EarlyRefreshConfig {
+            base_interval: secs("AMTRAK_TRACKS_BASE_INTERVAL_SECS", DEFAULT_BASE_INTERVAL)?,
+            debounce: secs("AMTRAK_TRACKS_DEBOUNCE_SECS", DEFAULT_DEBOUNCE)?,
+            min_gap: secs("AMTRAK_TRACKS_MIN_GAP_SECS", DEFAULT_MIN_GAP)?,
+            max_per_flush: usize::try_from(max_per_flush).unwrap_or(usize::MAX),
+        })
+    }
+}
+
 /// How many finalized generations the store keeps once a newer one is current.
 ///
 /// A superseded generation is deleted once it has been superseded for `retain_superseded`, or
@@ -569,6 +624,15 @@ impl ConfigError {
         }
     }
 
+    /// `AMTRAK_ROLE` named a three-container role, which no longer exists.
+    pub fn removed_role() -> Self {
+        Self::new(
+            "AMTRAK_ROLE",
+            "the three-container roles were removed; unset AMTRAK_ROLE and run the one \
+             amtrak-gtfs-rt container (README \"Upgrading from the three-container layout\")",
+        )
+    }
+
     /// Returns the environment field responsible for this failure.
     #[cfg_attr(
         not(test),
@@ -687,22 +751,6 @@ impl Config {
     /// unpinned, or operationally unavailable field.
     pub fn validate(self) -> Result<ValidatedConfig, ConfigError> {
         self.validate_with(probe_validator_runtime, default_gateway)
-    }
-
-    /// Validates configuration for a role that only contributes to the shared volume.
-    ///
-    /// TripUpdates and Alerts read the fleet snapshot and write one contribution
-    /// each. They never validate static GTFS or bind a listener, so they need
-    /// neither the validator JAR nor Java. Only the output directory is checked.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ConfigError`] for an empty `AMTRAK_OUTPUT_DIR`.
-    pub fn validate_contributor(self) -> Result<PathBuf, ConfigError> {
-        if self.output_dir.as_os_str().is_empty() {
-            return Err(ConfigError::new("AMTRAK_OUTPUT_DIR", "must not be empty"));
-        }
-        Ok(self.output_dir)
     }
 
     #[cfg(test)]
@@ -1021,6 +1069,10 @@ fn env_field(key: &str) -> &'static str {
         "AMTRAK_GENERATION_RETAIN_SECS" => "AMTRAK_GENERATION_RETAIN_SECS",
         "AMTRAK_GENERATION_MAX" => "AMTRAK_GENERATION_MAX",
         "AMTRAK_VALIDATOR_CACHE" => "AMTRAK_VALIDATOR_CACHE",
+        "AMTRAK_TRACKS_BASE_INTERVAL_SECS" => "AMTRAK_TRACKS_BASE_INTERVAL_SECS",
+        "AMTRAK_TRACKS_DEBOUNCE_SECS" => "AMTRAK_TRACKS_DEBOUNCE_SECS",
+        "AMTRAK_TRACKS_MIN_GAP_SECS" => "AMTRAK_TRACKS_MIN_GAP_SECS",
+        "AMTRAK_TRACKS_MAX_EARLY" => "AMTRAK_TRACKS_MAX_EARLY",
         _ => "configuration",
     }
 }
@@ -1588,23 +1640,26 @@ mod tests {
     }
 
     #[test]
-    fn contributor_roles_validate_without_a_validator_runtime() {
-        let config = Config::from_map(map(&[
-            ("AMTRAK_OUTPUT_DIR", "/data"),
-            ("AMTRAK_GTFS_VALIDATOR_JAR", "/nonexistent/validator.jar"),
+    fn early_refresh_tuning_defaults_and_overrides() {
+        let defaults = EarlyRefreshConfig::from_map(|_| None).unwrap();
+        assert_eq!(defaults.base_interval, Duration::from_secs(900));
+        assert_eq!(defaults.debounce, Duration::from_secs(5));
+        assert_eq!(defaults.min_gap, Duration::from_secs(90));
+        assert_eq!(defaults.max_per_flush, 24);
+        let tuned = EarlyRefreshConfig::from_map(map(&[
+            ("AMTRAK_TRACKS_BASE_INTERVAL_SECS", "600"),
+            ("AMTRAK_TRACKS_DEBOUNCE_SECS", "2"),
+            ("AMTRAK_TRACKS_MIN_GAP_SECS", "30"),
+            ("AMTRAK_TRACKS_MAX_EARLY", "8"),
         ]))
         .unwrap();
-        assert_eq!(
-            config.validate_contributor().unwrap(),
-            PathBuf::from("/data")
-        );
-    }
-
-    #[test]
-    fn contributor_roles_reject_an_empty_output_dir() {
-        let config = Config::from_map(map(&[("AMTRAK_OUTPUT_DIR", "")])).unwrap();
-        let error = config.validate_contributor().unwrap_err();
-        assert!(error.to_string().contains("AMTRAK_OUTPUT_DIR"));
+        assert_eq!(tuned.base_interval, Duration::from_secs(600));
+        assert_eq!(tuned.debounce, Duration::from_secs(2));
+        assert_eq!(tuned.min_gap, Duration::from_secs(30));
+        assert_eq!(tuned.max_per_flush, 8);
+        let error = EarlyRefreshConfig::from_map(map(&[("AMTRAK_TRACKS_DEBOUNCE_SECS", "soon")]))
+            .unwrap_err();
+        assert_eq!(error.field(), "AMTRAK_TRACKS_DEBOUNCE_SECS");
     }
 
     #[test]

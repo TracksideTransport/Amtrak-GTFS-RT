@@ -126,36 +126,20 @@ def load_train_list_file(path: str) -> dict:
     return parsed
 
 
-def load_fleet_trains(root: str) -> dict:
-    """The ``amtrak-fleet-trains/v1`` list VehiclePositions wrote for the current fleet snapshot.
-
-    Raises ``OSError`` until VehiclePositions has written a snapshot; the cycle is retried.
-    """
-    fleet = os.path.join(root, "fleet")
-    with open(os.path.join(fleet, "CURRENT"), encoding="utf-8") as handle:
-        current = handle.read().strip()
-    if not current or os.sep in current or current.startswith("."):
-        raise FileNotFoundError("fleet/CURRENT names no snapshot")
-    with open(os.path.join(fleet, current, "trains.json"), encoding="utf-8") as handle:
-        parsed = json.loads(handle.read())
-    if not isinstance(parsed, dict):
-        raise ValueError("fleet train list is not an object")
-    return parsed
-
-
 async def _default_trains(cfg: Config) -> dict:
     """Read the service's train list. The service is the only map poller.
 
-    In the one container the service names its list in ``AMTRAK_FLEET_TRAINS_FILE``. Inside the
-    TripUpdates role, read the fleet snapshot VehiclePositions wrote under ``AMTRAK_OUTPUT_DIR``.
-    With neither (a worker run on its own), fall back to polling the map.
+    Beside the service (``AMTRAK_OUTPUT_DIR`` set), the list is ``AMTRAK_FLEET_TRAINS_FILE``; without
+    it the cycle fails rather than polling ``getTrainsData`` a second time. Only a worker run on
+    its own, with neither variable, polls the map itself.
     """
     train_list = os.environ.get("AMTRAK_FLEET_TRAINS_FILE", "")
     if train_list:
         return await asyncio.to_thread(load_train_list_file, train_list)
-    root = os.environ.get("AMTRAK_OUTPUT_DIR", "")
-    if root:
-        return await asyncio.to_thread(load_fleet_trains, root)
+    if os.environ.get("AMTRAK_OUTPUT_DIR", ""):
+        raise FileNotFoundError(
+            "AMTRAK_FLEET_TRAINS_FILE is not set beside the service; the service is the only map poller"
+        )
     return await asyncio.to_thread(load_trains, cfg)
 
 

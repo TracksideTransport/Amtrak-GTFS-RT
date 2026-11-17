@@ -273,11 +273,11 @@ test "$(create_count)" = 0 || fail 'unreadable tag must not be created'
 CI="$ROOT/.github/workflows/ci.yml"
 while IFS= read -r check; do
   grep -Fqx "    name: $check" "$CI" && continue
-  if [[ "$check" =~ ^([a-z-]+)\ image\ \(([a-z0-9]+)\)$ ]]; then
+  # The one-image job is a matrix over architectures: `One image (${{ matrix.arch }})`.
+  if [[ "$check" =~ ^One\ image\ \(([a-z0-9]+)\)$ ]]; then
     # shellcheck disable=SC2016 # literal workflow expression, not a shell expansion
-    grep -Fqx '    name: ${{ matrix.image }} image (${{ matrix.arch }})' "$CI" \
-      && grep -Eq "^        image: \[.*\b${BASH_REMATCH[1]}\b.*\]$" "$CI" \
-      && grep -Eq "^        arch: \[.*\b${BASH_REMATCH[2]}\b.*\]$" "$CI" \
+    grep -Fqx '    name: One image (${{ matrix.arch }})' "$CI" \
+      && grep -Eq "^        arch: \[.*\b${BASH_REMATCH[1]}\b.*\]$" "$CI" \
       && continue
   fi
   fail "required check '$check' in .github/rulesets/main.json is not a ci.yml job"

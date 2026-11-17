@@ -67,14 +67,13 @@ jobs:
         working-directory: browser-worker
         run: python -m pytest tests -q
 
-  fetcher-images:
-    name: ${{ matrix.image }} image (${{ matrix.arch }})
+  one-image:
+    name: One image (${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 45
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
-        image: [advisory-fetcher, track-fetcher]
         arch: [amd64, arm64]
         include:
           - arch: amd64
@@ -84,32 +83,39 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      # Native builds on each architecture, so the Dockerfile's ldd checks run on arm64 too. The
-      # full bundle is the xvfb-headful fallback; building it here keeps that mode working.
-      # Both images are targets of the one browser-worker Dockerfile, built from the repo root.
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      # Native builds on each architecture, so the Dockerfile's ldd, static-binary, and Java checks
+      # run on arm64 too. The full bundle is the xvfb-headful fallback; building it here keeps that
+      # mode working. Base images and validator inputs are digest-pinned, so the cache only skips
+      # recompiling unchanged stages.
       - name: Build the default (headless-shell) image
-        run: docker build --file browser-worker/Dockerfile --target ${{ matrix.image }} --tag fetcher:shell .
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          tags: amtrak-gtfs-rt:ci
+          load: true
+          cache-from: type=gha,scope=one-image-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=one-image-${{ matrix.arch }}
+          sbom: false
+          provenance: false
 
       - name: Build the full (Chromium and Xvfb) image
-        run: |
-          docker build --file browser-worker/Dockerfile --target ${{ matrix.image }} \
-            --build-arg BROWSER_BUNDLE=full --tag fetcher:full .
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          build-args: BROWSER_BUNDLE=full
+          tags: amtrak-gtfs-rt:ci-full
+          load: true
+          cache-from: type=gha,scope=one-image-${{ matrix.arch }}
+          sbom: false
+          provenance: false
 
-      - name: Import the worker and Playwright inside the images
-        run: |
-          for tag in shell full; do
-            docker run --rm --entrypoint python "fetcher:${tag}" \
-              -c "import playwright.async_api, worker.__main__"
-          done
-
-      - name: Start Xvfb in the full image
-        run: |
-          docker run --rm --entrypoint python fetcher:full -c \
-            "from worker.display import start_virtual_display, stop_virtual_display; stop_virtual_display(start_virtual_display('xvfb-headful', {}))"
-
-      # The release workflow's offline smoke test, run here on both architectures.
-      - name: Smoke-test the default image
-        run: scripts/test-fetcher-image.sh fetcher:shell ${{ matrix.image }}
+      # Offline: no Amtrak call, so a blocked runner cannot fail it. The live smoke test runs in
+      # release-gates.yml.
+      - name: Offline smoke test
+        run: scripts/test-image-offline.sh amtrak-gtfs-rt:ci amtrak-gtfs-rt:ci-full
 
   workflow-lint:
     name: Workflow lint (actionlint)

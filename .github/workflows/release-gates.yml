@@ -27,8 +27,6 @@ on:
       - "browser-worker/worker/**"
       - "src/**"
       - "docker-compose.yml"
-      - "trip-updates.Dockerfile"
-      - "alerts.Dockerfile"
       - "scripts/test-compose-stack.sh"
       - "proxy/**"
       - "scripts/test-proxy-compose.sh"

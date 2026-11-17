@@ -561,16 +561,29 @@ const PLATFORM_REFRESH_DEBOUNCE: Duration = Duration::from_secs(30);
 /// runs the validator, which is heavy on a Raspberry Pi in the first days of observation.
 const PLATFORM_REFRESH_MIN_GAP: Duration = Duration::from_secs(600);
 
+/// Debounce and minimum gap for platform-triggered static rebuilds.
+#[derive(Clone, Copy, Debug)]
+struct PlatformRefreshTiming {
+    debounce: Duration,
+    min_gap: Duration,
+}
+
+const PLATFORM_REFRESH: PlatformRefreshTiming = PlatformRefreshTiming {
+    debounce: PLATFORM_REFRESH_DEBOUNCE,
+    min_gap: PLATFORM_REFRESH_MIN_GAP,
+};
+
 /// How long a platform-triggered rebuild waits: the debounce, or until the minimum gap since the
 /// previous one has passed, whichever is later.
 fn platform_refresh_delay(
+    timing: PlatformRefreshTiming,
     previous: Option<tokio::time::Instant>,
     now: tokio::time::Instant,
 ) -> Duration {
     let gap = previous
-        .map(|previous| (previous + PLATFORM_REFRESH_MIN_GAP).saturating_duration_since(now))
+        .map(|previous| (previous + timing.min_gap).saturating_duration_since(now))
         .unwrap_or_default();
-    gap.max(PLATFORM_REFRESH_DEBOUNCE)
+    gap.max(timing.debounce)
 }
 
 /// Periodically stages standards-valid replacements without publishing them.
@@ -588,6 +601,25 @@ pub async fn run_snapshot_refresh(
     interval: Duration,
     validator: Arc<dyn StaticStandardsValidator>,
     platforms: Option<SharedPlatforms>,
+) {
+    run_snapshot_refresh_with(
+        state,
+        static_url,
+        interval,
+        validator,
+        platforms,
+        PLATFORM_REFRESH,
+    )
+    .await;
+}
+
+async fn run_snapshot_refresh_with(
+    state: StaticSnapshotState,
+    static_url: String,
+    interval: Duration,
+    validator: Arc<dyn StaticStandardsValidator>,
+    platforms: Option<SharedPlatforms>,
+    timing: PlatformRefreshTiming,
 ) {
     let notify = platforms.as_ref().map(SharedPlatforms::changed);
     let mut ticker = tokio::time::interval(interval);
@@ -613,7 +645,8 @@ pub async fn run_snapshot_refresh(
                 _ = ticker.tick() => {}
                 _ = notify.notified() => {
                     let now = tokio::time::Instant::now();
-                    tokio::time::sleep(platform_refresh_delay(previous_platform_refresh, now)).await;
+                    tokio::time::sleep(platform_refresh_delay(timing, previous_platform_refresh, now))
+                        .await;
                     previous_platform_refresh = Some(tokio::time::Instant::now());
                 }
             }
@@ -1347,15 +1380,23 @@ t,10:00:00,10:00:00,NWK,1\nt,10:30:00,10:30:00,OSM,2\n";
     fn platform_rebuilds_wait_for_the_debounce_and_the_minimum_gap() {
         let previous = tokio::time::Instant::now();
         assert_eq!(
-            platform_refresh_delay(None, previous),
+            platform_refresh_delay(PLATFORM_REFRESH, None, previous),
             PLATFORM_REFRESH_DEBOUNCE
         );
         assert_eq!(
-            platform_refresh_delay(Some(previous), previous + Duration::from_secs(60)),
+            platform_refresh_delay(
+                PLATFORM_REFRESH,
+                Some(previous),
+                previous + Duration::from_secs(60)
+            ),
             Duration::from_secs(540)
         );
         assert_eq!(
-            platform_refresh_delay(Some(previous), previous + Duration::from_secs(3_600)),
+            platform_refresh_delay(
+                PLATFORM_REFRESH,
+                Some(previous),
+                previous + Duration::from_secs(3_600)
+            ),
             PLATFORM_REFRESH_DEBOUNCE
         );
     }
@@ -1500,6 +1541,64 @@ t,10:00:00,10:00:00,NWK,1\nt,10:30:00,10:30:00,OSM,2\n";
             .expect("mismatched static was not refreshed immediately");
         assert_eq!(staged.version, "20260927");
         assert_eq!(staged.zip.as_ref(), upstream.as_slice());
+    }
+
+    /// #54: a newly observed platform reaches the staged static through the in-process notifier,
+    /// after the debounce and long before the daily poll. The 10-minute gap between two such
+    /// rebuilds is `platform_rebuilds_wait_for_the_debounce_and_the_minimum_gap`.
+    #[tokio::test]
+    async fn a_newly_observed_platform_is_staged_through_the_notifier() {
+        let upstream = augmentable_zip("20260927");
+        let configured = PlatformTable::parse("NWK=1").unwrap();
+        // Recovered static already matches the configured platforms, so only the notifier
+        // (not the startup mismatch check or the day-long ticker) can stage anything.
+        let recovered = augment_static(&upstream, &configured).unwrap();
+        let recovered_version = format!("20260927+tracks.{}", configured.digest());
+        let (url, server) = served_zip(upstream);
+        let state = recover_static(Arc::from(recovered), recovered_version.clone()).unwrap();
+        let platforms = SharedPlatforms::new(configured, None);
+        let validator: Arc<dyn StaticStandardsValidator> = Arc::new(RecordingValidator {
+            seen: Mutex::new(Vec::new()),
+            result: Ok(()),
+        });
+        let debounce = Duration::from_millis(200);
+        let task = tokio::spawn(run_snapshot_refresh_with(
+            state.clone(),
+            url,
+            Duration::from_secs(86_400),
+            validator,
+            Some(platforms.clone()),
+            PlatformRefreshTiming {
+                debounce,
+                min_gap: Duration::from_secs(600),
+            },
+        ));
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(
+            state.pending().await.is_none(),
+            "nothing is staged before an observation"
+        );
+
+        let observed_at = tokio::time::Instant::now();
+        assert!(platforms.observe("NWK", "9"));
+        let staged = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Some(staged) = state.pending().await {
+                    return staged;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the observed platform was not staged through the notifier");
+        assert!(
+            observed_at.elapsed() >= debounce,
+            "staged before the debounce"
+        );
+        assert!(staged.parsed.stops.contains_key("NWK:track:9"));
+        assert_ne!(staged.version, recovered_version);
+        task.abort();
+        server.abort();
     }
 
     #[tokio::test]
