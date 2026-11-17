@@ -1,7 +1,7 @@
 name: Release gates
 
 # Runs the release workflow's per-platform image gates (container smoke test, SBOM check, and the
-# zero-match Grype policy) before a tag is pushed, so a failure costs a PR iteration rather than an
+# Grype policy: no Critical or High match that has a fix) before a tag is pushed, so a failure costs a PR iteration rather than an
 # immutable tag. It builds linux/amd64 only and is path-gated to the image inputs: the smoke test
 # fetches live Amtrak data, so it stays off unrelated PRs. The weekly run rescans the current main
 # image against a fresh vulnerability database so new advisories surface before release day.
@@ -99,8 +99,11 @@ jobs:
             printf '```\n'
           } >>"$GITHUB_STEP_SUMMARY"
 
-      - name: Enforce the zero-match policy
-        run: scripts/release-vulnerability-policy.sh enforce release-gates/cves-grype.json
+      # The one image has a Debian, Python, and Chromium base, which always carries matches Debian
+      # has not fixed (or marks won't-fix), so the old scratch image's zero-match policy cannot
+      # hold. Owner decision on #71: fail on any fixable Critical or High, keep the full report.
+      - name: Enforce the fixable Critical and High policy
+        run: scripts/release-vulnerability-policy.sh enforce-fixable release-gates/cves-grype.json
 
       - name: Upload gate diagnostics
         if: failure()
@@ -114,9 +117,9 @@ jobs:
           retention-days: 14
 
   compose-stack:
-    # VehiclePositions publishes only after TripUpdates and Alerts contribute to the shared
-    # volume, so one served manifest proves the three roles start and agree on a generation.
-    name: Three-role Compose stack publishes (linux/amd64)
+    # The one service under Compose's confinement (read-only root, tmpfs, no capabilities,
+    # limits) publishes a generation and runs its browser worker.
+    name: Compose stack publishes (linux/amd64)
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:

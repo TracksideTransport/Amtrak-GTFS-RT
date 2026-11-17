@@ -417,6 +417,62 @@ def test_missing_fleet_snapshot_fails_the_cycle_without_polling(tmp_path, monkey
         asyncio.run(_default_trains(Config()))
 
 
+def test_one_container_poller_reads_the_service_train_list_file(tmp_path, monkeypatch):
+    document = {"schema": "amtrak-fleet-trains/v1", "trains": [{"train_number": "163"}]}
+    path = tmp_path / "tracks" / "fleet-trains.json"
+    path.parent.mkdir()
+    path.write_text(json.dumps(document), encoding="utf-8")
+    # The list file wins over a fleet snapshot directory and over the map.
+    _write_fleet(tmp_path, "10-1", {"schema": "amtrak-fleet-trains/v1", "trains": []})
+    monkeypatch.setenv("AMTRAK_OUTPUT_DIR", str(tmp_path))
+    monkeypatch.setenv("AMTRAK_FLEET_TRAINS_FILE", str(path))
+
+    def no_network(*_args, **_kwargs):
+        raise AssertionError("the embedded poller must not GET getTrainsData")
+
+    monkeypatch.setattr("urllib.request.urlopen", no_network)
+    assert asyncio.run(_default_trains(Config())) == document
+
+
+def test_missing_train_list_file_fails_the_cycle_without_polling(tmp_path, monkeypatch):
+    monkeypatch.setenv("AMTRAK_FLEET_TRAINS_FILE", str(tmp_path / "absent.json"))
+
+    def no_network(*_args, **_kwargs):
+        raise AssertionError("the embedded poller must not GET getTrainsData")
+
+    monkeypatch.setattr("urllib.request.urlopen", no_network)
+    with pytest.raises(OSError):
+        asyncio.run(_default_trains(Config()))
+
+
+def test_a_cycle_without_a_train_list_retries_the_full_poll_on_the_next_tick(monkeypatch):
+    fulls = []
+
+    async def fake_poll_once(store, cfg, last_fetched, *, now, trains_fetcher, status_fetcher, full):
+        fulls.append(full)
+        if len(fulls) == 1:
+            raise FileNotFoundError("no train list yet")
+        return True
+
+    async def no_sleep(_secs):
+        return None
+
+    monkeypatch.setattr("worker.tracks.poller.poll_once", fake_poll_once)
+    cfg = Config(poll_interval_secs=60, base_interval_secs=900)
+    asyncio.run(
+        run_forever(
+            TrackStore(),
+            cfg,
+            trains_fetcher=lambda _cfg: None,
+            status_fetcher=lambda *_args: None,
+            sleep=no_sleep,
+            iterations=4,
+        )
+    )
+    # The failed first full poll is retried at once; then the base interval applies.
+    assert fulls == [True, True, False, False]
+
+
 def _queue_hint(root, name, trains=(), stations=()):
     queue = root / "tracks" / "early-refresh"
     queue.mkdir(parents=True, exist_ok=True)

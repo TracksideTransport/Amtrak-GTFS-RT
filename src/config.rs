@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 use std::fmt;
 use std::io::Read;
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
@@ -30,7 +30,7 @@ const MINIMUM_JAVA_MAJOR: u32 = 17;
 const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 /// Base URL of the built-in browser worker. It listens on loopback inside the container, beside
 /// the service's own `:8080`, and serves Amtrak's status documents and the notices page.
-const WORKER_BASE_URL: &str = "http://127.0.0.1:8081";
+pub const WORKER_BASE_URL: &str = "http://127.0.0.1:8081";
 /// Default `AMTRAK_ADVISORIES_URL`: the notices page through the built-in worker. A plain HTTP
 /// client to `www.amtrak.com` is reset by Akamai, so the public URL is never the default.
 pub const DEFAULT_ADVISORIES_URL: &str = "http://127.0.0.1:8081/service-alerts-and-notices";
@@ -477,6 +477,10 @@ pub struct Config {
     pub filter_capital_corridor: bool,
     pub bind_addr: SocketAddr,
     pub allowed_peer_ips: BTreeSet<IpAddr>,
+    /// `AMTRAK_ALLOWED_PEER_IPS` named the keyword `gateway`: admit this host's IPv4 default
+    /// gateway, resolved once by [`Config::validate`]. Inside a container that is the address a
+    /// request through a published port arrives from.
+    pub allow_default_gateway: bool,
     pub freshness_limit: Duration,
     pub gtfs_validator_jar: PathBuf,
     /// `0` retains every generation. Any other value is the unique-byte cap.
@@ -630,7 +634,8 @@ impl Config {
             .unwrap_or_else(|| "127.0.0.1:8080".to_string())
             .parse::<SocketAddr>()
             .map_err(|error| ConfigError::new("AMTRAK_BIND_ADDR", error.to_string()))?;
-        let allowed_peer_ips = parse_peer_ips(get("AMTRAK_ALLOWED_PEER_IPS"))?;
+        let (allowed_peer_ips, allow_default_gateway) =
+            parse_peer_ips(get("AMTRAK_ALLOWED_PEER_IPS"))?;
         let gtfs_validator_jar = get("AMTRAK_GTFS_VALIDATOR_JAR")
             .unwrap_or_else(|| DEFAULT_VALIDATOR_JAR.to_string())
             .into();
@@ -656,6 +661,7 @@ impl Config {
             filter_capital_corridor,
             bind_addr,
             allowed_peer_ips,
+            allow_default_gateway,
             freshness_limit: Duration::from_secs(300),
             gtfs_validator_jar,
             generation_budget_bytes,
@@ -669,16 +675,18 @@ impl Config {
     /// Converts parsed settings into configuration safe for service startup.
     ///
     /// The default is loopback-only. Binding a non-loopback address requires a
-    /// non-empty exact-IP allowlist, preventing an omitted policy from exposing
-    /// feeds publicly. The validator probe confirms the pinned CLI artifact and
-    /// Java 17 or newer before any feed can be accepted.
+    /// non-empty allowlist (exact IPs or the `gateway` keyword), preventing an
+    /// omitted policy from exposing feeds publicly. `gateway` is resolved here,
+    /// from `/proc/net/route`; with no default route it admits nobody, so the
+    /// policy stays loopback-only. The validator probe confirms the pinned CLI
+    /// artifact and Java 17 or newer before any feed can be accepted.
     ///
     /// # Errors
     ///
     /// Returns [`ConfigError`] naming the empty, unsafe, missing, unreadable,
     /// unpinned, or operationally unavailable field.
     pub fn validate(self) -> Result<ValidatedConfig, ConfigError> {
-        self.validate_with_probe(probe_validator_runtime)
+        self.validate_with(probe_validator_runtime, default_gateway)
     }
 
     /// Validates configuration for a role that only contributes to the shared volume.
@@ -697,9 +705,18 @@ impl Config {
         Ok(self.output_dir)
     }
 
+    #[cfg(test)]
     fn validate_with_probe<P>(self, probe: P) -> Result<ValidatedConfig, ConfigError>
     where
         P: FnOnce(&Path) -> Result<(), ConfigError>,
+    {
+        self.validate_with(probe, || None)
+    }
+
+    fn validate_with<P, G>(self, probe: P, gateway: G) -> Result<ValidatedConfig, ConfigError>
+    where
+        P: FnOnce(&Path) -> Result<(), ConfigError>,
+        G: FnOnce() -> Option<Ipv4Addr>,
     {
         validate_static_url(&self.static_url)?;
         if self.output_dir.as_os_str().is_empty() {
@@ -723,7 +740,10 @@ impl Config {
                 "must remain fixed at 300 seconds for this service contract",
             ));
         }
-        if !self.bind_addr.ip().is_loopback() && self.allowed_peer_ips.is_empty() {
+        if !self.bind_addr.ip().is_loopback()
+            && self.allowed_peer_ips.is_empty()
+            && !self.allow_default_gateway
+        {
             return Err(ConfigError::new(
                 "AMTRAK_ALLOWED_PEER_IPS",
                 "is required when AMTRAK_BIND_ADDR is not loopback",
@@ -734,6 +754,19 @@ impl Config {
             .filter(|max| *max >= 1)
             .ok_or_else(|| ConfigError::new("AMTRAK_GENERATION_MAX", "must be at least 1"))?;
         probe(&self.gtfs_validator_jar)?;
+        let mut allowed_peer_ips = self.allowed_peer_ips;
+        if self.allow_default_gateway {
+            match gateway() {
+                Some(address) => {
+                    tracing::info!(gateway = %address, "AMTRAK_ALLOWED_PEER_IPS gateway resolved");
+                    allowed_peer_ips.insert(IpAddr::V4(address));
+                }
+                None => tracing::warn!(
+                    "AMTRAK_ALLOWED_PEER_IPS names gateway, but there is no IPv4 default route; \
+                     the keyword admits nobody"
+                ),
+            }
+        }
 
         Ok(ValidatedConfig {
             static_url: self.static_url,
@@ -744,9 +777,7 @@ impl Config {
             bind_addr: self.bind_addr,
             freshness_limit: self.freshness_limit,
             gtfs_validator_jar: self.gtfs_validator_jar,
-            access_policy: AccessPolicy {
-                allowed_peer_ips: self.allowed_peer_ips,
-            },
+            access_policy: AccessPolicy { allowed_peer_ips },
             generation_retention: GenerationRetention {
                 budget_bytes: self.generation_budget_bytes,
                 retain_superseded: Duration::from_secs(self.generation_retain_secs),
@@ -791,25 +822,60 @@ fn validate_static_url(value: &str) -> Result<(), ConfigError> {
     Ok(())
 }
 
-fn parse_peer_ips(value: Option<String>) -> Result<BTreeSet<IpAddr>, ConfigError> {
+/// Allowlist keyword for the IPv4 default gateway (the container image's default).
+pub const GATEWAY_KEYWORD: &str = "gateway";
+
+/// Exact addresses plus whether the `gateway` keyword was named.
+fn parse_peer_ips(value: Option<String>) -> Result<(BTreeSet<IpAddr>, bool), ConfigError> {
+    let mut addresses = BTreeSet::new();
+    let mut gateway = false;
     let Some(value) = value else {
-        return Ok(BTreeSet::new());
+        return Ok((addresses, gateway));
     };
     if value.trim().is_empty() {
-        return Ok(BTreeSet::new());
+        return Ok((addresses, gateway));
     }
-    value
-        .split(',')
-        .map(|entry| {
-            let entry = entry.trim();
-            entry.parse().map_err(|error| {
-                ConfigError::new(
-                    "AMTRAK_ALLOWED_PEER_IPS",
-                    format!("entry {entry:?} is invalid: {error}"),
-                )
-            })
-        })
-        .collect()
+    for entry in value.split(',').map(str::trim) {
+        if entry.eq_ignore_ascii_case(GATEWAY_KEYWORD) {
+            gateway = true;
+            continue;
+        }
+        let address = entry.parse().map_err(|error| {
+            ConfigError::new(
+                "AMTRAK_ALLOWED_PEER_IPS",
+                format!("entry {entry:?} is invalid: {error}"),
+            )
+        })?;
+        addresses.insert(address);
+    }
+    Ok((addresses, gateway))
+}
+
+/// This host's IPv4 default gateway, read from `/proc/net/route`. `None` off Linux or with no
+/// default route (for example `docker run --network none`).
+fn default_gateway() -> Option<Ipv4Addr> {
+    std::fs::read_to_string("/proc/net/route")
+        .ok()
+        .and_then(|table| parse_default_gateway(&table))
+}
+
+/// The gateway of the first up default route in a `/proc/net/route` table.
+///
+/// Columns are whitespace-separated; `Destination` and `Gateway` are 32-bit hex in host
+/// (little-endian on every platform the image ships for) byte order, and `Flags` must carry
+/// `RTF_UP | RTF_GATEWAY`.
+pub fn parse_default_gateway(table: &str) -> Option<Ipv4Addr> {
+    const RTF_UP_GATEWAY: u32 = 0x1 | 0x2;
+    table.lines().skip(1).find_map(|line| {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        let (destination, gateway, flags) = (fields.get(1)?, fields.get(2)?, fields.get(3)?);
+        let flags = u32::from_str_radix(flags, 16).ok()?;
+        if *destination != "00000000" || flags & RTF_UP_GATEWAY != RTF_UP_GATEWAY {
+            return None;
+        }
+        let raw = u32::from_str_radix(gateway, 16).ok()?;
+        Some(Ipv4Addr::from(raw.to_le_bytes()))
+    })
 }
 
 fn probe_validator_runtime(path: &Path) -> Result<(), ConfigError> {
@@ -1380,6 +1446,72 @@ mod tests {
         let peers =
             Config::from_map(map(&[("AMTRAK_ALLOWED_PEER_IPS", "10.0.0.4,nope")])).unwrap_err();
         assert_eq!(peers.field(), "AMTRAK_ALLOWED_PEER_IPS");
+    }
+
+    #[test]
+    fn gateway_keyword_admits_the_resolved_default_gateway_only() {
+        let config = Config::from_map(map(&[
+            ("AMTRAK_BIND_ADDR", "0.0.0.0:8080"),
+            ("AMTRAK_ALLOWED_PEER_IPS", "Gateway, 10.0.0.4"),
+        ]))
+        .unwrap();
+        assert!(config.allow_default_gateway);
+        assert_eq!(config.allowed_peer_ips.len(), 1);
+        let resolved = config
+            .clone()
+            .validate_with(|_| Ok(()), || Some(Ipv4Addr::new(172, 17, 0, 1)))
+            .unwrap();
+        for (peer, decision) in [
+            ("172.17.0.1", AccessDecision::Allow),
+            ("10.0.0.4", AccessDecision::Allow),
+            ("172.17.0.2", AccessDecision::Deny),
+            ("127.0.0.1", AccessDecision::Deny),
+        ] {
+            assert_eq!(
+                authorize(&resolved.access_policy, peer.parse().unwrap()),
+                decision,
+                "{peer}"
+            );
+        }
+        assert_eq!(
+            resolved.access_policy.describe(),
+            "only 10.0.0.4, 172.17.0.1"
+        );
+    }
+
+    #[test]
+    fn gateway_keyword_without_a_default_route_stays_loopback_only() {
+        let resolved = Config::from_map(map(&[
+            ("AMTRAK_BIND_ADDR", "0.0.0.0:8080"),
+            ("AMTRAK_ALLOWED_PEER_IPS", "gateway"),
+        ]))
+        .unwrap()
+        .validate_with(|_| Ok(()), || None)
+        .unwrap();
+        assert_eq!(
+            authorize(&resolved.access_policy, "127.0.0.1".parse().unwrap()),
+            AccessDecision::Allow
+        );
+        assert_eq!(
+            authorize(&resolved.access_policy, "172.17.0.1".parse().unwrap()),
+            AccessDecision::Deny
+        );
+    }
+
+    #[test]
+    fn default_gateway_is_read_from_the_route_table() {
+        let table =
+            "Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT\n\
+                     eth0\t0000F0AC\t00000000\t0001\t0\t0\t0\t00F0FFFF\t0\t0\t0\n\
+                     eth0\t00000000\t0100F0AC\t0003\t0\t0\t0\t00000000\t0\t0\t0\n";
+        assert_eq!(
+            parse_default_gateway(table),
+            Some(Ipv4Addr::new(172, 240, 0, 1))
+        );
+        let down = "Iface\tDestination\tGateway\tFlags\neth0\t00000000\t0100F0AC\t0002\n";
+        assert_eq!(parse_default_gateway(down), None);
+        assert_eq!(parse_default_gateway("Iface\tDestination\n"), None);
+        assert_eq!(parse_default_gateway(""), None);
     }
 
     #[test]

@@ -344,9 +344,12 @@ jobs:
           if-no-files-found: warn
           retention-days: 30
 
-      - name: Enforce the retained zero-match policy
+      # The one image (Debian, Python, Chromium) always carries matches with no fix, so it ships
+      # under the fixable policy: no Critical or High match that has a fix (#71). The complete
+      # Grype report above stays a release asset.
+      - name: Enforce the fixable Critical and High policy
         shell: bash
-        run: control/scripts/release-vulnerability-policy.sh enforce release-evidence/${{ matrix.slug }}-cves-grype.json
+        run: control/scripts/release-vulnerability-policy.sh enforce-fixable release-evidence/${{ matrix.slug }}-cves-grype.json
 
       - name: Attest the clean exact-platform SBOM
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2

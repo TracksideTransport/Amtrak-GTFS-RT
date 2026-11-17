@@ -18,7 +18,7 @@ if printf '%s\n' "$default_config" | grep -Eq '^  proxy:'; then
 fi
 printf '%s\n' "$default_config" | grep -Fq 'host_ip: 127.0.0.1' \
   && printf '%s\n' "$default_config" | grep -Fq 'published: "8090"' \
-  || { echo "vehicle-positions no longer publishes 127.0.0.1:8090" >&2; exit 1; }
+  || { echo "amtrak-gtfs-rt no longer publishes 127.0.0.1:8090" >&2; exit 1; }
 
 proxy_config="$(docker compose -f docker-compose.yml --profile proxy config)"
 printf '%s\n' "$proxy_config" | grep -Eq '^  proxy:' \

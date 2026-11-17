@@ -246,91 +246,74 @@ Each sidecar's digests are in `image-release.txt`, after the service's.
 > docker pull ghcr.io/sohampatwardhan/amtrak-gtfs-rt@sha256:<release-manifest-digest>
 > ```
 
-The service ships as a digest-pinned, non-root, multi-stage image assembled from `scratch`. The
-build compiles the locked Rust binary against musl and rebuilds MobilityData validator v8.0.1 from
-its SHA-256-pinned source snapshot with reviewed security-version overrides. The complete upstream
-validator suite runs during the build, and a fixed reproducible JAR digest gates copy-forward. The
-runtime contains only the binary, that JAR, a minimized Corretto Java 17 runtime, musl, zlib, CA
-roots, and license notices — no shell, package manager, curl, Rust toolchain, `protoc`, or
-repository source.
+### One image (unreleased; `main`)
 
-**Image contract:** runs as UID/GID `10001`, entrypoint `/usr/local/bin/amtrak-gtfs-rt-service`
-(PID 1), documented port `8080/tcp`, persistent volume `/data`, and a Docker healthcheck that
-probes `/livez`. Container defaults differ from the host defaults so the persistence and validator
-paths are correct inside the image:
+On `main` the root `Dockerfile` builds **one image** with every feed and helper in it
+([design](docs/one-container.md)). The next release publishes it under the same name; `0.7.1`
+above is still the scratch service plus the two sidecars.
+
+| Part | What it is |
+|------|------------|
+| `tini` | PID 1. Reaps zombies and forwards signals. |
+| `amtrak-gtfs-rt-service` | The static musl binary in combined mode: one `getTrainsData` poll per cycle, the daily `GTFS.zip`, and the HTTP API on `:8080`. |
+| Browser worker | `python3 -m worker` ([`browser-worker/`](browser-worker/README.md)) with one headless Chromium, on `127.0.0.1:8081` only. The service starts it only when `AMTRAK_TRACKS_AMTRAK` or `AMTRAK_ADVISORIES` is on, restarts it with backoff, and exits non-zero after 5 failed starts in a row so the restart policy takes over. With both off, no Python or Chromium process runs. |
+| Validator | A `jlink`'d glibc Java 17 runtime and the MobilityData validator v8.0.1, rebuilt from SHA-256-pinned source with reviewed security-version overrides; the upstream suite runs during the build and a fixed reproducible JAR digest gates copy-forward. |
+| Base | `python:3.12-slim-bookworm`, digest-pinned and upgraded at build time. Chromium needs glibc, so the image is no longer `scratch`. |
+
+It is about 1 GB uncompressed on linux/arm64, most of it Chromium.
+
+```bash
+docker build --tag amtrak-gtfs-rt:local .
+docker run -d -p 127.0.0.1:8090:8080 -v amtrak-data:/data amtrak-gtfs-rt:local
+curl -fsS http://127.0.0.1:8090/v1/feed-set.json
+```
+
+No other settings are needed. The image binds `0.0.0.0:8080` and sets
+`AMTRAK_ALLOWED_PEER_IPS=gateway`: the keyword resolves, once at startup, to the container's IPv4
+default gateway, which is the address a request through a published port arrives from. So the
+`-p` binding decides who can reach the feed. `-p 127.0.0.1:8090:8080` keeps it on the host;
+`-p 8090:8080` exposes it on every interface, as for any other container. `Forwarded` and
+`X-Forwarded-For` are still ignored. With no default route (`--network none`) the keyword admits
+nobody and only loopback peers are served. Other containers on the same network are not the
+gateway; list their exact IPs beside the keyword (`gateway,172.31.240.10`).
+
+> [!WARNING]
+> With `--network host` the container shares the host's interfaces, so `0.0.0.0:8080` listens on
+> every host interface and `gateway` is your LAN router. Keep a host-networked run on loopback:
+>
+> ```bash
+> docker run -d --network host -e AMTRAK_BIND_ADDR=127.0.0.1:8080 -e AMTRAK_ALLOWED_PEER_IPS= \
+>   -v amtrak-data:/data amtrak-gtfs-rt:local
+> ```
+
+Turn browser sources off with their flags (`-e AMTRAK_TRACKS_AMTRAK=off -e AMTRAK_ADVISORIES=off`).
+`docker stop` stops the worker, then the service, inside the default 10-second grace period.
+
+**Image contract:** runs as UID/GID `10001` (home `/home/amtrak`), entrypoint
+`tini -- /usr/local/bin/amtrak-gtfs-rt-service`, documented port `8080/tcp`, persistent volume
+`/data`, and a Docker healthcheck (`amtrak-gtfs-rt-service --healthcheck`) that fails when `/livez`
+is not `200` or, while the service runs the browser worker, when the worker's listener does not
+answer. Container defaults differ from the host defaults:
 
 | Variable | Host default | Container default |
 |----------|--------------|-------------------|
 | `AMTRAK_OUTPUT_DIR` | `./out` | `/data` |
 | `AMTRAK_GTFS_VALIDATOR_JAR` | `./tools/gtfs-validator-v8.0.1-cli.jar` | `/opt/amtrak/gtfs-validator-v8.0.1-amtrak-hardened.1-cli.jar` |
-| `AMTRAK_BIND_ADDR` | `127.0.0.1:8080` | `127.0.0.1:8080` (loopback-only) |
-| `AMTRAK_ALLOWED_PEER_IPS` | empty | empty (loopback only) |
+| `AMTRAK_BIND_ADDR` | `127.0.0.1:8080` | `0.0.0.0:8080` |
+| `AMTRAK_ALLOWED_PEER_IPS` | empty (loopback only) | `gateway` |
 
-### Build locally
+The host rule is unchanged: a host binary that binds a non-loopback address with no allowlist
+refuses to start, and so does the image with `AMTRAK_ALLOWED_PEER_IPS=` set empty.
 
-The scratch service image is the default build. `runtime` is the last Dockerfile stage, so this
-does not include either fetcher or a browser:
+The [Compose stack](#compose-stack) adds the hardening defaults: read-only root filesystem, tmpfs
+`/tmp` and home, all capabilities dropped, `no-new-privileges`, memory and PID limits, and a 64 MB
+`/dev/shm` for Chromium.
 
-```bash
-docker build --tag amtrak-gtfs-rt:local .
-```
+`docker build --build-arg BROWSER_BUNDLE=full` adds full Chromium and Xvfb for
+`BROWSER_MODE=xvfb-headful`, the fallback if Amtrak blocks the headless shell.
 
-[`docker-bake.hcl`](docker-bake.hcl) builds that image and the separate fetcher images. The
-`track-fetcher` target is not in the default group, so `docker buildx bake` and the scratch release
-stay unchanged:
-
-```bash
-docker buildx bake                  # service + advisory-fetcher
-docker buildx bake service          # scratch service only
-docker buildx bake advisory-fetcher # advisory browser sidecar only
-docker buildx bake track-fetcher    # optional track sidecar
-docker buildx bake default track-fetcher # all three, as Compose runs them
-```
-
-Each target is tagged `<name>:local` and with its GHCR name at the release version
-(`ghcr.io/sohampatwardhan/amtrak-gtfs-rt-track-fetcher:0.7.1`, for example), so Compose runs what
-bake built. `AMTRAK_IMAGE_TAG=local docker buildx bake` tags local builds apart from a pulled
-release.
-
-### Run with host networking (simplest safe posture)
-
-With host networking the container shares the host's loopback, so the safe loopback default works
-unchanged and only loopback peers are admitted:
-
-```bash
-docker run --rm --network host \
-  -v amtrak-data:/data \
-  ghcr.io/sohampatwardhan/amtrak-gtfs-rt:0.7.1
-# manifest is reachable from the host loopback (an admitted peer):
-curl -fsS http://127.0.0.1:8080/v1/feed-set.json
-```
-
-> [!NOTE]
-> This works directly with Docker Engine on Linux. Docker Desktop requires version 4.34 or later and
-> **Settings → Resources → Network → Enable host networking**. If that option is unavailable or
-> disabled, use the dedicated bridge below instead.
-
-### Run on a dedicated bridge (explicit network policy required)
-
-A bridge port map is **intentionally unreachable** with the loopback default. Bridged operation
-must bind the wildcard address *and* name the exact peer(s) allowed to reach the feed boundary.
-There is no wildcard allowlist and no proxy trust. Publish the port on host loopback only:
-
-```bash
-docker network create --subnet 172.31.240.0/24 --gateway 172.31.240.1 amtrak-net
-docker run --rm --network amtrak-net \
-  -p 127.0.0.1:8080:8080 \
-  -e AMTRAK_BIND_ADDR=0.0.0.0:8080 \
-  -e AMTRAK_ALLOWED_PEER_IPS=172.31.240.1 \
-  -v amtrak-data:/data \
-  ghcr.io/sohampatwardhan/amtrak-gtfs-rt:0.7.1
-```
-
-> [!WARNING]
-> `AMTRAK_ALLOWED_PEER_IPS` must be the **exact** source IP the container observes for admitted
-> traffic. That IP is engine-dependent (the bridge gateway on a Linux bridge; it can differ on
-> Docker Desktop), so confirm it. A wrong value yields `403`, and the denied request logs its
-> observed `peer=<ip>` in the container logs.
+[`docker-bake.hcl`](docker-bake.hcl) still builds the two standalone fetcher images until they
+are retired (#74). The `service` target is this image.
 
 ### Health, readiness, manifest, and artifacts
 
@@ -512,7 +495,7 @@ Restart=on-failure
 | `AMTRAK_STATIC_REFRESH_SECS` | `86400` | Static feed refresh interval (seconds) |
 | `AMTRAK_FILTER_CAPITAL_CORRIDOR` | off | Drop Capital Corridor (route 84); a better feed exists via 511.org. Accepts the same on/off words as `AMTRAK_TRACKS`; any other value is a startup error |
 | `AMTRAK_BIND_ADDR` | `127.0.0.1:8080` | HTTP bind address; non-loopback requires an allowlist |
-| `AMTRAK_ALLOWED_PEER_IPS` | empty | Comma-separated exact peer IPs; empty admits loopback only |
+| `AMTRAK_ALLOWED_PEER_IPS` | empty | Comma-separated exact peer IPs, or the keyword `gateway` (the IPv4 default gateway, resolved at startup; the image default); empty admits loopback only |
 | `AMTRAK_PUBLIC_URL` | empty | Base URL the startup banner prints, for a listener reached through a published port (Compose sets `http://127.0.0.1:8090`). Display only. Empty prints the bind address, with `0.0.0.0` shown as `127.0.0.1` |
 | `AMTRAK_GTFS_VALIDATOR_JAR` | `./tools/gtfs-validator-v8.0.1-cli.jar` | Readable, approved MobilityData validator 8.0.1 CLI JAR (official host artifact or repository-hardened container build) |
 | `AMTRAK_GENERATION_BUDGET_BYTES` | `268435456` (256 MiB) | Unique on-disk bytes kept for generations. The current feed set is never deleted. `0` disables the cap |
@@ -550,17 +533,18 @@ prefix so they do not collide with the track source's `POLL_INTERVAL_SECS` and
 
 ## Compose stack
 
-From the repository root, one Compose file runs the scratch service with the advisory and track
-sidecars, with advisories and tracks on. It names the released GHCR images at the version in
-`docker-compose.yml` (`0.7.1`), so the stack can be pulled instead of built:
+From the repository root, one Compose file runs one service, `amtrak-gtfs-rt`: the one image
+with its browser worker inside, every optional source on, and the hardening defaults. It names the
+released GHCR image at the version in `docker-compose.yml`, so it can be pulled instead of built
+once a release ships the one image:
 
 ```bash
 docker compose pull && docker compose up -d
 ```
 
-Each service keeps its `build:` section, so the stack still builds from a checkout. `--build`
-tags the result with the same GHCR names; set `AMTRAK_IMAGE_TAG` to keep local builds apart from a
-pulled release:
+The service keeps its `build:` section, so it still builds from a checkout. `--build` tags the
+result with the same GHCR name; set `AMTRAK_IMAGE_TAG` to keep local builds apart from a pulled
+release:
 
 ```bash
 docker compose up -d --build                         # build from this checkout
@@ -569,68 +553,65 @@ AMTRAK_IMAGE_TAG=local docker compose up -d --build  # ...tagged :local instead 
 
 ```mermaid
 flowchart LR
-  host["Host loopback 127.0.0.1:8090"] --> svc["amtrak-gtfs-rt :8080"]
+  host["Host loopback 127.0.0.1:8090"] --> svc
   subgraph net["Compose network amtrak 172.31.240.0/24"]
-    svc
-    adv["advisory-fetcher :8080"]
-    trk["track-fetcher :8081"]
+    subgraph box["amtrak-gtfs-rt container"]
+      svc["service :8080"]
+      worker["browser worker 127.0.0.1:8081"]
+      svc -->|"starts, restarts, stops"| worker
+    end
   end
-  svc -->|"AMTRAK_ADVISORIES_URL"| adv
-  svc -->|"AMTRAK_TRACKS_AMTRAK_URL"| trk
   svc --- data[("amtrak-data volume")]
-  adv --- snaps[("advisory-snapshots volume")]
 ```
 
-That stack sets:
+That service sets:
 
 ```text
-AMTRAK_ADVISORIES=on
-AMTRAK_ADVISORIES_URL=http://advisory-fetcher:8080/service-alerts-and-notices
 AMTRAK_TRACKS=on
-AMTRAK_TRACKS_AMTRAK_URL=http://track-fetcher:8081/tracks.json
-AMTRAK_BIND_ADDR=0.0.0.0:8080
-AMTRAK_ALLOWED_PEER_IPS=172.31.240.1
+AMTRAK_TRACKS_AMTRAK=on
+AMTRAK_ADVISORIES=on
+AMTRAK_ALLOWED_PEER_IPS=gateway,172.31.240.10
 AMTRAK_PUBLIC_URL=http://127.0.0.1:8090
 ```
 
+`gateway` is the Compose network's gateway, `172.31.240.1`, which is where requests through the
+published port arrive. `172.31.240.10` is the optional proxy. A `403` means the observed peer
+differs; the denied request logs `peer=<ip>`.
+
 NJ Transit's tracks also need `NJT_RAILDATA_USERNAME` and `NJT_RAILDATA_PASSWORD`, for example in
 the `.env` file next to `docker-compose.yml`, which Compose reads; without them that board is
-skipped. Set `AMTRAK_TRACKS_AMTRAK=off` to keep the other boards without Amtrak's. To run
-with no tracks at all, and without the sidecar's Chromium:
+skipped. Turn sources off with their flags. With both browser sources off, no Python or Chromium
+process runs:
 
 ```bash
-AMTRAK_TRACKS=off docker compose up -d
+AMTRAK_TRACKS_AMTRAK=off AMTRAK_ADVISORIES=off docker compose up -d
+AMTRAK_TRACKS=off docker compose up -d   # no track stamps or platform stops at all
 ```
 
 The feed is published on host loopback port 8090 (`http://127.0.0.1:8090`), leaving host port 8080
-free for other services. The allowlist is the gateway of the Compose network, which is the peer
-the container sees for that published port on Docker Engine for Linux. A `403` means the observed
-peer differs; the denied request logs `peer=<ip>`. Neither sidecar is published to the host.
+free for other services. The worker is never published.
 
-Both sidecars run Chromium with `--disable-dev-shm-usage`, so Compose gives each a 64 MiB
-`/dev/shm` instead of 1 GiB. Chromium stays in the sidecar images and never enters the scratch
-service image. The release workflow publishes the sidecars as separate images. Their Debian and
-Chromium base always has some vulnerability matches without a fix, so they are outside the scratch
-image's zero-match gate; they instead fail a release on any Critical or High match that has a fix,
-and their full Grype reports are release assets. Playwright's bundled Chromium is not a package
-Grype can see, so keeping the pinned Playwright version current is what keeps Chromium patched.
+Compose confines the container: a read-only root filesystem, tmpfs `/tmp` and `/home/amtrak`
+(Chromium's profile), all capabilities dropped, `no-new-privileges`, a 1.5 GB memory limit, a
+512-process limit, and a 64 MB `/dev/shm` (Chromium runs with `--disable-dev-shm-usage`). `/data`
+is the only writable volume. Playwright's bundled Chromium is not a package Grype can see, so
+keeping the pinned Playwright version current is what keeps Chromium patched.
 
 > [!TIP]
-> Both sidecars use `chromium-headless-shell`, the lightest browser that passes Amtrak's Akamai
-> check. If Amtrak starts rejecting it, rebuild both with full Chromium and Xvfb and run them
-> headful. The images get larger and headful Chromium uses more memory:
+> The worker uses `chromium-headless-shell`, the lightest browser that passes Amtrak's Akamai
+> check. If Amtrak starts rejecting it, rebuild with full Chromium and Xvfb and run it headful.
+> The image gets larger and headful Chromium uses more memory:
 >
 > ```bash
 > AMTRAK_IMAGE_TAG=local FETCHER_BROWSER_BUNDLE=full FETCHER_BROWSER_MODE=xvfb-headful \
 >   docker compose up -d --build
 > ```
 
-To run the Rust service alone with advisories left off, skip Compose and run the scratch image by
-itself:
+Without Compose, run the image by itself (no hardening defaults, every source on):
 
 ```bash
 docker build --tag amtrak-gtfs-rt:local .
-docker run --rm --network host -v amtrak-data:/data amtrak-gtfs-rt:local
+docker run -d -p 127.0.0.1:8090:8080 -v amtrak-data:/data amtrak-gtfs-rt:local
 ```
 
 ## Service Alerts & Notices
@@ -1026,7 +1007,9 @@ The [release gates](.github/workflows/release-gates.yml) workflow runs the relea
 image checks on pull requests before a tag is pushed: it builds the linux/amd64 service image, runs
 [`scripts/test-container.sh`](scripts/test-container.sh), and scans it with the pinned syft and
 grype from [`scripts/install-release-scanners.sh`](scripts/install-release-scanners.sh) under the
-same zero-match policy. Because the smoke test fetches live Amtrak data, it runs only when a PR
+release's policy: no Critical or High match that has a fix. The scratch image's zero-match policy
+ended with the one image's Debian and Chromium base, which always carries unfixed matches; the
+full Grype report stays a release asset. Because the smoke test fetches live Amtrak data, it runs only when a PR
 touches the image inputs (`Dockerfile`, `.dockerignore`, `container/`, any file in `src/`,
 `Cargo.toml`, `Cargo.lock`, or the smoke/scanner/policy scripts), which includes every release PR's
 version bump. It also runs weekly and on demand, so a new advisory against the current image shows

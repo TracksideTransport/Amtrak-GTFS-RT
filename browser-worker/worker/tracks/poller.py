@@ -114,6 +114,18 @@ def load_trains(cfg: Config) -> dict:
     return parsed
 
 
+def load_train_list_file(path: str) -> dict:
+    """The ``amtrak-fleet-trains/v1`` list the one-container service writes after each generation.
+
+    Raises ``OSError`` until the service has published its first generation; the cycle is retried.
+    """
+    with open(path, encoding="utf-8") as handle:
+        parsed = json.loads(handle.read())
+    if not isinstance(parsed, dict):
+        raise ValueError("fleet train list is not an object")
+    return parsed
+
+
 def load_fleet_trains(root: str) -> dict:
     """The ``amtrak-fleet-trains/v1`` list VehiclePositions wrote for the current fleet snapshot.
 
@@ -132,10 +144,15 @@ def load_fleet_trains(root: str) -> dict:
 
 
 async def _default_trains(cfg: Config) -> dict:
-    """Inside TripUpdates, read the fleet snapshot. VehiclePositions is the only map poller.
+    """Read the service's train list. The service is the only map poller.
 
-    Without ``AMTRAK_OUTPUT_DIR`` (a worker run on its own), fall back to polling the map.
+    In the one container the service names its list in ``AMTRAK_FLEET_TRAINS_FILE``. Inside the
+    TripUpdates role, read the fleet snapshot VehiclePositions wrote under ``AMTRAK_OUTPUT_DIR``.
+    With neither (a worker run on its own), fall back to polling the map.
     """
+    train_list = os.environ.get("AMTRAK_FLEET_TRAINS_FILE", "")
+    if train_list:
+        return await asyncio.to_thread(load_train_list_file, train_list)
     root = os.environ.get("AMTRAK_OUTPUT_DIR", "")
     if root:
         return await asyncio.to_thread(load_fleet_trains, root)
@@ -423,6 +440,7 @@ async def run_forever(
     try:
         while iterations is None or count < iterations:
             full = elapsed == 0 or elapsed >= cfg.base_interval_secs
+            raised = False
             try:
                 succeeded = await poll_once(
                     store,
@@ -436,12 +454,20 @@ async def run_forever(
             except Exception:  # noqa: BLE001 — a failed cycle must not crash the worker
                 logger.exception("track poll failed; keeping the last snapshot")
                 succeeded = False
+                raised = True
             store.record_poll(succeeded)
             store.mark_cycle(now_of().timestamp())
             count += 1
             if iterations is not None and count >= iterations:
                 break
             await sleep(cfg.poll_interval_secs)
-            elapsed = cfg.poll_interval_secs if full else elapsed + cfg.poll_interval_secs
+            if full and raised:
+                # The cycle never got a train list (the service has not published its first
+                # generation yet, or the list was unreadable), so no train was polled. Retry the
+                # full poll on the next tick instead of a base interval later. A cycle that reached
+                # Amtrak and was refused keeps the normal schedule.
+                elapsed = 0
+            else:
+                elapsed = cfg.poll_interval_secs if full else elapsed + cfg.poll_interval_secs
     finally:
         await browser.close()

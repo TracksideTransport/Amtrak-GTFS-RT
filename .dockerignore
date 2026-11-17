@@ -65,3 +65,9 @@ id_ed25519
 **/__pycache__
 **/*.pyc
 **/.pytest_cache
+/.worktrees
+/.claude
+/.agents
+/.kiro
+/track-fetcher
+/advisory-fetcher

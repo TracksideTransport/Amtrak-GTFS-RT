@@ -1,106 +1,76 @@
-# Primary packaging today: the vehicle-positions (scratch), trip-updates, and alerts role images.
+# One container: the service, its browser worker, and the validator (docs/one-container.md).
 #
-# Each service names its released GHCR image (linux/amd64 and linux/arm64, so a Raspberry Pi
-# pulls native builds) and keeps its local build. Pull the release and start it without building:
+# The service names its released GHCR image (linux/amd64 and linux/arm64, so a Raspberry Pi pulls
+# a native build) and keeps its local build. Pull the release and start it without building:
 #
 #   docker compose pull && docker compose up -d
 #
-# `--build` builds from this checkout instead and tags the result with the same names. To keep
+# `--build` builds from this checkout instead and tags the result with the same name. To keep
 # local builds apart from the pulled release, give them another tag:
 #
 #   AMTRAK_IMAGE_TAG=local docker compose up -d --build
 #
-# vehicle-positions is the root Dockerfile `runtime` stage (scratch) and has no Chromium. The
-# trip-updates and alerts images each start the browser worker (browser-worker/) on
-# 127.0.0.1:8081 inside their own container: trip-updates with only its track source on, alerts
-# with only its notices source on. Advisories are on in this stack and fail open if the worker is
-# down. Track and gate assignments are on too: Amtrak's own track numbers and boarding gates come
-# from the worker, and NJ Transit's from RailData when its credentials are set. Tracks change the
-# published static feed; see the README. To run without them:
+# Every optional source is on: Amtrak's own track and gate documents and the station notices
+# come from the built-in browser worker on 127.0.0.1:8081 inside the container, the Hartford
+# board is fetched directly, and NJ Transit tracks are on when RailData credentials are set.
+# Each fails open. Turn sources off with their flags, for example:
 #
-#   AMTRAK_TRACKS=off docker compose up -d
+#   AMTRAK_TRACKS=off AMTRAK_ADVISORIES=off docker compose up -d
 #
-# Build the images without starting them: `docker buildx bake service trip-updates alerts`
+# With AMTRAK_TRACKS_AMTRAK and AMTRAK_ADVISORIES both off, no Python or Chromium process runs.
 #
 # The worker uses chromium-headless-shell. If Amtrak blocks it, rebuild with full Chromium and Xvfb
-# and run headful (larger images, more memory on a Pi):
+# and run headful (a larger image and more memory on a Pi):
 #
 #   AMTRAK_IMAGE_TAG=local FETCHER_BROWSER_BUNDLE=full FETCHER_BROWSER_MODE=xvfb-headful \
 #     docker compose up -d --build
 #
-# Rust service alone, advisories off (image default; do not set AMTRAK_ADVISORIES):
+# Without Compose, the image alone:
 #
-#   docker build --tag amtrak-gtfs-rt:local .
-#   docker run --rm --network host -v amtrak-data:/data amtrak-gtfs-rt:local
+#   docker run -d -p 127.0.0.1:8090:8080 -v amtrak-data:/data ghcr.io/sohampatwardhan/amtrak-gtfs-rt
 
-# Fixed so the volumes and the pinned subnet below belong to one named project, whatever
+# Fixed so the volume and the pinned subnet below belong to one named project, whatever
 # directory the stack is started from.
 name: amtrak-gtfs-rt
 
 services:
-  vehicle-positions:
+  amtrak-gtfs-rt:
     build:
       context: .
       dockerfile: Dockerfile
       target: runtime
+      args:
+        BROWSER_BUNDLE: ${FETCHER_BROWSER_BUNDLE:-headless-shell}
     image: ghcr.io/sohampatwardhan/amtrak-gtfs-rt:${AMTRAK_IMAGE_TAG:-0.7.1}
     restart: unless-stopped
     environment:
-      AMTRAK_ROLE: vehicle-positions
       AMTRAK_TRACKS: ${AMTRAK_TRACKS:-on}
-      AMTRAK_TRACKS_AMTRAK_URL: ""
-      AMTRAK_BIND_ADDR: 0.0.0.0:8080
-      # 172.31.240.1 is the Compose gateway (the host). 172.31.240.10 is the optional
-      # proxy. The service still ignores X-Forwarded-For and serves 127.0.0.1:8090 directly.
-      AMTRAK_ALLOWED_PEER_IPS: 172.31.240.1,172.31.240.10
+      AMTRAK_TRACKS_AMTRAK: ${AMTRAK_TRACKS_AMTRAK:-on}
+      AMTRAK_ADVISORIES: ${AMTRAK_ADVISORIES:-on}
+      NJT_RAILDATA_USERNAME: ${NJT_RAILDATA_USERNAME:-}
+      NJT_RAILDATA_PASSWORD: ${NJT_RAILDATA_PASSWORD:-}
+      # `gateway` is 172.31.240.1 below: the host, through the published port. 172.31.240.10 is
+      # the optional proxy. The service ignores X-Forwarded-For and serves 127.0.0.1:8090 directly.
+      AMTRAK_ALLOWED_PEER_IPS: gateway,172.31.240.10
       AMTRAK_PUBLIC_URL: http://127.0.0.1:8090
+      BROWSER_MODE: ${FETCHER_BROWSER_MODE:-headless-shell}
     ports:
       - "127.0.0.1:8090:8080"
     volumes:
       - amtrak-data:/data
-    networks: [amtrak]
-
-  trip-updates:
-    build:
-      context: .
-      dockerfile: trip-updates.Dockerfile
-      args:
-        BROWSER_BUNDLE: ${FETCHER_BROWSER_BUNDLE:-headless-shell}
-    image: ghcr.io/sohampatwardhan/amtrak-gtfs-rt-trip-updates:${AMTRAK_IMAGE_TAG:-0.7.1}
-    restart: unless-stopped
+    # Hardening. /data is the only writable volume; /tmp and the user's home (Chromium's profile)
+    # are tmpfs. Chromium needs the larger /dev/shm.
+    read_only: true
+    tmpfs:
+      - /tmp:size=256m,mode=1777
+      - /home/amtrak:size=256m,uid=10001,gid=10001,mode=0700
     shm_size: "64mb"
-    init: true
-    mem_limit: 768m
-    pids_limit: 256
-    environment:
-      AMTRAK_ROLE: trip-updates
-      AMTRAK_TRACKS: ${AMTRAK_TRACKS:-on}
-      AMTRAK_TRACKS_BASE_INTERVAL_SECS: "900"
-      POLL_INTERVAL_SECS: "60"
-      BROWSER_MODE: ${FETCHER_BROWSER_MODE:-headless-shell}
-      BLOCK_SUBRESOURCES: "true"
-      BLOCK_THIRD_PARTY: "true"
-    volumes:
-      - amtrak-data:/data
-    networks: [amtrak]
-
-  alerts:
-    build:
-      context: .
-      dockerfile: alerts.Dockerfile
-      args:
-        BROWSER_BUNDLE: ${FETCHER_BROWSER_BUNDLE:-headless-shell}
-    image: ghcr.io/sohampatwardhan/amtrak-gtfs-rt-alerts:${AMTRAK_IMAGE_TAG:-0.7.1}
-    restart: unless-stopped
-    shm_size: "64mb"
-    environment:
-      AMTRAK_ROLE: alerts
-      AMTRAK_ADVISORIES: "on"
-      NOTICES_POLL_INTERVAL_SECS: "900"
-      BROWSER_MODE: ${FETCHER_BROWSER_MODE:-headless-shell}
-      BLOCK_SUBRESOURCES: "true"
-    volumes:
-      - amtrak-data:/data
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 1536m
+    pids_limit: 512
+    stop_grace_period: 10s
     networks: [amtrak]
 
   # Optional edge. Off unless started with `docker compose --profile proxy up`.
@@ -112,7 +82,7 @@ services:
     image: amtrak-gtfs-rt-proxy:${AMTRAK_IMAGE_TAG:-0.7.1}
     restart: unless-stopped
     depends_on:
-      - vehicle-positions
+      - amtrak-gtfs-rt
     environment:
       AMTRAK_PROXY_TLS: ${AMTRAK_PROXY_TLS:-off}
       AMTRAK_PROXY_DOMAIN: ${AMTRAK_PROXY_DOMAIN:-}
@@ -135,4 +105,3 @@ networks:
 
 volumes:
   amtrak-data:
-  advisory-snapshots:
