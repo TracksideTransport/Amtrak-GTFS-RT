@@ -23,6 +23,8 @@ def test_defaults_poll_near_arrival_and_cap_each_cycle():
     assert cfg.relaunch_backoff_max_secs == 900
     assert cfg.liveness_secs == 900
     assert cfg.block_third_party is True
+    assert cfg.base_interval_secs == 900
+    assert cfg.lead_time_file == ""
 
 
 def test_overrides_and_rejections():
@@ -33,8 +35,14 @@ def test_overrides_and_rejections():
             "TRACK_WINDOW_BEFORE_SECS": "1200",
             "BLOCK_SUBRESOURCES": "off",
             "BLOCK_THIRD_PARTY": "false",
+            "AMTRAK_TRACKS_BASE_INTERVAL_SECS": "600",
+            "AMTRAK_TRACKS_LEAD_TIME_FILE": "/data/survey.profile.json",
+            "TRACK_HOT_WINDOW_SECS": "300",
         }
     )
+    assert cfg.base_interval_secs == 600
+    assert cfg.lead_time_file == "/data/survey.profile.json"
+    assert cfg.hot_window_secs == 300
     assert cfg.block_third_party is False
     assert cfg.poll_interval_secs == 30
     assert cfg.max_fetches_per_cycle == 8
@@ -44,3 +52,5 @@ def test_overrides_and_rejections():
         Config.from_env({"MAX_FETCHES_PER_CYCLE": "0"})
     with pytest.raises(ConfigError, match="BROWSER_MODE"):
         Config.from_env({"BROWSER_MODE": "lynx"})
+    with pytest.raises(ConfigError, match="AMTRAK_TRACKS_BASE_INTERVAL_SECS"):
+        Config.from_env({"AMTRAK_TRACKS_BASE_INTERVAL_SECS": "0"})

@@ -1,7 +1,8 @@
 //! Early track refreshes.
 //!
-//! The base poll runs on a fixed interval. A feed request can ask for a train or
-//! a station sooner. Those hints are debounced, coalesced per train, and capped
+//! The browser worker's track poller owns the base and hot schedule
+//! (`AMTRAK_TRACKS_BASE_INTERVAL_SECS`, the lead-time profile, the hot window). This module owns
+//! the other half: a feed request can ask for a train or a station sooner. Those hints are debounced, coalesced per train, and capped
 //! so a burst cannot exceed the polite per-cycle fetch limit. Recording a hint
 //! does not fetch anything: the service queues each flush as one file under
 //! `{AMTRAK_OUTPUT_DIR}/tracks/early-refresh/`, which the browser worker's track
@@ -16,9 +17,6 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-
-/// Default minutes between full track polls.
-pub const DEFAULT_BASE_INTERVAL: Duration = Duration::from_secs(15 * 60);
 
 /// Quiet period that collapses a burst of hints into one refresh.
 pub const DEFAULT_DEBOUNCE: Duration = Duration::from_secs(5);
@@ -38,7 +36,6 @@ pub const DEFAULT_MAX_PER_FLUSH: usize = 24;
 /// use std::time::{Duration, Instant};
 ///
 /// let mut scheduler = TrackScheduler::new(
-///     Duration::from_secs(900),
 ///     Duration::from_secs(5),
 ///     Duration::from_secs(90),
 ///     24,
@@ -54,11 +51,9 @@ pub const DEFAULT_MAX_PER_FLUSH: usize = 24;
 /// ```
 #[derive(Clone, Debug)]
 pub struct TrackScheduler {
-    base_interval: Duration,
     debounce: Duration,
     min_gap: Duration,
     max_per_flush: usize,
-    last_base: Option<Instant>,
     /// Train number -> last time a caller asked for it in the current burst.
     last_touch: HashMap<String, Instant>,
     last_refresh: HashMap<String, Instant>,
@@ -70,7 +65,6 @@ impl TrackScheduler {
     ///
     /// # Arguments
     ///
-    /// * `base_interval` - Time between full track polls.
     /// * `debounce` - Quiet time after the latest hint before that train is due.
     /// * `min_gap` - Minimum time between two refreshes of one train.
     /// * `max_per_flush` - Most trains `take_early` returns at once.
@@ -86,25 +80,17 @@ impl TrackScheduler {
     /// use std::time::Duration;
     ///
     /// let scheduler = TrackScheduler::new(
-    ///     Duration::from_secs(900),
     ///     Duration::from_secs(5),
     ///     Duration::from_secs(90),
     ///     DEFAULT_MAX_PER_FLUSH,
     /// );
     /// assert_eq!(scheduler.max_per_flush(), 24);
     /// ```
-    pub fn new(
-        base_interval: Duration,
-        debounce: Duration,
-        min_gap: Duration,
-        max_per_flush: usize,
-    ) -> Self {
+    pub fn new(debounce: Duration, min_gap: Duration, max_per_flush: usize) -> Self {
         Self {
-            base_interval,
             debounce,
             min_gap,
             max_per_flush,
-            last_base: None,
             last_touch: HashMap::new(),
             last_refresh: HashMap::new(),
             station_touch: HashMap::new(),
@@ -219,29 +205,6 @@ impl TrackScheduler {
         }
         due
     }
-
-    /// Whether a full base poll is due.
-    ///
-    /// The first call is due immediately so a process does not wait out the
-    /// whole interval before its first pass. Later calls are due once
-    /// `base_interval` has elapsed since the previous due call.
-    ///
-    /// # Arguments
-    ///
-    /// * `now` - Time the scheduler is asked.
-    ///
-    /// # Returns
-    ///
-    /// `true` when the caller should run a full track poll.
-    pub fn base_due(&mut self, now: Instant) -> bool {
-        match self.last_base {
-            Some(previous) if now.saturating_duration_since(previous) < self.base_interval => false,
-            _ => {
-                self.last_base = Some(now);
-                true
-            }
-        }
-    }
 }
 
 fn normalize_train(train: &str) -> Option<String> {
@@ -255,12 +218,7 @@ fn normalize_train(train: &str) -> Option<String> {
 impl TrackScheduler {
     /// A scheduler with the parsed `AMTRAK_TRACKS_*` tuning.
     pub fn from_config(config: &EarlyRefreshConfig) -> Self {
-        Self::new(
-            config.base_interval,
-            config.debounce,
-            config.min_gap,
-            config.max_per_flush,
-        )
+        Self::new(config.debounce, config.min_gap, config.max_per_flush)
     }
 }
 
@@ -369,12 +327,7 @@ mod tests {
     }
 
     fn scheduler() -> TrackScheduler {
-        TrackScheduler::new(
-            Duration::from_secs(900),
-            Duration::from_secs(5),
-            Duration::from_secs(90),
-            24,
-        )
+        TrackScheduler::new(Duration::from_secs(5), Duration::from_secs(90), 24)
     }
 
     #[test]
@@ -395,12 +348,7 @@ mod tests {
 
     #[test]
     fn min_gap_holds_a_train_and_the_cap_leaves_the_rest_queued() {
-        let mut scheduler = TrackScheduler::new(
-            Duration::from_secs(900),
-            Duration::from_secs(0),
-            Duration::from_secs(90),
-            2,
-        );
+        let mut scheduler = TrackScheduler::new(Duration::from_secs(0), Duration::from_secs(90), 2);
         let start = Instant::now();
         for train in ["10", "2", "30", "4"] {
             scheduler.enqueue_train(train, start);
@@ -421,15 +369,6 @@ mod tests {
             scheduler.take_early(start + Duration::from_secs(92)),
             vec!["2".to_string()]
         );
-    }
-
-    #[test]
-    fn base_interval_gates_the_full_poll() {
-        let mut scheduler = scheduler();
-        let start = Instant::now();
-        assert!(scheduler.base_due(start));
-        assert!(!scheduler.base_due(start + Duration::from_secs(899)));
-        assert!(scheduler.base_due(start + Duration::from_secs(900)));
     }
 
     #[test]

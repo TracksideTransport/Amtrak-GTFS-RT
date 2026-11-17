@@ -453,6 +453,33 @@ def test_a_cycle_without_a_train_list_retries_the_full_poll_on_the_next_tick(mon
     assert fulls == [True, True, False, False]
 
 
+def test_full_polls_run_every_base_interval_and_hot_checks_between(monkeypatch):
+    fulls = []
+
+    async def fake_poll_once(store, cfg, last_fetched, *, now, trains_fetcher, status_fetcher, full):
+        fulls.append(full)
+        return True
+
+    async def no_sleep(_secs):
+        return None
+
+    monkeypatch.setattr("worker.tracks.poller.poll_once", fake_poll_once)
+    cfg = Config(poll_interval_secs=60, base_interval_secs=180)
+    asyncio.run(
+        run_forever(
+            TrackStore(),
+            cfg,
+            trains_fetcher=lambda _cfg: None,
+            status_fetcher=lambda *_args: None,
+            sleep=no_sleep,
+            iterations=7,
+        )
+    )
+    # AMTRAK_TRACKS_BASE_INTERVAL_SECS=180 with POLL_INTERVAL_SECS=60: a full poll, two
+    # hot-station checks, then the next full poll.
+    assert fulls == [True, False, False, True, False, False, True]
+
+
 def _queue_hint(root, name, trains=(), stations=()):
     queue = root / "tracks" / "early-refresh"
     queue.mkdir(parents=True, exist_ok=True)

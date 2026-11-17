@@ -24,7 +24,14 @@ DEFAULT_PAGE_URL = "https://www.amtrak.com/tickets/train-status.html"
 
 @dataclasses.dataclass(frozen=True)
 class Config:
-    """Immutable fetcher configuration."""
+    """Immutable fetcher configuration.
+
+    The worker owns the base and hot schedule: ``base_interval_secs``, ``lead_time_file``, and
+    ``hot_window_secs``. Debouncing ``train`` and ``station`` requests, the minimum gap between
+    early refreshes of one train, and the per-flush cap belong to the service
+    (``AMTRAK_TRACKS_DEBOUNCE_SECS``, ``AMTRAK_TRACKS_MIN_GAP_SECS``, ``AMTRAK_TRACKS_MAX_EARLY``),
+    which hands the result over in ``tracks/early-refresh/``.
+    """
 
     trains_url: str = DEFAULT_TRAINS_URL
     page_url: str = DEFAULT_PAGE_URL
@@ -46,8 +53,6 @@ class Config:
     block_third_party: bool = True
     lead_time_file: str = ""
     base_interval_secs: int = 900
-    debounce_secs: int = 5
-    min_gap_secs: int = 90
 
     @staticmethod
     def from_env(env: Mapping[str, str]) -> "Config":
@@ -73,7 +78,5 @@ class Config:
             block_third_party=flag(env, "BLOCK_THIRD_PARTY", True),
             lead_time_file=env.get("AMTRAK_TRACKS_LEAD_TIME_FILE", ""),
             base_interval_secs=pos_int(env, "AMTRAK_TRACKS_BASE_INTERVAL_SECS", 900),
-            debounce_secs=pos_int(env, "AMTRAK_TRACKS_DEBOUNCE_SECS", 5),
-            min_gap_secs=pos_int(env, "AMTRAK_TRACKS_MIN_GAP_SECS", 90),
         )
 

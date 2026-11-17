@@ -48,12 +48,11 @@ pub fn is_worker_url(url: &str) -> bool {
 /// Debounced early track refreshes that `train` and `station` queries on trip updates request.
 ///
 /// The service queues them for the browser worker's track poller. Env
-/// `AMTRAK_TRACKS_BASE_INTERVAL_SECS` (default 900), `AMTRAK_TRACKS_DEBOUNCE_SECS` (default 5),
-/// `AMTRAK_TRACKS_MIN_GAP_SECS` (default 90), and `AMTRAK_TRACKS_MAX_EARLY` (default 24).
+/// `AMTRAK_TRACKS_DEBOUNCE_SECS` (default 5), `AMTRAK_TRACKS_MIN_GAP_SECS` (default 90), and
+/// `AMTRAK_TRACKS_MAX_EARLY` (default 24). The base interval and lead-time profile belong to the
+/// worker, which reads them itself.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct EarlyRefreshConfig {
-    /// Time between full track polls.
-    pub base_interval: Duration,
     /// Quiet period that collapses a burst of requests into one refresh.
     pub debounce: Duration,
     /// Minimum time between early refreshes of one train.
@@ -80,9 +79,7 @@ impl EarlyRefreshConfig {
     pub fn from_map<F: Fn(&str) -> Option<String>>(
         get: F,
     ) -> Result<EarlyRefreshConfig, ConfigError> {
-        use crate::schedule::{
-            DEFAULT_BASE_INTERVAL, DEFAULT_DEBOUNCE, DEFAULT_MAX_PER_FLUSH, DEFAULT_MIN_GAP,
-        };
+        use crate::schedule::{DEFAULT_DEBOUNCE, DEFAULT_MAX_PER_FLUSH, DEFAULT_MIN_GAP};
         let secs = |key, default: Duration| {
             parse_u64(&get, key, default.as_secs()).map(Duration::from_secs)
         };
@@ -92,7 +89,6 @@ impl EarlyRefreshConfig {
             DEFAULT_MAX_PER_FLUSH as u64,
         )?;
         Ok(EarlyRefreshConfig {
-            base_interval: secs("AMTRAK_TRACKS_BASE_INTERVAL_SECS", DEFAULT_BASE_INTERVAL)?,
             debounce: secs("AMTRAK_TRACKS_DEBOUNCE_SECS", DEFAULT_DEBOUNCE)?,
             min_gap: secs("AMTRAK_TRACKS_MIN_GAP_SECS", DEFAULT_MIN_GAP)?,
             max_per_flush: usize::try_from(max_per_flush).unwrap_or(usize::MAX),
@@ -1069,7 +1065,6 @@ fn env_field(key: &str) -> &'static str {
         "AMTRAK_GENERATION_RETAIN_SECS" => "AMTRAK_GENERATION_RETAIN_SECS",
         "AMTRAK_GENERATION_MAX" => "AMTRAK_GENERATION_MAX",
         "AMTRAK_VALIDATOR_CACHE" => "AMTRAK_VALIDATOR_CACHE",
-        "AMTRAK_TRACKS_BASE_INTERVAL_SECS" => "AMTRAK_TRACKS_BASE_INTERVAL_SECS",
         "AMTRAK_TRACKS_DEBOUNCE_SECS" => "AMTRAK_TRACKS_DEBOUNCE_SECS",
         "AMTRAK_TRACKS_MIN_GAP_SECS" => "AMTRAK_TRACKS_MIN_GAP_SECS",
         "AMTRAK_TRACKS_MAX_EARLY" => "AMTRAK_TRACKS_MAX_EARLY",
@@ -1642,18 +1637,15 @@ mod tests {
     #[test]
     fn early_refresh_tuning_defaults_and_overrides() {
         let defaults = EarlyRefreshConfig::from_map(|_| None).unwrap();
-        assert_eq!(defaults.base_interval, Duration::from_secs(900));
         assert_eq!(defaults.debounce, Duration::from_secs(5));
         assert_eq!(defaults.min_gap, Duration::from_secs(90));
         assert_eq!(defaults.max_per_flush, 24);
         let tuned = EarlyRefreshConfig::from_map(map(&[
-            ("AMTRAK_TRACKS_BASE_INTERVAL_SECS", "600"),
             ("AMTRAK_TRACKS_DEBOUNCE_SECS", "2"),
             ("AMTRAK_TRACKS_MIN_GAP_SECS", "30"),
             ("AMTRAK_TRACKS_MAX_EARLY", "8"),
         ]))
         .unwrap();
-        assert_eq!(tuned.base_interval, Duration::from_secs(600));
         assert_eq!(tuned.debounce, Duration::from_secs(2));
         assert_eq!(tuned.min_gap, Duration::from_secs(30));
         assert_eq!(tuned.max_per_flush, 8);
