@@ -362,7 +362,7 @@ async def poll_once(
 def take_early_hints() -> tuple[set[str], set[str]]:
     """Consume queued early-refresh hints: ``(train numbers, station codes)``.
 
-    VehiclePositions renames each flush into ``tracks/early-refresh/``. Every complete file
+    The service renames each flush into ``tracks/early-refresh/``. Every complete file
     is read and deleted, so a hint is acted on once; dot-prefixed files are still being
     written and are left alone. No output directory means no hints.
     """
