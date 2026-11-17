@@ -326,6 +326,7 @@ async def poll_once(
         cooldown_secs=cfg.cooldown_secs,
         max_fetches=cfg.max_fetches_per_cycle,
         tracked=store.tracked(),
+        hinted={train.key for train in due if train.train_number in early},
     )
     stored = 0
     rejected: Counter[str] = Counter()
