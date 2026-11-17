@@ -8,11 +8,14 @@ window. ``covered`` stations are not narrowed. An ``observed`` station whose
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 
 
 SCHEMA = "amtrak-station-lead-time/v1"
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -36,9 +39,11 @@ class LeadProfile:
             return LeadProfile({})
         try:
             body = json.loads(Path(path).read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+        except (OSError, json.JSONDecodeError) as error:
+            logger.warning("lead-time profile unreadable; using the global windows: %s", type(error).__name__)
             return LeadProfile({})
         if not isinstance(body, dict) or body.get("schema") != SCHEMA:
+            logger.warning("lead-time profile is not %s; using the global windows", SCHEMA)
             return LeadProfile({})
         stations: dict[str, StationWindow] = {}
         for row in body.get("stations") or []:

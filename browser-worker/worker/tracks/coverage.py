@@ -214,7 +214,7 @@ def abort_message(reason: str) -> str:
         return (
             f"www.amtrak.com refused the in-page fetch ({reason}). Akamai blocks clients that "
             "are not a real page on https://www.amtrak.com/tickets/train-status.html. This run "
-            "opened that page in headless Chromium, the same way the track-fetcher does, and "
+            "opened that page in headless Chromium, the same way the browser worker does, and "
             "did not retry or switch to another HTTP client. Re-run where that page loads."
         )
     if reason == "playwright is not installed":
@@ -624,7 +624,7 @@ def _emit(payload: dict, out_path: Path | None, *, tracks: bool) -> None:
     print(format_station_table(payload["stations"]), flush=True)
     print(
         "Ahead is event time minus track.asOf for the earlier of arrival and departure. "
-        "The Track column is the side the track-fetcher would publish (departure, else arrival).",
+        "The Track column is the side the browser worker would publish (departure, else arrival).",
         file=sys.stderr,
     )
     print(

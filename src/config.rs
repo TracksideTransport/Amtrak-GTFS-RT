@@ -80,6 +80,9 @@ impl EarlyRefreshConfig {
         get: F,
     ) -> Result<EarlyRefreshConfig, ConfigError> {
         use crate::schedule::{DEFAULT_DEBOUNCE, DEFAULT_MAX_PER_FLUSH, DEFAULT_MIN_GAP};
+        // A blank value (a Compose pass-through such as `AMTRAK_TRACKS_MAX_EARLY=`) is unset,
+        // as it is for the browser worker that reads the same variables.
+        let get = |key: &str| get(key).filter(|value| !value.trim().is_empty());
         let secs = |key, default: Duration| {
             parse_u64(&get, key, default.as_secs()).map(Duration::from_secs)
         };
@@ -1652,6 +1655,12 @@ mod tests {
         let error = EarlyRefreshConfig::from_map(map(&[("AMTRAK_TRACKS_DEBOUNCE_SECS", "soon")]))
             .unwrap_err();
         assert_eq!(error.field(), "AMTRAK_TRACKS_DEBOUNCE_SECS");
+        let blank = EarlyRefreshConfig::from_map(map(&[
+            ("AMTRAK_TRACKS_DEBOUNCE_SECS", ""),
+            ("AMTRAK_TRACKS_MAX_EARLY", "  "),
+        ]))
+        .unwrap();
+        assert_eq!(blank, defaults);
     }
 
     #[test]

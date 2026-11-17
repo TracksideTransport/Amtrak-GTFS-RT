@@ -32,8 +32,8 @@ PROFILE_SCHEMA = "amtrak-station-lead-time/v1"
 LEAD_TIME_DEFINITION = (
     "Seconds from track.asOf to the event time. The event time is statusInfo.dateTime when "
     "Amtrak sent one, otherwise schedule.dateTime. lead_time_secs is the earlier posting of "
-    "the arrival and departure sides (the greater lead). chosen_lead_time_secs is the side the "
-    "track-fetcher publishes: departure when that track is posted, otherwise arrival. Positive "
+    "the arrival and departure sides (the greater lead). chosen_lead_time_secs is the side "
+    "the browser worker publishes: departure when that track is posted, otherwise arrival. Positive "
     "means the track was posted before the event."
 )
 CONSUMER_RULE = (

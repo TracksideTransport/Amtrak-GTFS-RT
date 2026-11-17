@@ -1,8 +1,9 @@
 # browser-worker
 
 One Python process with one headless Chromium that reads the two Amtrak sources plain HTTP cannot
-reach, and serves both to the Rust service on `127.0.0.1:8081`. It replaces the former
-`track-fetcher/` and `advisory-fetcher/` sidecars.
+reach, and serves both to the Rust service on `127.0.0.1:8081`. It replaced the former
+`track-fetcher/` and `advisory-fetcher/` sidecars, whose standalone images are deprecated (see the
+README's "Deprecated packages").
 
 `www.amtrak.com` sits behind Akamai Bot Manager, which resets a plain HTTP request that lacks a
 JavaScript-earned cookie. The worker runs a real browser (Playwright and
@@ -46,8 +47,8 @@ they never share cookies or pages.
 ## How the track source works
 
 - The maps feed (`maps.amtrak.com/.../getTrainsData`) answers plain HTTP and is decrypted in
-  process. In the trip-updates role it is read from the fleet snapshot VehiclePositions writes
-  instead, so the map is polled once. It decides which trains are near a stop: trains with a rail
+  process. Beside the service, the worker reads the service's train list
+  (`tracks/fleet-trains.json`) instead, so the map is polled once. It decides which trains are near a stop: trains with a rail
   stop between `TRACK_WINDOW_AFTER_SECS` in the past and `TRACK_WINDOW_BEFORE_SECS` in the future
   (default 10 minutes back and 30 minutes ahead). An estimated time replaces the scheduled time.
   Bus stops are ignored.
@@ -191,22 +192,9 @@ terms of use before running it.
 
 ## Run
 
-Today the trip-updates and alerts role images each start this worker inside their own container
-(`python -m worker` from `/app`), with the other source turned off. The one-container image in
-[`docs/one-container.md`](../docs/one-container.md) runs a single worker with both sources.
-
-`browser-worker/Dockerfile` also builds the two standalone images still published as
-`ghcr.io/sohampatwardhan/amtrak-gtfs-rt-track-fetcher` and
-`ghcr.io/sohampatwardhan/amtrak-gtfs-rt-advisory-fetcher`, as two targets built from the
-repository root. Each runs one source on its old port (`8081` for tracks, `8080` for notices) and
-listens on `0.0.0.0` so another container can reach it:
-
-```bash
-docker build --file browser-worker/Dockerfile --target track-fetcher --tag track-fetcher:local .
-docker build --file browser-worker/Dockerfile --target advisory-fetcher --tag advisory-fetcher:local .
-```
-
-Those packages are retired by #74.
+The service starts this worker inside the one image (`python -m worker` from `/app`) when either
+browser source is on, with both sources in one process and one Chromium
+([`docs/one-container.md`](../docs/one-container.md)).
 
 On a host, from this directory, with Playwright and its headless shell installed:
 
@@ -254,8 +242,8 @@ Train  Service date  Station  Side       Track  Gate  Scheduled                 
 chromium`). The image already has both:
 
 ```bash
-docker run --rm --read-only --tmpfs /tmp --shm-size 64m \
-  --entrypoint python track-fetcher:local -m worker.tracks.dump 66 2150
+docker run --rm --read-only --tmpfs /tmp --tmpfs /home/amtrak --shm-size 64m --workdir /app \
+  --entrypoint python3 amtrak-gtfs-rt:local -m worker.tracks.dump 66 2150
 ```
 
 ## Station coverage
@@ -336,7 +324,7 @@ A directory of hourly snapshots, merged each morning. `merge` on a directory rea
 
 `suggested_window_before_secs` is the longest measured lead, plus 10 percent (at least a minute), rounded up to a minute, and clamped between 10 minutes and 12 hours. It is null when that lead is zero or negative: the stamp is not before the event, which is common for a train that has already arrived, and `compared_to_default` is then `unknown`. It is `wider` when the suggestion is longer than the global 1800 seconds and `covered` when the tracks already show up inside that global window. `suggested_hot_window_secs` widens past 720 only when the median chosen lead is 15 minutes or less.
 
-`AMTRAK_TRACKS_LEAD_TIME_FILE` points at this file. The Rust loader and `worker/tracks/lead_time.py` apply it the same way:
+`AMTRAK_TRACKS_LEAD_TIME_FILE` points at this file. `worker/tracks/lead_time.py` applies it, and a file that is missing, unreadable, or has another `schema` logs a warning and leaves every station on the global windows:
 
 1. Adopt a station only when `confidence` is `observed` and `compared_to_default` is `wider`. That station's lookahead becomes `suggested_window_before_secs`, and its hot window becomes `suggested_hot_window_secs` when that value is a positive integer.
 2. Leave `sparse` stations on the global windows even when their suggestion is `wider`. Three measurable leads are required before a station changes the poll.

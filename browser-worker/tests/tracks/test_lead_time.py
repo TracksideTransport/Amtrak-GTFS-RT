@@ -90,3 +90,13 @@ def test_a_profile_with_another_schema_is_ignored(tmp_path: Path):
     profile = LeadProfile.load(str(path), default_before=1800, default_hot=720)
     assert profile.stations == {}
     assert profile.before_secs("PVD", 1800) == 1800
+
+
+def test_an_unusable_profile_warns_and_keeps_the_global_windows(tmp_path: Path, caplog):
+    wrong = tmp_path / "wrong.json"
+    wrong.write_text(json.dumps({"schema": "something-else", "stations": []}), encoding="utf-8")
+    for path in (tmp_path / "missing.json", wrong):
+        caplog.clear()
+        profile = LeadProfile.load(str(path), default_before=1800, default_hot=720)
+        assert profile.stations == {}
+        assert "global windows" in caplog.text

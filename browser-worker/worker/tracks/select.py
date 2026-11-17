@@ -12,7 +12,7 @@ cooldown so a busy hour does not fetch every active train every minute.
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -36,7 +36,8 @@ class DueTrain:
     ``soonest_secs`` is the distance to the closest in-window event, past or future.
     ``next_secs`` is the time until the next future in-window event, or ``None`` when every
     in-window event is already past. ``upcoming`` holds the codes of the stations those future
-    events belong to.
+    events belong to. ``hot_due`` is set only when a lead-time profile is in use: whether some
+    future event is inside its own station's hot window.
     """
 
     train_number: str
@@ -44,7 +45,7 @@ class DueTrain:
     soonest_secs: float
     next_secs: float | None = None
     upcoming: frozenset[str] = frozenset()
-    hot_limit: float | None = None
+    hot_due: bool | None = None
 
     @property
     def key(self) -> tuple[str, str]:
@@ -79,7 +80,7 @@ def due_trains(
         distances: list[float] = []
         ahead: list[float] = []
         upcoming: set[str] = set()
-        hot_limits: list[float] = []
+        hot_due = None if default_hot is None or lead is None else False
         for code, moments in stops:
             station_before = (
                 lead.before_secs(code, before_secs) if lead is not None else before_secs
@@ -92,8 +93,8 @@ def due_trains(
                         ahead.append(delta)
                         if code is not None:
                             upcoming.add(code)
-                            if default_hot is not None and lead is not None:
-                                hot_limits.append(lead.hot_secs(code, default_hot))
+                        if hot_due is not None and delta <= lead.hot_secs(code, default_hot):
+                            hot_due = True
         if not distances:
             continue
         train = DueTrain(
@@ -102,7 +103,7 @@ def due_trains(
             min(distances),
             min(ahead) if ahead else None,
             frozenset(upcoming),
-            min(hot_limits) if hot_limits else None,
+            hot_due,
         )
         current = found.get(train.key)
         if current is None or train.soonest_secs < current.soonest_secs:
@@ -158,9 +159,15 @@ def _fleet_train_events(document: dict):
 
 
 def is_hot(train: DueTrain, tracked: Mapping[tuple[str, str], frozenset[str]], hot_secs: float) -> bool:
-    """Whether ``train`` reaches a stop within ``hot_secs`` and an upcoming stop lacks a track."""
-    limit = train.hot_limit if train.hot_limit is not None else hot_secs
-    if train.next_secs is None or train.next_secs > limit:
+    """Whether ``train`` reaches a stop inside the hot window and an upcoming stop lacks a track.
+
+    With a lead-time profile each station has its own hot window (``train.hot_due``); otherwise
+    the next stop is compared with ``hot_secs``.
+    """
+    if train.hot_due is not None:
+        if not train.hot_due:
+            return False
+    elif train.next_secs is None or train.next_secs > hot_secs:
         return False
     known = tracked.get(train.key, frozenset())
     return not train.upcoming or not train.upcoming <= known
@@ -175,12 +182,15 @@ def choose_fetches(
     cooldown_secs: float,
     max_fetches: int,
     tracked: Mapping[tuple[str, str], frozenset[str]] | None = None,
+    hinted: Collection[tuple[str, str]] = (),
 ) -> list[DueTrain]:
     """Hot trains first, then cooled-down trains, never more than ``max_fetches``.
 
     Hot trains (see :func:`is_hot`) are taken next-stop-first on every cycle. Other trains are
     taken oldest-fetch-first, and a train attempted within ``cooldown_secs`` waits. ``tracked``
     maps a train-day to the station codes that already show a track in its last document.
+    ``hinted`` train-days were named by an early-refresh hint. The service already spaced those
+    by ``AMTRAK_TRACKS_MIN_GAP_SECS``, so they skip the cooldown and go ahead of the rotation.
     """
     if max_fetches <= 0:
         return []
@@ -197,10 +207,11 @@ def choose_fetches(
         if train.key in hot_keys:
             continue
         previous = last_fetched.get(train.key)
-        if previous is None or now_ts - previous >= cooldown_secs:
+        if previous is None or train.key in hinted or now_ts - previous >= cooldown_secs:
             ready.append(train)
     ready.sort(
         key=lambda train: (
+            train.key not in hinted,
             last_fetched.get(train.key, 0.0),
             train.soonest_secs,
             train.train_number,

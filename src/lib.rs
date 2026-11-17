@@ -464,8 +464,12 @@ pub async fn run_combined() -> Result<(), Box<dyn std::error::Error + Send + Syn
     let worker_root = std::path::Path::new(worker::DEFAULT_WORKER_ROOT);
     let fleet_trains_file = config.output_dir.join("tracks").join("fleet-trains.json");
     let worker_plan =
-        worker::WorkerPlan::from_configs(&track_config, &advisory_config, worker_root)
-            .map(|plan| plan.with_fleet_trains_file(fleet_trains_file.clone()));
+        worker::WorkerPlan::from_configs(&track_config, &advisory_config, worker_root).map(
+            |plan| {
+                plan.with_fleet_trains_file(fleet_trains_file.clone())
+                    .with_output_dir(config.output_dir.clone())
+            },
+        );
     if worker_plan.is_none()
         && worker::WorkerPlan::wanted(&track_config, &advisory_config, worker_root).is_some()
     {
@@ -1089,28 +1093,29 @@ mod tests {
             .unwrap();
         assert_eq!(fetched.trip_updates, batch.trip_updates);
     }
-}
-#[test]
-fn a_leftover_role_refuses_to_start() {
-    for accepted in [None, Some(""), Some("combined"), Some(" combined ")] {
-        assert!(check_role(accepted).is_ok(), "{accepted:?}");
-    }
-    for removed in ["vehicle-positions", "trip-updates", "alerts", "nonsense"] {
-        let error = check_role(Some(removed)).unwrap_err();
-        assert!(error.to_string().contains("AMTRAK_ROLE"), "{error}");
-        assert!(error.to_string().contains("README"), "{error}");
-    }
-}
 
-#[test]
-fn healthcheck_uses_configured_port_on_loopback() {
-    assert_eq!(
-        healthcheck_address("0.0.0.0:9000").unwrap(),
-        "127.0.0.1:9000".parse::<SocketAddr>().unwrap()
-    );
-    assert_eq!(
-        healthcheck_address("[::1]:7000").unwrap(),
-        "127.0.0.1:7000".parse::<SocketAddr>().unwrap()
-    );
-    assert!(healthcheck_address("not-an-address").is_err());
+    #[test]
+    fn a_leftover_role_refuses_to_start() {
+        for accepted in [None, Some(""), Some("combined"), Some(" combined ")] {
+            assert!(check_role(accepted).is_ok(), "{accepted:?}");
+        }
+        for removed in ["vehicle-positions", "trip-updates", "alerts", "nonsense"] {
+            let error = check_role(Some(removed)).unwrap_err();
+            assert!(error.to_string().contains("AMTRAK_ROLE"), "{error}");
+            assert!(error.to_string().contains("README"), "{error}");
+        }
+    }
+
+    #[test]
+    fn healthcheck_uses_configured_port_on_loopback() {
+        assert_eq!(
+            healthcheck_address("0.0.0.0:9000").unwrap(),
+            "127.0.0.1:9000".parse::<SocketAddr>().unwrap()
+        );
+        assert_eq!(
+            healthcheck_address("[::1]:7000").unwrap(),
+            "127.0.0.1:7000".parse::<SocketAddr>().unwrap()
+        );
+        assert!(healthcheck_address("not-an-address").is_err());
+    }
 }

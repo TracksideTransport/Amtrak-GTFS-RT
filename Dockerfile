@@ -266,7 +266,7 @@ COPY --chmod=0444 container/licenses/README /licenses/README
 COPY --chmod=0444 container/licenses/AGPL-3.0-only.txt /licenses/AGPL-3.0-only.txt
 COPY --chmod=0444 THIRD_PARTY_LICENSES.html /licenses/THIRD_PARTY_LICENSES.html
 COPY --from=validator /out/licenses/ /licenses/
-COPY browser-worker/worker/ /app/worker/
+COPY --chmod=u=rwX,go=rX browser-worker/worker/ /app/worker/
 
 # `licenses` is the project's own license. Third-party components keep theirs; see /licenses/README.
 LABEL org.opencontainers.image.title="Amtrak GTFS-RT" \
