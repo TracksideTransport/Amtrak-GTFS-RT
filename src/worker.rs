@@ -10,8 +10,11 @@
 //! - A worker exit is restarted with exponential backoff. After [`RestartPolicy::max_failures`]
 //!   consecutive exits the supervisor gives up and the service exits non-zero, so the container
 //!   restart policy takes over. A run that lasted [`RestartPolicy::stable_after`] resets the count.
-//! - The worker runs in its own process group, and the whole group is killed after each exit, so
-//!   a crashed worker never leaves a Chromium behind.
+//! - The worker runs in its own process group, and the whole group is killed after each exit.
+//!   Playwright may start Chromium in a group of its own; that browser exits when its pipe to the
+//!   killed driver closes, and the worker clears leftovers when it starts again.
+//! - The worker gets the service's output directory as an absolute path and never the NJ Transit
+//!   RailData credentials, which only the service uses.
 //! - Stopping sends `SIGTERM`, waits [`RestartPolicy::grace`], then kills the group.
 
 use crate::config::{is_worker_url, AdvisoryConfig, TrackConfig, WORKER_BASE_URL};
@@ -27,6 +30,15 @@ pub const DEFAULT_WORKER_ROOT: &str = "/app";
 /// Host the worker binds. Never configurable: the worker is not a public service.
 const WORKER_LISTEN_HOST: &str = "127.0.0.1";
 
+/// `path` as an absolute path string. The worker runs from its package root, so a relative
+/// path such as the host default `./out` would name a different directory there.
+fn absolute(path: &Path) -> String {
+    std::path::absolute(path)
+        .unwrap_or_else(|_| path.to_path_buf())
+        .display()
+        .to_string()
+}
+
 /// Which browser sources the embedded worker runs.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WorkerPlan {
@@ -39,6 +51,9 @@ pub struct WorkerPlan {
     /// The train list the service writes after each generation (`AMTRAK_FLEET_TRAINS_FILE`), so
     /// the track poller never fetches `getTrainsData` itself.
     pub fleet_trains_file: Option<PathBuf>,
+    /// The service's output directory (`AMTRAK_OUTPUT_DIR`): the notices snapshots and the
+    /// early-refresh queue live under it.
+    pub output_dir: Option<PathBuf>,
 }
 
 impl WorkerPlan {
@@ -70,12 +85,19 @@ impl WorkerPlan {
             notices,
             root: root.to_path_buf(),
             fleet_trains_file: None,
+            output_dir: None,
         })
     }
 
     /// Points the track poller at the service's train list.
     pub fn with_fleet_trains_file(mut self, path: PathBuf) -> Self {
         self.fleet_trains_file = Some(path);
+        self
+    }
+
+    /// Shares the service's output directory with the worker.
+    pub fn with_output_dir(mut self, path: PathBuf) -> Self {
+        self.output_dir = Some(path);
         self
     }
 
@@ -95,7 +117,10 @@ impl WorkerPlan {
             env.push(("AMTRAK_TRACKS_AMTRAK", "off".to_string()));
         }
         if let (true, Some(path)) = (self.tracks, &self.fleet_trains_file) {
-            env.push(("AMTRAK_FLEET_TRAINS_FILE", path.display().to_string()));
+            env.push(("AMTRAK_FLEET_TRAINS_FILE", absolute(path)));
+        }
+        if let Some(path) = &self.output_dir {
+            env.push(("AMTRAK_OUTPUT_DIR", absolute(path)));
         }
         if !self.notices {
             env.push(("AMTRAK_ADVISORIES", "off".to_string()));
@@ -110,6 +135,8 @@ impl WorkerPlan {
             .args(["-m", "worker"])
             .current_dir(&self.root)
             .envs(self.env())
+            .env_remove("NJT_RAILDATA_USERNAME")
+            .env_remove("NJT_RAILDATA_PASSWORD")
             .stdin(std::process::Stdio::null());
         command
     }
@@ -357,6 +384,33 @@ mod tests {
                 "{off:?}"
             );
         }
+    }
+
+    #[test]
+    fn worker_gets_absolute_paths_and_no_raildata_credentials() {
+        let (tracks, advisories) = configs(&[]);
+        let plan = WorkerPlan::wanted(&tracks, &advisories, Path::new("/app"))
+            .unwrap()
+            .with_fleet_trains_file(PathBuf::from("out/tracks/fleet-trains.json"))
+            .with_output_dir(PathBuf::from("out"));
+        let env = plan.env();
+        let cwd = std::env::current_dir().unwrap();
+        assert!(env.contains(&("AMTRAK_OUTPUT_DIR", cwd.join("out").display().to_string())));
+        assert!(env.contains(&(
+            "AMTRAK_FLEET_TRAINS_FILE",
+            cwd.join("out/tracks/fleet-trains.json")
+                .display()
+                .to_string()
+        )));
+        let command = plan.command();
+        let removed: Vec<_> = command
+            .as_std()
+            .get_envs()
+            .filter(|(_, value)| value.is_none())
+            .map(|(key, _)| key.to_string_lossy().into_owned())
+            .collect();
+        assert!(removed.contains(&"NJT_RAILDATA_USERNAME".to_string()));
+        assert!(removed.contains(&"NJT_RAILDATA_PASSWORD".to_string()));
     }
 
     #[test]
