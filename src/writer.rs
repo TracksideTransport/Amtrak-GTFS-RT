@@ -24,7 +24,8 @@ const MATCH_RATE_HEADER: &str = "amtrak-match-rate-v1";
 const STATIC_FILE: &str = "static.zip";
 /// Spare blocks kept free so the next publish can create its directory.
 const PUBLISH_FREE_MARGIN: u64 = 1024 * 1024;
-static GENERATION_COUNTER: AtomicU64 = AtomicU64::new(0);
+/// Makes each `current` marker temp name unique within the process. Generation ids do not use it.
+static MARKER_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Strong ETags for one immutable generation's artifacts, each hashed at most once.
 ///
@@ -132,7 +133,9 @@ pub struct GenerationStore {
     output_dir: Arc<PathBuf>,
     current: Arc<RwLock<Option<Arc<PublishedGeneration>>>>,
     generations: Arc<RwLock<HashMap<GenerationId, Arc<PublishedGeneration>>>>,
-    publish_lock: Arc<Mutex<()>>,
+    /// Serializes publication and holds the sequence the next generation id starts from. It
+    /// starts at 0 in every process; the id's timestamp prefix keeps ids unique across restarts.
+    publish_lock: Arc<Mutex<u64>>,
     retention: GenerationRetention,
     static_intern: Arc<Mutex<HashMap<String, Arc<[u8]>>>>,
 }
@@ -225,7 +228,7 @@ impl GenerationStore {
             output_dir: Arc::new(canonical_output),
             current: Arc::new(RwLock::new(selected)),
             generations: Arc::new(RwLock::new(recovered)),
-            publish_lock: Arc::new(Mutex::new(())),
+            publish_lock: Arc::new(Mutex::new(0)),
             retention,
             static_intern,
         };
@@ -481,7 +484,7 @@ fn publish_inner(
         ));
     }
     let output_dir = store.output_dir.as_path();
-    let _publish_guard = store
+    let mut next_sequence = store
         .publish_lock
         .lock()
         .map_err(|_| PublishError("publisher lock poisoned".into()))?;
@@ -491,7 +494,11 @@ fn publish_inner(
         .enforce_retention(incoming)
         .and_then(|_| store.ensure_publish_space(incoming))
         .map_err(PublishError)?;
-    let id = next_generation_id(candidate.generated_at_unix, &generations_dir)?;
+    let (id, sequence) = next_generation_id(
+        candidate.generated_at_unix,
+        *next_sequence,
+        &generations_dir,
+    );
     let temporary_dir = generations_dir.join(format!(".{}.tmp", id.0));
     let final_dir = generations_dir.join(&id.0);
     fs::create_dir(&temporary_dir)?;
@@ -551,6 +558,9 @@ fn publish_inner(
     fail_at(failure, FailurePoint::TemporaryDirectory)?;
 
     fs::rename(&temporary_dir, &final_dir)?;
+    // The id is now taken on disk. An earlier failure leaves only a temp directory, which the
+    // next publish removes before it picks the same sequence again.
+    *next_sequence = sequence + 1;
     fail_at(failure, FailurePoint::GenerationRename)?;
     sync_directory(&generations_dir)?;
     fail_at(failure, FailurePoint::GenerationsDirectory)?;
@@ -1054,19 +1064,25 @@ fn fail_at(actual: Option<FailurePoint>, expected: FailurePoint) -> Result<(), P
     }
 }
 
+/// The first free `<unix-nanoseconds>-<sequence>` id at or after `first`, and its sequence.
+///
+/// The sequence advances by one per published generation. A directory already on disk with the
+/// same id (a restart within the same second) is skipped, so ids never repeat.
 fn next_generation_id(
     generated_at_unix: u64,
+    first: u64,
     generations_dir: &Path,
-) -> Result<GenerationId, PublishError> {
+) -> (GenerationId, u64) {
     let nanoseconds = u128::from(generated_at_unix) * 1_000_000_000;
+    let mut sequence = first;
     loop {
-        let counter = GENERATION_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let id = GenerationId(format!("{nanoseconds}-{counter}"));
+        let id = GenerationId(format!("{nanoseconds}-{sequence}"));
         if !generations_dir.join(&id.0).exists()
             && !generations_dir.join(format!(".{}.tmp", id.0)).exists()
         {
-            return Ok(id);
+            return (id, sequence);
         }
+        sequence += 1;
     }
 }
 
@@ -1138,7 +1154,7 @@ fn marker_temporary(output_dir: &Path, id: &GenerationId) -> PathBuf {
         ".{CURRENT_MARKER}.{}.{}.{}.tmp",
         id.0,
         std::process::id(),
-        GENERATION_COUNTER.fetch_add(1, Ordering::Relaxed)
+        MARKER_TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
     ))
 }
 
@@ -1770,6 +1786,52 @@ mod tests {
             decode_match_rate(&encode_match_rate(&id, &rate), &id),
             Some(rate)
         );
+    }
+
+    fn sequence_of(id: &GenerationId) -> u64 {
+        id.0.split_once('-').unwrap().1.parse().unwrap()
+    }
+
+    /// #117: each published generation advances the sequence by exactly one, a failed attempt
+    /// does not use a number up, and ids stay unique when a restart lands in the same second.
+    #[tokio::test]
+    async fn the_generation_sequence_advances_by_one_per_publication() {
+        let dir = test_dir("sequence");
+        let store = GenerationStore::open(&dir).await.unwrap();
+        let mut sequences = Vec::new();
+        for (index, generated_at) in [500, 530, 560].into_iter().enumerate() {
+            let published =
+                GenerationPublisher::publish(&dir, &store, candidate(generated_at, index as u8))
+                    .await
+                    .unwrap();
+            sequences.push(sequence_of(&published.id));
+        }
+        assert_eq!(sequences, [0, 1, 2]);
+
+        assert!(publish_inner(
+            &dir,
+            &store,
+            candidate(590, 3),
+            Some(FailurePoint::ManifestArtifact)
+        )
+        .is_err());
+        let after_failure = GenerationPublisher::publish(&dir, &store, candidate(590, 4))
+            .await
+            .unwrap();
+        assert_eq!(sequence_of(&after_failure.id), 3);
+
+        // A restart starts the sequence at 0 again; the timestamp prefix keeps ids unique, and a
+        // directory already on disk for the same second is skipped.
+        let restarted = GenerationStore::open(&dir).await.unwrap();
+        let first = GenerationPublisher::publish(&dir, &restarted, candidate(500, 5))
+            .await
+            .unwrap();
+        assert_eq!(first.id.0, "500000000000-1");
+        let next = GenerationPublisher::publish(&dir, &restarted, candidate(620, 6))
+            .await
+            .unwrap();
+        assert_eq!(next.id.0, "620000000000-2");
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[tokio::test]

@@ -48,6 +48,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   served from disk matches the live one. `manifest.txt` keeps its exact shape, so 0.8.0 can still
   recover these generations after a rollback, and a generation written by 0.8.0 still loads, with
   no `match_rate` (#116).
+- **Generation ids count up by one.** The `-<sequence>` suffix advanced by 2 per published
+  generation because the `current` marker's temp file name took a number from the same counter.
+  The marker has its own counter now, so the suffix reads `-0`, `-1`, `-2`, and a failed publish
+  does not use a number up. It still starts at 0 after a restart; the timestamp prefix keeps ids
+  unique, and an id already on disk is skipped. Ids remain opaque: fetch `/v1/feed-set.json`
+  rather than predicting them (#117).
 
 ## [0.8.0] - 2026-11-18
 
