@@ -45,6 +45,47 @@ pub fn is_worker_url(url: &str) -> bool {
         .is_some_and(|path| path.starts_with('/'))
 }
 
+/// The fallback position source: TransitDocs' ASM map, used only after the Amtrak source fails or
+/// returns nothing. Env `AMTRAK_FALLBACK_ASM` (default **on**) and `AMTRAK_FALLBACK_ASM_URL`
+/// (default [`crate::sources::asm::DEFAULT_ASM_URL`]; an explicitly empty URL turns it off).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FallbackConfig {
+    /// Map URL, or `None` when the fallback is off.
+    pub asm_url: Option<String>,
+}
+
+impl FallbackConfig {
+    /// Parses the fallback settings from the process environment.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError`] for an `AMTRAK_FALLBACK_ASM` value that is not a recognised on/off
+    /// word.
+    pub fn from_env() -> Result<FallbackConfig, ConfigError> {
+        FallbackConfig::from_map(|key| std::env::var(key).ok())
+    }
+
+    /// Parses the fallback settings from an injected environment lookup.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError`] for an `AMTRAK_FALLBACK_ASM` value that is not a recognised on/off
+    /// word.
+    pub fn from_map<F: Fn(&str) -> Option<String>>(get: F) -> Result<FallbackConfig, ConfigError> {
+        let enabled = parse_flag(&get, "AMTRAK_FALLBACK_ASM", true)?;
+        let asm_url = enabled
+            .then(|| {
+                source_url(
+                    &get,
+                    "AMTRAK_FALLBACK_ASM_URL",
+                    crate::sources::asm::DEFAULT_ASM_URL,
+                )
+            })
+            .flatten();
+        Ok(FallbackConfig { asm_url })
+    }
+}
+
 /// Debounced early track refreshes that `train` and `station` queries on trip updates request.
 ///
 /// The service queues them for the browser worker's track poller. Env
@@ -1635,6 +1676,27 @@ mod tests {
         assert!(validator_digest_is_approved(OFFICIAL_VALIDATOR_SHA256));
         assert!(validator_digest_is_approved(HARDENED_VALIDATOR_SHA256));
         assert!(!validator_digest_is_approved(&"0".repeat(64)));
+    }
+
+    #[test]
+    fn the_asm_fallback_is_on_by_default_and_each_flag_turns_it_off() {
+        let on = FallbackConfig::from_map(|_| None).unwrap();
+        assert_eq!(
+            on.asm_url.as_deref(),
+            Some(crate::sources::asm::DEFAULT_ASM_URL)
+        );
+        for off in ["off", "false", "0", "no"] {
+            let config = FallbackConfig::from_map(map(&[("AMTRAK_FALLBACK_ASM", off)])).unwrap();
+            assert_eq!(config.asm_url, None, "{off}");
+        }
+        let empty = FallbackConfig::from_map(map(&[("AMTRAK_FALLBACK_ASM_URL", "")])).unwrap();
+        assert_eq!(empty.asm_url, None);
+        let custom =
+            FallbackConfig::from_map(map(&[("AMTRAK_FALLBACK_ASM_URL", "http://asm.test/map")]))
+                .unwrap();
+        assert_eq!(custom.asm_url.as_deref(), Some("http://asm.test/map"));
+        let error = FallbackConfig::from_map(map(&[("AMTRAK_FALLBACK_ASM", "maybe")])).unwrap_err();
+        assert_eq!(error.field(), "AMTRAK_FALLBACK_ASM");
     }
 
     #[test]

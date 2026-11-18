@@ -512,7 +512,18 @@ pub async fn run_combined() -> Result<(), Box<dyn std::error::Error + Send + Syn
     } else {
         realtime_source(AmtrakSource::new(), advisories, tracks)
     };
-    let sources: Arc<Vec<Box<dyn RtSource>>> = Arc::new(vec![source]);
+    // The fallback runs only when the source above errors or returns an empty batch. Its trips
+    // are not track-stamped and carry no advisories, and the manifest names it as the source.
+    let mut chain = vec![source];
+    let fallback = crate::config::FallbackConfig::from_env()?;
+    if let Some(url) = fallback.asm_url {
+        tracing::info!(
+            source = sources::asm::SOURCE_NAME,
+            "fallback position source on (used only when the Amtrak source fails or is empty)"
+        );
+        chain.push(Box::new(sources::asm::AsmSource::new(url)));
+    }
+    let sources: Arc<Vec<Box<dyn RtSource>>> = Arc::new(chain);
     let base_url = endpoints::base_url(config.bind_addr, config.public_url.as_deref());
     // The worker's track poller reads the train list from this file instead of polling the map.
     let train_list = worker_plan
@@ -855,6 +866,7 @@ mod tests {
                 vehicle_positions: feed.clone(),
                 alerts: feed,
                 entity_counts: EntityCounts::default(),
+                match_rate: crate::orchestrator::MatchRate::default(),
             },
         )
         .await
@@ -976,6 +988,7 @@ mod tests {
                 vehicle_positions: feed.clone(),
                 alerts: feed,
                 entity_counts: EntityCounts::default(),
+                match_rate: crate::orchestrator::MatchRate::default(),
             }
         };
 
@@ -1022,6 +1035,7 @@ mod tests {
                 vehicle_positions: feed.clone(),
                 alerts: feed,
                 entity_counts: EntityCounts::default(),
+                match_rate: crate::orchestrator::MatchRate::default(),
             },
         )
         .await
