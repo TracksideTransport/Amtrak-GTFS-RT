@@ -66,6 +66,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `/healthz`, WARNING for any other path. Any other handler error is logged at ERROR, with its
   traceback, through the worker's logger. No feed data was lost: the service's track and notices
   requests read whole bodies (#109).
+- **Browser failures in the worker's log name their cause.** The track poller logged
+  `browser launch failed: Error` when the browser had launched and only the first load of the
+  status page had failed. It now logs `first status page load failed:` or `browser launch failed:`
+  followed by the error's type and the first line of its message, for example
+  `Error: Page.goto: net::ERR_TUNNEL_CONNECTION_FAILED at https://www.amtrak.com/tickets/train-status.html`.
+  A failed status fetch carries the same detail. The notices poller's
+  `advisories markup not obtained this cycle` line now gives the reason: the navigation error, a
+  gate that never appeared, or a page still changing at the timeout. A failed detail page also
+  logs its reason. Any URL in these lines keeps only its scheme, host, port, and path (#115).
 
 ## [0.8.0] - 2026-11-18
 

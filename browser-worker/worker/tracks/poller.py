@@ -24,7 +24,7 @@ from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlsplit
 
-from ..browser import LAUNCH_ARGS, Lease, SharedBrowser
+from ..browser import LAUNCH_ARGS, Lease, SharedBrowser, describe_error
 from .config import Config
 from .decrypt import DecryptError, decrypt_payload
 from .lead_time import LeadProfile
@@ -63,6 +63,14 @@ class BrowserUnavailable(Exception):
 
 class StatusMiss(Exception):
     """Amtrak answered, but not with a usable status document. The message is the reason."""
+
+
+class _FirstLoadFailed(Exception):
+    """The browser and its page are up, but the first navigation to the status page failed."""
+
+    def __init__(self, error: Exception) -> None:
+        super().__init__(type(error).__name__)
+        self.error = error
 
 
 TrainsFetcher = Callable[[Config], Awaitable[dict]]
@@ -197,7 +205,7 @@ class ResidentBrowser:
                 page.evaluate(_FETCH_JS, [url, timeout * 1000]), timeout + 5
             )
         except Exception as error:  # noqa: BLE001 — a dead renderer or hung request
-            await self._failed(f"status fetch failed: {type(error).__name__}")
+            await self._failed(f"status fetch failed: {describe_error(error)}")
             raise BrowserUnavailable(type(error).__name__) from None
         self._backoff = 0.0
         return document_from_eval(raw)
@@ -236,8 +244,12 @@ class ResidentBrowser:
             raise BrowserUnavailable("relaunch backoff")
         try:
             page = await self._launch()
-        except Exception as error:  # noqa: BLE001 — launch or first page load failed
-            await self._failed(f"browser launch failed: {type(error).__name__}")
+        except _FirstLoadFailed as failure:
+            # The browser launched; the status page did not load (blocked, offline, timed out).
+            await self._failed(f"first status page load failed: {describe_error(failure.error)}")
+            raise BrowserUnavailable(type(failure.error).__name__) from None
+        except Exception as error:  # noqa: BLE001 — the browser, its context, or its page
+            await self._failed(f"browser launch failed: {describe_error(error)}")
             raise BrowserUnavailable(type(error).__name__) from None
         self._launched_at = now
         self._page = page
@@ -261,11 +273,14 @@ class ResidentBrowser:
         page = await context.new_page()
         # domcontentloaded lets the site's first-party scripts set their cookies before the
         # first status call; "commit" returned before they ran.
-        await page.goto(
-            cfg.page_url,
-            wait_until="domcontentloaded",
-            timeout=cfg.nav_timeout_secs * 1000,
-        )
+        try:
+            await page.goto(
+                cfg.page_url,
+                wait_until="domcontentloaded",
+                timeout=cfg.nav_timeout_secs * 1000,
+            )
+        except Exception as error:  # noqa: BLE001 — reported apart from a launch failure
+            raise _FirstLoadFailed(error) from error
         return page
 
 
