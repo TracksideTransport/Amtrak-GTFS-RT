@@ -1,7 +1,7 @@
 # Amtrak GTFS-RT — Design Spec
 
 - **Date:** 2026-07-29
-- **Status:** Approved (brainstorming), pending user spec review
+- **Status:** Approved and implemented. Later decisions supersede parts of it: the deployment is now one container (`docs/one-container.md`), the license is AGPL-3.0-only (§4), and the ETag-conditional static refresh and match-rate logging deferred in §5 are tracked in #60 (done) and #61 (blocked on the upstream crate exposing an observed-train count).
 - **Author:** Soham + Claude
 
 ## 1. Goal
@@ -45,7 +45,7 @@ silently drop the entity.
 - Endpoints: positions `https://maps.amtrak.com/services/MapDataService/trains/getTrainsData`;
   alerts (via catenary) `https://asm-backend.transitdocs.com/map`.
 
-## 4. Licensing (decision to confirm)
+## 4. Licensing (resolved: AGPL-3.0-only)
 
 catenary's crate is **AGPL-3.0**. Depending on it and offering the feed as a network
 service triggers AGPL's network-use clause: **our service source must also be released

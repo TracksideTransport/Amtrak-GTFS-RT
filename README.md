@@ -237,7 +237,7 @@ its manifest digest and both platform digests.
 
 On `main` the root `Dockerfile` builds **one image** with every feed and helper in it
 ([design](docs/one-container.md)). The next release publishes it under the same name; `0.7.1`
-above is still the scratch service plus the two sidecars.
+above is still the scratch service plus the two fetcher images.
 
 | Part | What it is |
 |------|------------|
@@ -437,18 +437,18 @@ assets. `scripts/verify-release-image.sh` fails a release whose image is missing
 
 ### Raspberry Pi (linux/arm64)
 
-Every released image has a native `linux/arm64` build, so a Raspberry Pi on a 64-bit OS pulls the
-stack instead of building the Chromium images on the device. With Docker Engine and the
-Compose plugin installed, from a checkout of the release tag:
+Every released image has a native `linux/arm64` build, so a Raspberry Pi on a 64-bit OS pulls it
+instead of building Chromium on the device. With Docker Engine and the Compose plugin installed,
+from a checkout of the release tag (the first release that ships the one image, or later):
 
 ```bash
-git clone --branch v0.7.1 https://github.com/sohampatwardhan/Amtrak-GTFS-RT.git
+git clone --branch <release-tag> https://github.com/sohampatwardhan/Amtrak-GTFS-RT.git
 cd Amtrak-GTFS-RT
-docker compose pull   # amtrak-gtfs-rt at 0.7.1
+docker compose pull   # amtrak-gtfs-rt
 docker compose up -d
 ```
 
-Without Compose, pull the three images as in [Container](#container). Check that a pulled image is
+Without Compose, pull the image as in [Container](#container). Check that a pulled image is
 the arm64 build with `docker image inspect --format '{{.Architecture}}' <image>`. A 32-bit OS
 cannot run these images; there is no `linux/arm/v7` build. To build on the Pi instead, use
 `AMTRAK_IMAGE_TAG=local docker compose up -d --build`.
@@ -489,7 +489,7 @@ Restart=on-failure
 | `AMTRAK_GENERATION_MAX` | `20` | Most generations kept on disk and in memory, current included. Must be at least `1`; wins over the retention window |
 | `AMTRAK_VALIDATOR_CACHE` | on | Skip the Java GTFS validator when the static ZIP's SHA-256 already has an accept or standards-reject result. `off` validates every fetch |
 | `AMTRAK_ADVISORIES` | on | Merges Service Alerts & Notices into `alerts.pb`. Set `off`, `false`, `0`, or `no` to turn it off; any other value is a startup error. Fail-open: without a reachable browser worker, only the ASM and Surfliner alerts publish |
-| `AMTRAK_ADVISORIES_URL` | `http://127.0.0.1:8081/service-alerts-and-notices` (built-in browser worker) | Override for the notices snapshot, for example a separately run advisory-fetcher. Plain HTTP to `www.amtrak.com` is Akamai-blocked |
+| `AMTRAK_ADVISORIES_URL` | `http://127.0.0.1:8081/service-alerts-and-notices` (built-in browser worker) | Override for the notices snapshot, for example a worker run elsewhere. Plain HTTP to `www.amtrak.com` is Akamai-blocked |
 | `AMTRAK_ADVISORIES_TTL_SECS` | `900` | Minimum seconds between advisory page fetches |
 | `AMTRAK_TRACKS` | on | Publishes live platform/track and gate assignments. Set `off`, `false`, `0`, or `no` to turn them off; any other value is a startup error. Fail-open |
 | `AMTRAK_TRACKS_PLATFORMS` | `NYP=1-21;NWK=A,1-5;NHV=1-4,8,10,12,14` | Covered stations and their real tracks (`STOP=labels`, ranges allowed, `track@gate` for a gated track). Each becomes a platform stop |
@@ -507,6 +507,12 @@ Restart=on-failure
 | `AMTRAK_TRACKS_AMTRAK` | on | Amtrak's own track and gate status documents, read through the browser worker. Set `off` to skip them |
 | `AMTRAK_TRACKS_AMTRAK_URL` | `http://127.0.0.1:8081/tracks.json` (built-in browser worker) | Override for Amtrak's status JSON. Setting it empty also skips that source and logs a warning at startup. This is not `www.amtrak.com`; that host blocks plain HTTP |
 | `AMTRAK_TRACKS_RETAIN_GRACE_SECS` | `900` | How long an Amtrak track stays published after the stop's latest time |
+| `AMTRAK_TRACKS_BASE_INTERVAL_SECS` | `900` | Seconds between full track polls. Hot stations, including a lead-time profile such as PVD, are still checked every `POLL_INTERVAL_SECS` between them. Read by the browser worker |
+| `AMTRAK_TRACKS_LEAD_TIME_FILE` | empty | An `amtrak-station-lead-time/v1` JSON file. Only `confidence=observed` with `compared_to_default=wider` changes a station's lookahead and hot window. Read by the browser worker |
+| `AMTRAK_TRACKS_DEBOUNCE_SECS` | `5` | Quiet time that collapses a burst of `train` or `station` queries on trip updates into one early refresh. A bad value is a startup error |
+| `AMTRAK_TRACKS_MIN_GAP_SECS` | `90` | Least time between early refreshes of one train |
+| `AMTRAK_TRACKS_MAX_EARLY` | `24` | Most trains one early flush may release |
+| `AMTRAK_ROLE` | unset | Removed. Any value other than unset, empty, or `combined` refuses to start; see [Upgrading from the three-container layout](#upgrading-from-the-three-container-layout) |
 
 > [!CAUTION]
 > Pass `NJT_RAILDATA_USERNAME` and `NJT_RAILDATA_PASSWORD` through the environment only. Never put
@@ -652,9 +658,9 @@ flowchart TD
 ```
 
 > [!NOTE]
-> Advisories fail open. A list fetch or parse failure, a stopped fetcher, or
+> Advisories fail open. A list fetch or parse failure, a stopped browser worker, or
 > `AMTRAK_ADVISORIES=off` adds no advisory entities and still publishes trip updates and vehicle
-> positions. A missing fetcher does not fail a generation.
+> positions. A missing worker does not fail a generation.
 
 ## Platform and track assignments
 
@@ -742,14 +748,14 @@ age.
 
 When two sources name the same train and stop, the order is:
 
-1. Amtrak's own status, while its document is fresh (fetched by the sidecar within
+1. Amtrak's own status, while its document is fresh (fetched by the browser worker within
    `AMTRAK_TRACKS_MAX_AGE_SECS`). This is what the Amtrak app shows.
 2. NJ Transit RailData.
 3. The Hartford Line board.
 4. An older Amtrak track that is still before departure.
 
 The other boards fill the gap before Amtrak publishes a number, and a live NJ Transit or Hartford
-reading replaces a stale Amtrak track, so a blocked sidecar cannot hold a track over a board's
+reading replaces a stale Amtrak track, so a blocked browser worker cannot hold a track over a board's
 track change.
 
 ```mermaid
@@ -780,8 +786,8 @@ flowchart TD
 Amtrak's own status covers every station where Amtrak posts a track. The service does not call
 `www.amtrak.com` itself: it reads the track source of the
 [browser worker](browser-worker/README.md), which serves `GET /tracks.json`, at
-`AMTRAK_TRACKS_AMTRAK_URL` (default `http://127.0.0.1:8081/tracks.json`). The trip-updates image
-starts the worker in its own container. Run directly on a host, nothing listens there until the
+`AMTRAK_TRACKS_AMTRAK_URL` (default `http://127.0.0.1:8081/tracks.json`). The one image
+starts the worker inside the container, and the service supervises it. Run directly on a host, nothing listens there until the
 worker is started too; the source fails open, and `AMTRAK_TRACKS_AMTRAK=off` silences it.
 
 Where Amtrak posts a boarding gate beside the track (`departure.gate.number`), the gate from that
@@ -797,7 +803,7 @@ matching stop times carry `assigned_stop_id=PVD:track:1`.
 
 On 2026-10-17 the app showed track 1 at Providence for train 167 about ten minutes before arrival
 (`arrival.track.number` `1`, `asOf` 16:57, scheduled 17:06). Some stations publish hours earlier,
-and that value is already on the document once the train is near the stop, so the sidecar polls
+and that value is already on the document once the train is near the stop, so the worker polls
 trains with a stop inside a 30-minute lookahead and a 10-minute lookback instead of the whole
 fleet. A train whose next stop is within about 12 minutes and still has no track is fetched every
 cycle; every other train in the window, including one that has just left a stop, rotates with a
@@ -848,17 +854,13 @@ stylesheet, and media requests, and every host outside `amtrak.com`. The maps fe
 track field, is decrypted without a browser and only decides who is near a stop. A browser failure
 ends that cycle's fetches, and relaunches back off from 1 to 15 minutes. If every fetch in a cycle
 fails, `/tracks.json` goes `503` after five minutes instead of serving old documents as current. In
-Compose the sidecar runs read-only, with no capabilities, a 768 MB memory limit, and no published
-port. The image uses the same headless-shell build the advisory sidecar's on-device notes ran on a
-Raspberry Pi 5 (`linux/arm64`), and releases publish it for `linux/arm64` as
-`ghcr.io/sohampatwardhan/amtrak-gtfs-rt-track-fetcher`.
-
-```bash
-docker compose pull && docker compose up -d
-```
+Compose the worker runs inside the one service, which is read-only, has no capabilities, and
+publishes only the feed port; the worker itself listens on `127.0.0.1:8081` and is never
+published. The headless-shell build is the one the on-device notes ran on a Raspberry Pi 5
+(`linux/arm64`), and the one image is published for `linux/arm64`.
 
 > [!WARNING]
-> The sidecar sends up to 24 status requests a minute to `www.amtrak.com`, fewer once trains near
+> The worker sends up to 24 status requests a minute to `www.amtrak.com`, fewer once trains near
 > a stop already show their tracks. Check that this volume suits Amtrak's terms of use before
 > running it.
 
