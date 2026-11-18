@@ -52,6 +52,37 @@ flowchart LR
   http --> apps["Transit apps and consumers"]
 ```
 
+## Install with Docker
+
+Everything (the service, its browser worker with one headless Chromium, and the GTFS validator)
+ships as one public image for `linux/amd64` and `linux/arm64`. No registry login, Rust toolchain,
+Java, or checkout is needed. With Docker Engine and the Compose plugin:
+
+```bash
+mkdir amtrak-gtfs-rt && cd amtrak-gtfs-rt
+curl -fsSLO https://github.com/sohampatwardhan/Amtrak-GTFS-RT/releases/download/v0.8.0/docker-compose.yml
+docker compose pull
+docker compose up -d
+curl -fsS http://127.0.0.1:8090/v1/feed-set.json   # once the first generation is published
+```
+
+The Compose file adds the hardening defaults (read-only root filesystem, no capabilities, memory
+and process limits) and keeps data in the `amtrak-data` volume. NJ Transit tracks need
+`NJT_RAILDATA_USERNAME` and `NJT_RAILDATA_PASSWORD` in a `.env` file beside it; every other source
+works without credentials. Without Compose, the image alone does the same with no hardening:
+
+```bash
+docker run -d --name amtrak-gtfs-rt --restart unless-stopped \
+  -p 127.0.0.1:8090:8080 -v amtrak-data:/data \
+  ghcr.io/sohampatwardhan/amtrak-gtfs-rt:0.8.0
+```
+
+The first generation appears once the static feed has downloaded and passed validation; until
+then `feed-set.json` answers `503`. The feed stays on host loopback (`127.0.0.1:8090`); see [Container](#container)
+for exposing it, the image contract, and the settings, and [Compose stack](#compose-stack) for
+turning sources off. To upgrade, download the newer release's `docker-compose.yml` and run
+`docker compose pull && docker compose up -d` again.
+
 ## Release and deployment status
 
 - **Source:** `main` contains the Rust service, the one browser worker (Amtrak's track numbers
@@ -59,16 +90,16 @@ flowchart LR
   train CLI, root-level Compose and Bake packaging for the one image, and live track and platform
   assignments (on by default; `AMTRAK_TRACKS=off` turns them off). Changes merged after a release are
   listed under **Unreleased** in [CHANGELOG.md](CHANGELOG.md).
-- **Releases:** `v0.7.1` (2026-10-21) is the current release. A release is complete when its
+- **Releases:** `v0.8.0` is the first release of the one image. A release is complete when its
   GitHub Release carries `image-release.txt` with the tag, revisions, manifest digest, and both
-  platform digests; until then, `v0.7.1` stays the stable image. `v0.7.0` and `v0.7.1` also
-  published `amtrak-gtfs-rt-track-fetcher` and `amtrak-gtfs-rt-advisory-fetcher`. Those two are
-  deprecated and get no further releases: the next release publishes only `amtrak-gtfs-rt`, which
-  contains the browser worker. Pull the version tag, and pin the manifest digest from that
-  release's `image-release.txt`:
+  platform digests; until then, `v0.7.1` (2026-10-21) stays the stable image. `v0.7.0` and
+  `v0.7.1` also published `amtrak-gtfs-rt-track-fetcher` and `amtrak-gtfs-rt-advisory-fetcher`.
+  Those two are deprecated and get no further releases: from `v0.8.0` the release publishes only
+  `amtrak-gtfs-rt`, which contains the browser worker. Pull the version tag, and pin the manifest
+  digest from that release's `image-release.txt`:
 
   ```bash
-  docker pull ghcr.io/sohampatwardhan/amtrak-gtfs-rt:0.7.1
+  docker pull ghcr.io/sohampatwardhan/amtrak-gtfs-rt:0.8.0
   docker pull ghcr.io/sohampatwardhan/amtrak-gtfs-rt@sha256:<release-manifest-digest>
   ```
 
@@ -136,8 +167,8 @@ sequenceDiagram
 allowlist, only loopback peers are admitted. `Forwarded` and `X-Forwarded-For` are ignored. The
 service does not assume nginx or Tailscale Serve is installed on the host.
 
-**Optional proxy.** The three feed containers are the stack. Vehicle-positions keeps
-`127.0.0.1:8090`. To put Caddy in front of it:
+**Optional proxy.** The one `amtrak-gtfs-rt` container is the stack, and it keeps
+`127.0.0.1:8090`. To put Caddy in front of it, from a checkout (the proxy image is built locally):
 
 ```bash
 docker compose --profile proxy up -d
@@ -161,8 +192,8 @@ config:
 flowchart LR
   client["Client"] --> direct["127.0.0.1:8090"]
   client --> caddy["127.0.0.1:8091 profile proxy"]
-  direct --> positions["vehicle-positions"]
-  caddy --> positions
+  direct --> service["amtrak-gtfs-rt"]
+  caddy --> service
 ```
 
 ## Running from source
@@ -218,13 +249,14 @@ Versioned releases are published for `linux/amd64` and `linux/arm64` at
 without a registry login:
 
 ```bash
-docker pull ghcr.io/sohampatwardhan/amtrak-gtfs-rt:0.7.1
+docker pull ghcr.io/sohampatwardhan/amtrak-gtfs-rt:0.8.0
 ```
 
-`amtrak-gtfs-rt` is the only package this repository publishes. The next release (the one image,
-built from the root `Dockerfile`) contains the service, the browser worker, and the validator, so
-there is nothing else to pull. `docker compose pull` fetches it, and `image-release.txt` records
-its manifest digest and both platform digests.
+`amtrak-gtfs-rt` is the only package this repository publishes. From `v0.8.0` it is one image,
+built from the root `Dockerfile`, that contains the service, the browser worker, and the
+validator, so there is nothing else to pull. Each release pushes the version tag (`0.8.0`), a
+minor tag (`0.8`), and `latest`; `docker compose pull` fetches the version the Compose file names,
+and `image-release.txt` records the manifest digest and both platform digests.
 
 > [!WARNING]
 > **Deprecated:** `ghcr.io/sohampatwardhan/amtrak-gtfs-rt-track-fetcher` and
@@ -244,11 +276,11 @@ its manifest digest and both platform digests.
 > docker pull ghcr.io/sohampatwardhan/amtrak-gtfs-rt@sha256:<release-manifest-digest>
 > ```
 
-### One image (unreleased; `main`)
+### The one image
 
-On `main` the root `Dockerfile` builds **one image** with every feed and helper in it
-([design](docs/one-container.md)). The next release publishes it under the same name; `0.7.1`
-above is still the scratch service plus the two fetcher images.
+The root `Dockerfile` builds **one image** with every feed and helper in it
+([design](docs/one-container.md)). `v0.8.0` is the first release to publish it; `0.7.1` and earlier
+are the `scratch` service image, with the two fetcher images beside it.
 
 | Part | What it is |
 |------|------------|
@@ -261,12 +293,13 @@ above is still the scratch service plus the two fetcher images.
 It is about 1 GB uncompressed on linux/arm64, most of it Chromium.
 
 ```bash
-docker build --tag amtrak-gtfs-rt:local .
-docker run -d -p 127.0.0.1:8090:8080 -v amtrak-data:/data amtrak-gtfs-rt:local
+docker run -d -p 127.0.0.1:8090:8080 -v amtrak-data:/data \
+  ghcr.io/sohampatwardhan/amtrak-gtfs-rt:0.8.0
 curl -fsS http://127.0.0.1:8090/v1/feed-set.json
 ```
 
-No other settings are needed. The image binds `0.0.0.0:8080` and sets
+To run a build of this checkout instead, `docker build --tag amtrak-gtfs-rt:local .` and use
+`amtrak-gtfs-rt:local` as the image. No other settings are needed. The image binds `0.0.0.0:8080` and sets
 `AMTRAK_ALLOWED_PEER_IPS=gateway`: the keyword resolves, once at startup, to the container's IPv4
 default gateway, which is the address a request through a published port arrives from. So the
 `-p` binding decides who can reach the feed. `-p 127.0.0.1:8090:8080` keeps it on the host;
@@ -281,7 +314,7 @@ gateway; list their exact IPs beside the keyword (`gateway,172.31.240.10`).
 >
 > ```bash
 > docker run -d --network host -e AMTRAK_BIND_ADDR=127.0.0.1:8080 -e AMTRAK_ALLOWED_PEER_IPS= \
->   -v amtrak-data:/data amtrak-gtfs-rt:local
+>   -v amtrak-data:/data ghcr.io/sohampatwardhan/amtrak-gtfs-rt:0.8.0
 > ```
 
 Turn browser sources off with their flags (`-e AMTRAK_TRACKS_AMTRAK=off -e AMTRAK_ADVISORIES=off`).
@@ -453,14 +486,8 @@ missing notice cannot be published. OCI labels identify the exact source reposit
 
 Every released image has a native `linux/arm64` build, so a Raspberry Pi on a 64-bit OS pulls it
 instead of building Chromium on the device. With Docker Engine and the Compose plugin installed,
-from a checkout of the release tag (the first release that ships the one image, or later):
-
-```bash
-git clone --branch <release-tag> https://github.com/sohampatwardhan/Amtrak-GTFS-RT.git
-cd Amtrak-GTFS-RT
-docker compose pull   # amtrak-gtfs-rt
-docker compose up -d
-```
+follow [Install with Docker](#install-with-docker); no checkout is needed. `v0.8.0` is the first
+release that ships the one image.
 
 Without Compose, pull the image as in [Container](#container). Check that a pulled image is
 the arm64 build with `docker image inspect --format '{{.Architecture}}' <image>`. A 32-bit OS
@@ -541,10 +568,11 @@ prefix so they do not collide with the track source's `POLL_INTERVAL_SECS` and
 
 ## Compose stack
 
-From the repository root, one Compose file runs one service, `amtrak-gtfs-rt`: the one image
-with its browser worker inside, every optional source on, and the hardening defaults. It names the
-released GHCR image at the version in `docker-compose.yml`, so it can be pulled instead of built
-once a release ships the one image:
+One Compose file, `docker-compose.yml`, runs one service, `amtrak-gtfs-rt`: the one image with
+its browser worker inside, every optional source on, and the hardening defaults. It names the
+released GHCR image at the version in `docker-compose.yml`, so it is pulled instead of built. Every
+GitHub Release attaches the file, so it works by itself in an empty directory
+([Install with Docker](#install-with-docker)) as well as from the repository root:
 
 ```bash
 docker compose pull && docker compose up -d
@@ -556,7 +584,7 @@ release:
 
 ```bash
 docker compose up -d --build                         # build from this checkout
-AMTRAK_IMAGE_TAG=local docker compose up -d --build  # ...tagged :local instead of :0.7.1
+AMTRAK_IMAGE_TAG=local docker compose up -d --build  # ...tagged :local instead of :0.8.0
 ```
 
 ```mermaid
@@ -615,11 +643,14 @@ keeping the pinned Playwright version current is what keeps Chromium patched.
 >   docker compose up -d --build
 > ```
 
+The optional `proxy` profile builds its Caddy image from the `proxy/` directory, so it needs the
+repository; the released Compose file alone runs only `amtrak-gtfs-rt`.
+
 Without Compose, run the image by itself (no hardening defaults, every source on):
 
 ```bash
-docker build --tag amtrak-gtfs-rt:local .
-docker run -d -p 127.0.0.1:8090:8080 -v amtrak-data:/data amtrak-gtfs-rt:local
+docker run -d -p 127.0.0.1:8090:8080 -v amtrak-data:/data \
+  ghcr.io/sohampatwardhan/amtrak-gtfs-rt:0.8.0
 ```
 
 ### Upgrading from the three-container layout

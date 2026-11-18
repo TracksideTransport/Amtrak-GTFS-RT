@@ -425,5 +425,5 @@ jobs:
             --verify-tag \
             --title "$TAG" \
             --notes-file ../release-notes.md \
-            LICENSE THIRD_PARTY_LICENSES.html ../image-release.txt \
+            LICENSE THIRD_PARTY_LICENSES.html docker-compose.yml ../image-release.txt \
             "${evidence_assets[@]}"
