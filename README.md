@@ -614,6 +614,27 @@ docker build --tag amtrak-gtfs-rt:local .
 docker run -d -p 127.0.0.1:8090:8080 -v amtrak-data:/data amtrak-gtfs-rt:local
 ```
 
+### Upgrading from the three-container layout
+
+`main` briefly ran three containers (`vehicle-positions`, `trip-updates`, `alerts`) selected by
+`AMTRAK_ROLE`. That layout never shipped in a release and is gone:
+
+- Unset `AMTRAK_ROLE`. Any value other than unset, empty, or `combined` now refuses to start, with
+  an error that names this section.
+- Run the one `amtrak-gtfs-rt` service (above). A `docker-compose.override.yml` that names
+  `vehicle-positions`, `trip-updates`, or `alerts` must name `amtrak-gtfs-rt` instead.
+- The `fleet/` and `contrib/` directories that the roles wrote on the shared volume are no longer
+  read or written. Delete them from an existing `amtrak-data` volume to reclaim the space they
+  took (they were never pruned):
+
+  ```bash
+  docker run --rm -v amtrak-data:/data --entrypoint sh busybox -c 'rm -rf /data/fleet /data/contrib'
+  ```
+
+From v0.7.1 (the service plus the two fetcher sidecars), remove the `track-fetcher` and
+`advisory-fetcher` services and any `AMTRAK_TRACKS_AMTRAK_URL` or `AMTRAK_ADVISORIES_URL` that
+points at them; the built-in worker replaces both.
+
 ## Service Alerts & Notices
 
 Station Advisories and Passenger Advisories from Amtrak's notices page are merged into the

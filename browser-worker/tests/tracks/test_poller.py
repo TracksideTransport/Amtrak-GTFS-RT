@@ -387,27 +387,9 @@ def test_the_browser_is_recycled_after_its_maximum_age():
     assert launches == [0.0, 100]
 
 
-def _write_fleet(root, fleet_id, document):
-    fleet = root / "fleet"
-    (fleet / fleet_id).mkdir(parents=True)
-    (fleet / fleet_id / "trains.json").write_text(json.dumps(document), encoding="utf-8")
-    (fleet / "CURRENT").write_text(fleet_id + "\n", encoding="utf-8")
-
-
-def test_embedded_poller_reads_trains_from_the_fleet_snapshot_not_the_map(tmp_path, monkeypatch):
-    document = {"schema": "amtrak-fleet-trains/v1", "trains": []}
-    _write_fleet(tmp_path, "10-1", document)
+def test_a_worker_beside_the_service_without_a_train_list_never_polls_the_map(tmp_path, monkeypatch):
     monkeypatch.setenv("AMTRAK_OUTPUT_DIR", str(tmp_path))
-
-    def no_network(*_args, **_kwargs):
-        raise AssertionError("the embedded poller must not GET getTrainsData")
-
-    monkeypatch.setattr("urllib.request.urlopen", no_network)
-    assert asyncio.run(_default_trains(Config())) == document
-
-
-def test_missing_fleet_snapshot_fails_the_cycle_without_polling(tmp_path, monkeypatch):
-    monkeypatch.setenv("AMTRAK_OUTPUT_DIR", str(tmp_path))
+    monkeypatch.delenv("AMTRAK_FLEET_TRAINS_FILE", raising=False)
 
     def no_network(*_args, **_kwargs):
         raise AssertionError("the embedded poller must not GET getTrainsData")
@@ -422,8 +404,6 @@ def test_one_container_poller_reads_the_service_train_list_file(tmp_path, monkey
     path = tmp_path / "tracks" / "fleet-trains.json"
     path.parent.mkdir()
     path.write_text(json.dumps(document), encoding="utf-8")
-    # The list file wins over a fleet snapshot directory and over the map.
-    _write_fleet(tmp_path, "10-1", {"schema": "amtrak-fleet-trains/v1", "trains": []})
     monkeypatch.setenv("AMTRAK_OUTPUT_DIR", str(tmp_path))
     monkeypatch.setenv("AMTRAK_FLEET_TRAINS_FILE", str(path))
 

@@ -1,16 +1,14 @@
-//! Shared library for the three Amtrak GTFS-Realtime feed containers.
+//! Amtrak GTFS-Realtime service library.
 //!
-//! VehiclePositions, TripUpdates, and Alerts link this crate. The combined
-//! `run_service` entry keeps the single-process behavior used by `cargo run`
-//! and the existing image when `AMTRAK_ROLE` is unset.
+//! One process (`run_service`) polls `getTrainsData` once per cycle, builds each
+//! generation of TripUpdates, VehiclePositions, and Alerts in memory, supervises the
+//! browser worker, and serves the HTTP API. Combined mode is the only mode.
 
-pub mod cohort;
 pub mod config;
 pub mod endpoints;
 pub mod fleet_trains;
 pub mod lead_time;
 pub mod orchestrator;
-pub mod roles;
 pub mod schedule;
 pub mod serve;
 pub mod sources;
@@ -390,35 +388,33 @@ fn healthcheck_address(bind_address: &str) -> std::io::Result<SocketAddr> {
     Ok(SocketAddr::from(([127, 0, 0, 1], configured.port())))
 }
 
-/// Starts the process selected by `AMTRAK_ROLE`.
-///
-/// Unset or `combined` runs every scheduler in this process. `vehicle-positions`,
-/// `trip-updates`, and `alerts` run one container role. `--healthcheck` probes
-/// `/livez` and returns.
+/// Starts the service, or probes it with `--healthcheck`.
 ///
 /// # Errors
 ///
-/// Returns a configuration, static-snapshot, or server error. `--healthcheck`
-/// returns an I/O error when `/livez` is not `200`.
-///
-/// # Examples
-///
-/// ```
-/// # fn role_name() -> &'static str { "combined" }
-/// assert!(matches!(role_name(), "combined" | "vehicle-positions" | "trip-updates" | "alerts"));
-/// ```
+/// Returns a configuration, static-snapshot, or server error, including a leftover
+/// `AMTRAK_ROLE` from the three-container layout. `--healthcheck` returns an I/O error
+/// when `/livez` is not `200` or the browser worker it runs is not answering.
 pub async fn run_service() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("--healthcheck")) {
         container_healthcheck()?;
         return Ok(());
     }
     tracing_subscriber::fmt::try_init().ok();
-    match std::env::var("AMTRAK_ROLE").unwrap_or_default().as_str() {
-        "" | "combined" => run_combined().await,
-        "vehicle-positions" => roles::run_vehicle_positions().await,
-        "trip-updates" => roles::run_trip_updates().await,
-        "alerts" => roles::run_alerts().await,
-        other => Err(format!("unknown AMTRAK_ROLE {other}").into()),
+    check_role(std::env::var("AMTRAK_ROLE").ok().as_deref())?;
+    run_combined().await
+}
+
+/// `AMTRAK_ROLE` is gone with the three-container layout. Unset, empty, or `combined` is
+/// accepted; any other value refuses to start instead of silently running every feed.
+///
+/// # Errors
+///
+/// Returns [`config::ConfigError`] for `AMTRAK_ROLE`, pointing at the upgrade note.
+pub fn check_role(role: Option<&str>) -> Result<(), config::ConfigError> {
+    match role.map(str::trim) {
+        None | Some("") | Some("combined") => Ok(()),
+        Some(_) => Err(config::ConfigError::removed_role()),
     }
 }
 
@@ -539,12 +535,26 @@ pub async fn run_combined() -> Result<(), Box<dyn std::error::Error + Send + Syn
         track_config.enabled.then_some(&track_config),
         config.filter_capital_corridor,
     );
-    let app = serve::router(serve::AppState::new(
+    let mut state = serve::AppState::new(
         store,
         config.access_policy,
         config.freshness_limit,
         Arc::new(serve::SystemClock),
-    ));
+    );
+    // A `train` or `station` query on trip updates asks the worker's track poller for an early,
+    // debounced refresh. The response never waits: the hook only records the request.
+    if worker_plan.as_ref().is_some_and(|plan| plan.tracks) {
+        let early = crate::config::EarlyRefreshConfig::from_env()?;
+        let scheduler = Arc::new(std::sync::Mutex::new(
+            schedule::TrackScheduler::from_config(&early),
+        ));
+        tokio::spawn(schedule::run_early_hint_writer(
+            scheduler.clone(),
+            config.output_dir.clone(),
+        ));
+        state = state.with_trip_interest(schedule::trip_interest_hook(scheduler));
+    }
+    let app = serve::router(state);
     let listener = tokio::net::TcpListener::bind(config.bind_addr).await?;
     println!("{banner}");
 
@@ -1084,16 +1094,29 @@ mod tests {
             .unwrap();
         assert_eq!(fetched.trip_updates, batch.trip_updates);
     }
-}
-#[test]
-fn healthcheck_uses_configured_port_on_loopback() {
-    assert_eq!(
-        healthcheck_address("0.0.0.0:9000").unwrap(),
-        "127.0.0.1:9000".parse::<SocketAddr>().unwrap()
-    );
-    assert_eq!(
-        healthcheck_address("[::1]:7000").unwrap(),
-        "127.0.0.1:7000".parse::<SocketAddr>().unwrap()
-    );
-    assert!(healthcheck_address("not-an-address").is_err());
+
+    #[test]
+    fn a_leftover_role_refuses_to_start() {
+        for accepted in [None, Some(""), Some("combined"), Some(" combined ")] {
+            assert!(check_role(accepted).is_ok(), "{accepted:?}");
+        }
+        for removed in ["vehicle-positions", "trip-updates", "alerts", "nonsense"] {
+            let error = check_role(Some(removed)).unwrap_err();
+            assert!(error.to_string().contains("AMTRAK_ROLE"), "{error}");
+            assert!(error.to_string().contains("README"), "{error}");
+        }
+    }
+
+    #[test]
+    fn healthcheck_uses_configured_port_on_loopback() {
+        assert_eq!(
+            healthcheck_address("0.0.0.0:9000").unwrap(),
+            "127.0.0.1:9000".parse::<SocketAddr>().unwrap()
+        );
+        assert_eq!(
+            healthcheck_address("[::1]:7000").unwrap(),
+            "127.0.0.1:7000".parse::<SocketAddr>().unwrap()
+        );
+        assert!(healthcheck_address("not-an-address").is_err());
+    }
 }

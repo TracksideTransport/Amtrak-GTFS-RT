@@ -6,7 +6,7 @@ Instructions for coding agents working in this repository.
 
 Amtrak GTFS-RT (AGPL-3.0-only) publishes live GTFS-Realtime for Amtrak — TripUpdates, VehiclePositions, and Alerts — plus the static GTFS those feeds bind to. Consumers start at `GET /v1/feed-set.json` and then fetch only the four immutable URLs in that manifest.
 
-The target is **one container**, specified in [docs/one-container.md](docs/one-container.md). One image, `ghcr.io/sohampatwardhan/amtrak-gtfs-rt`, serves the manifest, the static ZIPs, and all three GTFS-Realtime feeds. It includes the helpers they need: one browser worker and the Java validator. Each optional source has an on/off environment flag. That document supersedes the three-container design in `docs/rearchitecture.md`. The checked-in tree still has the three-container roles (`AMTRAK_ROLE`, `src/roles.rs`, `src/cohort.rs`, `trip-updates.Dockerfile`, `alerts.Dockerfile`) next to the combined mode (`run_combined`, the default with `AMTRAK_ROLE` unset). New work follows the implementation plan in `docs/one-container.md`, which removes the roles. Do not add a reverse proxy beyond the optional Caddy profile unless the owner asks for one.
+The target is **one container**, specified in [docs/one-container.md](docs/one-container.md). One image, `ghcr.io/sohampatwardhan/amtrak-gtfs-rt`, serves the manifest, the static ZIPs, and all three GTFS-Realtime feeds. It includes the helpers they need: one browser worker and the Java validator. Each optional source has an on/off environment flag. That document supersedes the three-container design in `docs/rearchitecture.md`. The three-container roles are gone: combined mode (`run_combined`) is the only mode, and a leftover `AMTRAK_ROLE` other than unset or `combined` refuses to start. Do not reintroduce roles, shared-volume fleet or contribution snapshots, or per-feed images. New work follows the implementation plan in `docs/one-container.md`. Do not add a reverse proxy beyond the optional Caddy profile unless the owner asks for one.
 
 Decrypt, trip matching, and protobuf encoding stay in the git dependency [`catenarytransit/amtrak-gtfs-rt`](https://github.com/catenarytransit/amtrak-gtfs-rt), pinned in `Cargo.lock`, called from the shared library. A neutral `RtSource` trait wraps that source so another provider can be added without changing the orchestrator. Do not copy code from Piero Maddaleni's repositories. If an approach of his is reused, credit him in `README.md` and add the license notice that `docs/rearchitecture.md` describes. Repositories of his with no `LICENSE` file are not copied.
 
@@ -48,13 +48,12 @@ Checked-in paths, until the split replaces them:
 | `src/writer.rs` | Immutable generations on disk |
 | `src/serve.rs` | axum HTTP API, peer check, and readiness |
 | `src/worker.rs` | Starts the built-in browser worker when a browser source needs it, restarts it with backoff, gives up after 5 exits in a row, and stops its process group on `SIGTERM` |
+| `src/schedule.rs` | Debounced early track refreshes from `train`/`station` queries, queued as one file per flush under `tracks/early-refresh/` for the worker |
 | `src/fleet_trains.rs` | The `amtrak-fleet-trains/v1` train list; combined mode writes it to `{AMTRAK_OUTPUT_DIR}/tracks/fleet-trains.json` after each generation so the worker never polls the map |
 | `src/bin/amtrak_status.rs`, `src/bin/status/` | `amtrak-status` CLI (`--features status`) |
-| `src/roles.rs`, `src/cohort.rs` | Three-container roles and their shared-volume snapshots. To be removed (`docs/one-container.md`). |
 | `browser-worker/` | The one Python/Playwright browser worker (`python -m worker`): the track source (`worker/tracks/`) and the notices source (`worker/notices/`) share one Chromium (`worker/browser.py`) and one listener on `127.0.0.1:8081`. Notices-only settings carry `NOTICES_`. `browser-worker/Dockerfile` builds the two standalone images (targets `track-fetcher`, `advisory-fetcher`) until #74 retires them. |
 | `scripts/` | Feed validation, container smoke, release controls |
 | `Dockerfile`, `docker-compose.yml` | The one image (`tini`, the service, the browser worker and Chromium, the glibc Java runtime and validator, on `python:3.12-slim-bookworm`) and its one hardened Compose service, `amtrak-gtfs-rt`. |
-| `trip-updates.Dockerfile`, `alerts.Dockerfile` | The two browser role images of the three-container split. Unused by Compose; removed with the roles (#72). |
 | `docs/one-container.md` | The one-container design and the PR plan. Follow it. |
 | `docs/rearchitecture.md` | Superseded three-container design. Kept for its research sections. |
 
@@ -100,7 +99,7 @@ Download the official JAR from the MobilityData v8.0.1 release to `tools/gtfs-va
 
 ## Build, test, and lint
 
-CI (`.github/workflows/ci.yml`) builds and tests the Rust crate without ignored tests, runs the browser worker suite, runs `scripts/test-release-controls.sh`, and checks Compose/Bake config. Release-quality Rust changes also pass fmt and clippy.
+CI (`.github/workflows/ci.yml`) builds and tests the Rust crate without ignored tests, runs the browser worker suite, builds the one image natively on amd64 and arm64 and runs `scripts/test-image-offline.sh` on it, runs `scripts/test-release-controls.sh`, and checks Compose/Bake config. Release-quality Rust changes also pass fmt and clippy.
 
 ```bash
 cargo build --locked
@@ -171,9 +170,9 @@ Rust in this crate is edition 2021. Format with rustfmt defaults; there is no `r
 
 Sources. One caller per upstream. Do not triplicate `getTrainsData`.
 
-- Static GTFS: `https://content.amtrak.com/content/gtfs/GTFS.zip` (`AMTRAK_STATIC_URL`). One downloader per deployment. In the three-role tree that is TripUpdates. In the one container it is the service process.
-- Realtime trains: exactly one process fetches and decrypts `getTrainsData` on `maps.amtrak.com`, through the catenary crate: VehiclePositions in the three-role tree, the service process in the one container. Track selection reads that same poll. It does not GET the map feed again.
-- Notices and track and gate documents: the background browser worker. Today the worker is embedded in the `trip-updates` and `alerts` images. In the one container it is a single worker supervised by the service. `AMTRAK_ADVISORIES_URL` and `AMTRAK_TRACKS_AMTRAK_URL` point at it. An empty Amtrak track URL skips that source and logs a warning when tracks are on. A plain HTTP client to `www.amtrak.com` is reset by Akamai. Do not bypass that. No fingerprint spoofing, no curl-impersonate, no copied cookies, no login.
+- Static GTFS: `https://content.amtrak.com/content/gtfs/GTFS.zip` (`AMTRAK_STATIC_URL`). One downloader per deployment: the service process.
+- Realtime trains: exactly one process fetches and decrypts `getTrainsData` on `maps.amtrak.com`, through the catenary crate: the service process. Track selection reads that same poll through `tracks/fleet-trains.json`; a worker beside the service never GETs the map feed.
+- Notices and track and gate documents: the background browser worker. It is a single worker supervised by the service. `AMTRAK_ADVISORIES_URL` and `AMTRAK_TRACKS_AMTRAK_URL` point at it. An empty Amtrak track URL skips that source and logs a warning when tracks are on. A plain HTTP client to `www.amtrak.com` is reset by Akamai. Do not bypass that. No fingerprint spoofing, no curl-impersonate, no copied cookies, no login.
 - Hartford Line board: `AMTRAK_TRACKS_HARTFORD_URL` (default the public connecting-train page). Set it empty to skip.
 - NJ Transit RailData (`AMTRAK_TRACKS_RAILDATA_BASE`, default `https://raildata.njtransit.com/api/TrainData`) needs `NJT_RAILDATA_USERNAME` and `NJT_RAILDATA_PASSWORD` set together. Without them, NJ stations are skipped. One token is cached at `{AMTRAK_OUTPUT_DIR}/tracks/raildata-token.json` (mode `0600`, never served). A token is requested only when that cache is empty or older than 23 hours, and never more than 10 times in 24 hours. Any failed token request pauses NJ Transit for an hour. Do not point exploratory runs, including `scripts/validate-feeds.sh`, at production RailData credentials: a cold cache spends that daily budget. The `--tracks` flag of the validation script deliberately omits those credentials.
 
@@ -215,7 +214,7 @@ Release workflow:
 
 - Branch from `main`. Commit subjects are imperative sentences with a period, specific enough to stand alone (`Publish Amtrak's boarding gates and turn tracks on by default.`).
 - `main` is merged with merge commits (`Merge pull request #N`). Do not rewrite published history.
-- `main` and the `v*.*.*` release tags are protected by repository rulesets, versioned in `.github/rulesets/`. Every change to `main` goes through a pull request that passes all ten `ci.yml` jobs, has its review threads resolved, and is merged with a merge commit. Admins can bypass only inside a pull request. Release tags cannot be deleted or moved. After you rename, add, or remove a `ci.yml` job, update `.github/rulesets/main.json` in the same PR. `scripts/test-release-controls.sh` fails when a required check is not a job. After that PR merges, an admin runs `scripts/apply-rulesets.sh`, and `scripts/apply-rulesets.sh --check` reports drift. Do not edit rulesets in the GitHub UI without updating these files.
+- `main` and the `v*.*.*` release tags are protected by repository rulesets, versioned in `.github/rulesets/`. Every change to `main` goes through a pull request that passes every required `ci.yml` check (seven, listed in `.github/rulesets/main.json`), has its review threads resolved, and is merged with a merge commit. Admins can bypass only inside a pull request. Release tags cannot be deleted or moved. After you rename, add, or remove a `ci.yml` job, update `.github/rulesets/main.json` in the same PR. `scripts/test-release-controls.sh` fails when a required check is not a job. After that PR merges, an admin runs `scripts/apply-rulesets.sh`, and `scripts/apply-rulesets.sh --check` reports drift. Do not edit rulesets in the GitHub UI without updating these files.
 - Update `CHANGELOG.md` for user-visible changes. Leave the `Cargo.toml` version and git tags to an intentional release.
 - Run the offline commands in "Build, test, and lint" before pushing. Say which ignored live tests you did not run.
 - A PR that changes image inputs should expect the release-gates workflow, which needs network access to Amtrak and can fail when Amtrak is down.

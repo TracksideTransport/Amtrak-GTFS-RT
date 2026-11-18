@@ -46,8 +46,8 @@ they never share cookies or pages.
 ## How the track source works
 
 - The maps feed (`maps.amtrak.com/.../getTrainsData`) answers plain HTTP and is decrypted in
-  process. In the trip-updates role it is read from the fleet snapshot VehiclePositions writes
-  instead, so the map is polled once. It decides which trains are near a stop: trains with a rail
+  process. Beside the service, the worker reads the service's train list
+  (`tracks/fleet-trains.json`) instead, so the map is polled once. It decides which trains are near a stop: trains with a rail
   stop between `TRACK_WINDOW_AFTER_SECS` in the past and `TRACK_WINDOW_BEFORE_SECS` in the future
   (default 10 minutes back and 30 minutes ahead). An estimated time replaces the scheduled time.
   Bus stops are ignored.
@@ -191,9 +191,9 @@ terms of use before running it.
 
 ## Run
 
-Today the trip-updates and alerts role images each start this worker inside their own container
-(`python -m worker` from `/app`), with the other source turned off. The one-container image in
-[`docs/one-container.md`](../docs/one-container.md) runs a single worker with both sources.
+The service starts this worker inside the one image (`python -m worker` from `/app`) when either
+browser source is on, with both sources in one process and one Chromium
+([`docs/one-container.md`](../docs/one-container.md)).
 
 `browser-worker/Dockerfile` also builds the two standalone images still published as
 `ghcr.io/sohampatwardhan/amtrak-gtfs-rt-track-fetcher` and
