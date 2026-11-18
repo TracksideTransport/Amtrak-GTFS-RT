@@ -59,6 +59,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `waiting for the service's first train list`, and retries on the next tick. A train list that
   exists but cannot be read, is not JSON, or is not `amtrak-fleet-trains/v1` still logs at ERROR
   (#103).
+- **A client that hangs up no longer prints a traceback.** The container healthcheck reads only
+  the status line of the worker's `/healthz` and closes, so the worker's body write could fail
+  with `ConnectionResetError` or `BrokenPipeError`, and `socketserver` printed the traceback to
+  stderr. The worker now logs one line with the peer and path (no query string): DEBUG for
+  `/healthz`, WARNING for any other path. Any other handler error is logged at ERROR, with its
+  traceback, through the worker's logger. No feed data was lost: the service's track and notices
+  requests read whole bodies (#109).
 
 ## [0.8.0] - 2026-11-18
 
