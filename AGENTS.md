@@ -39,6 +39,7 @@ Checked-in paths, until the split replaces them:
 | `src/config.rs` | Environment configuration, peer allowlist, validator JAR check |
 | `src/sources/mod.rs` | `RtSource` and the `RtBatch` model |
 | `src/sources/amtrak.rs` | Primary source; wraps the catenary crate |
+| `src/sources/asm.rs` | Fallback source (TransitDocs ASM map), used only when the primary errors or returns nothing. Original code; do not copy another project's. |
 | `src/sources/advisories.rs` | Optional notices scraper |
 | `src/sources/tracks/` | Track and gate stamp, RailData, Hartford, Amtrak status, refresher |
 | `src/static_augment.rs` | Adds platform stops to the published static ZIP when tracks are on |

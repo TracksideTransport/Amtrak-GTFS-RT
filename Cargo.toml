@@ -10,7 +10,7 @@ default-run = "amtrak-gtfs-rt-service"
 [features]
 # Opt-in consumer tooling. The shipped service (`cargo build --locked --release`) does not enable
 # this feature, so `chrono-tz` and the `amtrak-status` binary stay out of the released artifact.
-status = ["dep:chrono-tz", "dep:chrono"]
+status = ["dep:chrono-tz"]
 
 [dependencies]
 amtrak-gtfs-rt = { git = "https://github.com/catenarytransit/amtrak-gtfs-rt" }
@@ -34,7 +34,7 @@ zip = { version = "6.0", default-features = false, features = ["deflate"] }
 # Consumer-only (station & train status): per-station local-time rendering with DST. Optional so
 # the released service binary and container link no additional code. Already in the resolved graph.
 chrono-tz = { version = "0.10", optional = true }
-chrono = { version = "0.4", optional = true }
+chrono = "0.4"
 # HTML parsing for the best-effort Service Alerts & Notices advisory scraper. Already resolved
 # transitively via `amtrak-gtfs-rt` (which the service links), so this is a declaration edge only.
 scraper = "0.22"
