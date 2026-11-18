@@ -2,7 +2,9 @@
 
 One Python process with one headless Chromium that reads the two Amtrak sources plain HTTP cannot
 reach, and serves both to the Rust service on `127.0.0.1:8081`. It replaces the former
-`track-fetcher/` and `advisory-fetcher/` sidecars.
+`track-fetcher/` and `advisory-fetcher/` sidecars, and ships inside the one
+`ghcr.io/sohampatwardhan/amtrak-gtfs-rt` image, which starts it; see
+[Install with Docker](../README.md#install-with-docker) to run the GTFS server.
 
 `www.amtrak.com` sits behind Akamai Bot Manager, which resets a plain HTTP request that lacks a
 JavaScript-earned cookie. The worker runs a real browser (Playwright and
@@ -174,8 +176,8 @@ AMTRAK_IMAGE_TAG=local FETCHER_BROWSER_BUNDLE=full FETCHER_BROWSER_MODE=xvfb-hea
   docker compose up -d --build
 ```
 
-The full image is larger and headful Chromium uses more memory; check it stays under the
-768 MB `mem_limit` on a Pi.
+The full image is larger and headful Chromium uses more memory; check the container stays under
+the Compose file's 1.5 GB `mem_limit` on a Pi.
 
 ## Isolation
 
@@ -195,18 +197,11 @@ The service starts this worker inside the one image (`python -m worker` from `/a
 browser source is on, with both sources in one process and one Chromium
 ([`docs/one-container.md`](../docs/one-container.md)).
 
-`browser-worker/Dockerfile` also builds the two standalone images still published as
+To run the GTFS server with this worker, follow [Install with Docker](../README.md#install-with-docker)
+in the main README; there is no separate worker image. The former standalone images,
 `ghcr.io/sohampatwardhan/amtrak-gtfs-rt-track-fetcher` and
-`ghcr.io/sohampatwardhan/amtrak-gtfs-rt-advisory-fetcher`, as two targets built from the
-repository root. Each runs one source on its old port (`8081` for tracks, `8080` for notices) and
-listens on `0.0.0.0` so another container can reach it:
-
-```bash
-docker build --file browser-worker/Dockerfile --target track-fetcher --tag track-fetcher:local .
-docker build --file browser-worker/Dockerfile --target advisory-fetcher --tag advisory-fetcher:local .
-```
-
-Those packages are retired by #74.
+`ghcr.io/sohampatwardhan/amtrak-gtfs-rt-advisory-fetcher`, were last published at v0.7.1 and are
+deprecated (#74).
 
 On a host, from this directory, with Playwright and its headless shell installed:
 
@@ -251,11 +246,12 @@ Train  Service date  Station  Side       Track  Gate  Scheduled                 
 
 `--json` prints one object per track instead. Locally it needs Playwright and its headless shell
 (`python -m pip install playwright==1.64.1`, then `python -m playwright install --only-shell
-chromium`). The image already has both:
+chromium`). The released image already has both; the worker lives in `/app`:
 
 ```bash
-docker run --rm --read-only --tmpfs /tmp --shm-size 64m \
-  --entrypoint python track-fetcher:local -m worker.tracks.dump 66 2150
+docker run --rm --read-only --tmpfs /tmp --tmpfs /home/amtrak:uid=10001,gid=10001 \
+  --shm-size 64m --workdir /app --entrypoint python3 \
+  ghcr.io/sohampatwardhan/amtrak-gtfs-rt:0.8.0 -m worker.tracks.dump 66 2150
 ```
 
 ## Station coverage
