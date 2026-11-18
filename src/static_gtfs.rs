@@ -241,22 +241,91 @@ pub async fn fetch_static(
     fetch_static_at(url, validator, platforms, SystemTime::now()).await
 }
 
+/// The `ETag` and `Last-Modified` Amtrak sent with the official ZIP a snapshot was built from.
+///
+/// Sent back as `If-None-Match` and `If-Modified-Since`, so an unchanged file answers `304` and
+/// costs neither a download nor a validator run.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct StaticValidators {
+    /// `ETag` response header, verbatim.
+    pub etag: Option<String>,
+    /// `Last-Modified` response header, verbatim.
+    pub last_modified: Option<String>,
+}
+
+impl StaticValidators {
+    fn from_headers(headers: &reqwest::header::HeaderMap) -> Option<Self> {
+        let text = |name| {
+            headers
+                .get(name)
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_string)
+        };
+        let validators = Self {
+            etag: text(reqwest::header::ETAG),
+            last_modified: text(reqwest::header::LAST_MODIFIED),
+        };
+        (validators.etag.is_some() || validators.last_modified.is_some()).then_some(validators)
+    }
+}
+
+/// Result of one conditional download of the official ZIP.
+enum Download {
+    /// `304`: the file the validators describe is still current.
+    NotModified,
+    /// `200`: new bytes and the validators they came with.
+    Body(Arc<[u8]>, Option<StaticValidators>),
+}
+
+async fn download_static(
+    url: &str,
+    validators: Option<&StaticValidators>,
+) -> Result<Download, StaticError> {
+    let mut request = reqwest::Client::new().get(url);
+    if let Some(validators) = validators {
+        if let Some(etag) = &validators.etag {
+            request = request.header(reqwest::header::IF_NONE_MATCH, etag);
+        }
+        if let Some(modified) = &validators.last_modified {
+            request = request.header(reqwest::header::IF_MODIFIED_SINCE, modified);
+        }
+    }
+    let response = request
+        .send()
+        .await
+        .map_err(|_| StaticError("static fetch failed".into()))?;
+    if validators.is_some() && response.status() == reqwest::StatusCode::NOT_MODIFIED {
+        return Ok(Download::NotModified);
+    }
+    let response = response
+        .error_for_status()
+        .map_err(|_| StaticError("static fetch status failed".into()))?;
+    let received = StaticValidators::from_headers(response.headers());
+    let bytes = response
+        .bytes()
+        .await
+        .map_err(|_| StaticError("static body failed".into()))?;
+    Ok(Download::Body(Arc::from(bytes.to_vec()), received))
+}
+
 async fn fetch_static_at(
     url: &str,
     validator: &dyn StaticStandardsValidator,
     platforms: &[PlatformTable],
     now: SystemTime,
 ) -> Result<StaticSnapshot, StaticError> {
-    let response = reqwest::get(url)
-        .await
-        .map_err(|_| StaticError("static fetch failed".into()))?
-        .error_for_status()
-        .map_err(|_| StaticError("static fetch status failed".into()))?;
-    let bytes = response
-        .bytes()
-        .await
-        .map_err(|_| StaticError("static body failed".into()))?;
-    let official: Arc<[u8]> = Arc::from(bytes.to_vec());
+    match download_static(url, None).await? {
+        Download::Body(official, _) => build_static(official, validator, platforms, now).await,
+        Download::NotModified => Err(StaticError("static fetch status failed".into())),
+    }
+}
+
+async fn build_static(
+    official: Arc<[u8]>,
+    validator: &dyn StaticStandardsValidator,
+    platforms: &[PlatformTable],
+    now: SystemTime,
+) -> Result<StaticSnapshot, StaticError> {
     let repaired = repair_static(official.as_ref());
     let upstream = repaired.as_deref().unwrap_or(official.as_ref());
     for table in platforms {
@@ -441,6 +510,9 @@ struct SnapshotPair {
 #[derive(Clone)]
 pub struct StaticSnapshotState {
     inner: Arc<RwLock<SnapshotPair>>,
+    /// Validators of the newest official ZIP this state accepted, shared by every clone. Empty
+    /// after recovery from disk, so the first refresh is unconditional.
+    validators: Arc<std::sync::Mutex<Option<StaticValidators>>>,
 }
 
 impl StaticSnapshotState {
@@ -455,6 +527,18 @@ impl StaticSnapshotState {
                 active,
                 pending: None,
             })),
+            validators: Arc::new(std::sync::Mutex::new(None)),
+        }
+    }
+
+    /// Validators for a conditional refresh, if a download has supplied any.
+    pub fn validators(&self) -> Option<StaticValidators> {
+        self.validators.lock().ok().and_then(|guard| guard.clone())
+    }
+
+    fn set_validators(&self, validators: Option<StaticValidators>) {
+        if let Ok(mut guard) = self.validators.lock() {
+            *guard = validators;
         }
     }
 
@@ -512,8 +596,13 @@ pub async fn bootstrap_static(
     validator: &dyn StaticStandardsValidator,
     platforms: &[PlatformTable],
 ) -> Result<StaticSnapshotState, StaticError> {
-    let snapshot = fetch_static(static_url, validator, platforms).await?;
-    Ok(StaticSnapshotState::new(Arc::new(snapshot)))
+    let Download::Body(official, validators) = download_static(static_url, None).await? else {
+        return Err(StaticError("static fetch status failed".into()));
+    };
+    let snapshot = build_static(official, validator, platforms, SystemTime::now()).await?;
+    let state = StaticSnapshotState::new(Arc::new(snapshot));
+    state.set_validators(validators);
+    Ok(state)
 }
 
 /// Credential-free result of one scheduled static refresh attempt.
@@ -524,7 +613,37 @@ pub enum StaticRefreshOutcome {
     Rejected,
 }
 
+enum Staged {
+    /// `304`: nothing was downloaded or validated.
+    NotModified,
+    /// The download matched the comparison snapshot byte for byte.
+    Unchanged(Option<StaticValidators>),
+    /// A validated replacement.
+    New(Arc<StaticSnapshot>, Option<StaticValidators>),
+}
+
+async fn stage_conditional(
+    comparison: &StaticSnapshot,
+    url: &str,
+    validator: &dyn StaticStandardsValidator,
+    platforms: &[PlatformTable],
+    validators: Option<&StaticValidators>,
+) -> Result<Staged, StaticError> {
+    let Download::Body(official, received) = download_static(url, validators).await? else {
+        return Ok(Staged::NotModified);
+    };
+    let candidate =
+        Arc::new(build_static(official, validator, platforms, SystemTime::now()).await?);
+    if candidate.zip.as_ref() == comparison.zip.as_ref() {
+        return Ok(Staged::Unchanged(received));
+    }
+    Ok(Staged::New(candidate, received))
+}
+
 /// Attempts one static replacement and stages it without publishing it.
+///
+/// Once a download has supplied `ETag` or `Last-Modified`, later refreshes send them back and a
+/// `304` keeps the current snapshot without downloading or validating again.
 ///
 /// Failures are intentionally summarized rather than returning or logging raw
 /// request/tool errors, which could contain configured URLs or credentials.
@@ -538,13 +657,39 @@ pub async fn refresh_snapshot_once(
         Some(pending) => pending,
         None => state.active().await,
     };
-    match stage_static(&comparison, static_url, validator, platforms).await {
-        Ok(Some(snapshot)) => {
+    // A `304` answers for the old platform tables too, so a rebuild for new tables (a newly
+    // observed track) must download again; only a refresh that keeps the tables is conditional.
+    let validators = if matches_platforms(&comparison.version, platforms) {
+        state.validators()
+    } else {
+        None
+    };
+    match stage_conditional(
+        &comparison,
+        static_url,
+        validator,
+        platforms,
+        validators.as_ref(),
+    )
+    .await
+    {
+        Ok(Staged::NotModified) => {
+            tracing::info!(
+                stage = "static",
+                "static not modified upstream; skipped validation"
+            );
+            StaticRefreshOutcome::Unchanged
+        }
+        Ok(Staged::Unchanged(received)) => {
+            state.set_validators(received);
+            StaticRefreshOutcome::Unchanged
+        }
+        Ok(Staged::New(snapshot, received)) => {
             let version = snapshot.version.clone();
             state.stage(snapshot).await;
+            state.set_validators(received);
             StaticRefreshOutcome::Staged(version)
         }
-        Ok(None) => StaticRefreshOutcome::Unchanged,
         Err(error) => {
             // StaticError messages are fixed summaries plus parse detail; none carries a URL.
             tracing::warn!(%error, stage = "static", "static refresh failed");
@@ -1598,6 +1743,106 @@ t,10:00:00,10:00:00,NWK,1\nt,10:30:00,10:30:00,OSM,2\n";
         assert!(staged.parsed.stops.contains_key("NWK:track:9"));
         assert_ne!(staged.version, recovered_version);
         task.abort();
+        server.abort();
+    }
+
+    /// An upstream that serves `bytes` with `ETag` `"v1"`, answers `304` to a matching
+    /// `If-None-Match`, and records each request's conditional header.
+    fn conditional_upstream(
+        bytes: Vec<u8>,
+    ) -> (
+        String,
+        Arc<Mutex<Vec<Option<String>>>>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let address = listener.local_addr().unwrap();
+        let listener = tokio::net::TcpListener::from_std(listener).unwrap();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let seen = requests.clone();
+        let server = tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    return;
+                };
+                let mut buffer = [0_u8; 2048];
+                let read = stream.read(&mut buffer).await.unwrap_or(0);
+                let head = String::from_utf8_lossy(&buffer[..read]).to_string();
+                let conditional = head
+                    .lines()
+                    .find_map(|line| line.strip_prefix("if-none-match: "))
+                    .map(|value| value.trim().to_string());
+                seen.lock().unwrap().push(conditional.clone());
+                if conditional.as_deref() == Some("\"v1\"") {
+                    let _ = stream
+                        .write_all(
+                            b"HTTP/1.1 304 Not Modified\r\nETag: \"v1\"\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                        )
+                        .await;
+                } else {
+                    let header = format!(
+                        "HTTP/1.1 200 OK\r\nETag: \"v1\"\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        bytes.len()
+                    );
+                    let _ = stream.write_all(header.as_bytes()).await;
+                    let _ = stream.write_all(&bytes).await;
+                }
+            }
+        });
+        (format!("http://{address}/GTFS.zip"), requests, server)
+    }
+
+    #[tokio::test]
+    async fn an_unchanged_upstream_answers_304_and_skips_download_and_validation() {
+        let (url, requests, server) = conditional_upstream(augmentable_zip("20260927"));
+        let validator = RecordingValidator {
+            seen: Mutex::new(Vec::new()),
+            result: Ok(()),
+        };
+        // Bootstrap is unconditional and records the validators Amtrak sent.
+        let state = bootstrap_static(&url, &validator, &[]).await.unwrap();
+        assert_eq!(
+            state.validators().and_then(|validators| validators.etag),
+            Some("\"v1\"".to_string())
+        );
+        let active = state.active().await;
+        assert_eq!(validator.seen.lock().unwrap().len(), 1);
+
+        // The next refresh is conditional; a 304 keeps the snapshot and never validates.
+        let outcome = refresh_snapshot_once(&state, &url, &validator, &[]).await;
+        assert_eq!(outcome, StaticRefreshOutcome::Unchanged);
+        assert!(Arc::ptr_eq(&state.active().await, &active));
+        assert!(state.pending().await.is_none());
+        assert_eq!(
+            validator.seen.lock().unwrap().len(),
+            1,
+            "304 must skip validation"
+        );
+        assert_eq!(
+            *requests.lock().unwrap(),
+            vec![None, Some("\"v1\"".to_string())]
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn new_platform_tables_download_again_instead_of_trusting_a_304() {
+        let (url, requests, server) = conditional_upstream(augmentable_zip("20260927"));
+        let validator = RecordingValidator {
+            seen: Mutex::new(Vec::new()),
+            result: Ok(()),
+        };
+        let state = bootstrap_static(&url, &validator, &[]).await.unwrap();
+        // Same upstream bytes, but a new platform table: the rebuild needs the body.
+        let table = PlatformTable::parse("NWK=1").unwrap();
+        let outcome =
+            refresh_snapshot_once(&state, &url, &validator, std::slice::from_ref(&table)).await;
+        assert!(
+            matches!(outcome, StaticRefreshOutcome::Staged(_)),
+            "{outcome:?}"
+        );
+        assert_eq!(*requests.lock().unwrap(), vec![None, None]);
         server.abort();
     }
 
