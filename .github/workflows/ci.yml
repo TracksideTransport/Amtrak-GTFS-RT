@@ -18,27 +18,46 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      # CI is for implementation and logic. A pull request that changes only documentation or
+      # records cannot change how the program runs, so the heavy steps below are skipped. The gating
+      # is per step, not per job or per workflow, so each required check still reports success
+      # (a skipped matrix job would leave its check pending). scripts/ci-scope.sh lists what
+      # counts as non-logic; anything it does not recognise runs CI.
+      - name: Decide whether implementation or logic changed
+        id: scope
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: scripts/ci-scope.sh
 
       - name: Install protoc
+        if: steps.scope.outputs.logic == 'true'
         # The gtfs-realtime crate's build script generates Rust bindings from
         # .proto files and requires the protobuf compiler.
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
 
       - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+        if: steps.scope.outputs.logic == 'true'
         with:
           toolchain: stable
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        if: steps.scope.outputs.logic == 'true'
 
       - name: Build
+        if: steps.scope.outputs.logic == 'true'
         run: cargo build --locked --all-targets --all-features --verbose
 
       - name: Test
+        if: steps.scope.outputs.logic == 'true'
         # Live tests against Amtrak's endpoints are #[ignore]d, so this job stays
         # deterministic and offline. They run in the validate-feeds workflow.
         run: cargo test --locked --all-targets --all-features --verbose
 
       - name: Rustdoc
+        if: steps.scope.outputs.logic == 'true'
         run: cargo doc --locked --no-deps
         env:
           RUSTDOCFLAGS: -D warnings
@@ -51,8 +70,22 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      # CI is for implementation and logic. A pull request that changes only documentation or
+      # records cannot change how the program runs, so the heavy steps below are skipped. The gating
+      # is per step, not per job or per workflow, so each required check still reports success
+      # (a skipped matrix job would leave its check pending). scripts/ci-scope.sh lists what
+      # counts as non-logic; anything it does not recognise runs CI.
+      - name: Decide whether implementation or logic changed
+        id: scope
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: scripts/ci-scope.sh
 
       - name: Set up CPython 3.12.11
+        if: steps.scope.outputs.logic == 'true'
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: 3.12.11
@@ -60,10 +93,12 @@ jobs:
           cache-dependency-path: browser-worker/requirements.txt
 
       - name: Install exact test dependencies
+        if: steps.scope.outputs.logic == 'true'
         run: python -m pip install --requirement browser-worker/requirements.txt
 
       # No browser is downloaded or launched: Playwright is imported only where a browser starts.
       - name: Run offline unit tests
+        if: steps.scope.outputs.logic == 'true'
         working-directory: browser-worker
         run: python -m pytest tests -q
 
@@ -82,8 +117,22 @@ jobs:
             runner: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      # CI is for implementation and logic. A pull request that changes only documentation or
+      # records cannot change how the program runs, so the heavy steps below are skipped. The gating
+      # is per step, not per job or per workflow, so each required check still reports success
+      # (a skipped matrix job would leave its check pending). scripts/ci-scope.sh lists what
+      # counts as non-logic; anything it does not recognise runs CI.
+      - name: Decide whether implementation or logic changed
+        id: scope
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: scripts/ci-scope.sh
 
       - name: Set up Docker Buildx
+        if: steps.scope.outputs.logic == 'true'
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 
       # Native builds on each architecture, so the Dockerfile's ldd, static-binary, and Java checks
@@ -91,6 +140,7 @@ jobs:
       # mode working. Base images and validator inputs are digest-pinned, so the cache only skips
       # recompiling unchanged stages.
       - name: Build the default (headless-shell) image
+        if: steps.scope.outputs.logic == 'true'
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
@@ -102,6 +152,7 @@ jobs:
           provenance: false
 
       - name: Build the full (Chromium and Xvfb) image
+        if: steps.scope.outputs.logic == 'true'
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
@@ -115,11 +166,13 @@ jobs:
       # Offline: no Amtrak call, so a blocked runner cannot fail it. The live smoke test runs in
       # release-gates.yml.
       - name: Offline smoke test
+        if: steps.scope.outputs.logic == 'true'
         run: scripts/test-image-offline.sh amtrak-gtfs-rt:ci amtrak-gtfs-rt:ci-full
 
       # The release's contract check: OCI labels, runtime config, and the license notices for
       # everything in the image. Unreleased builds carry the Dockerfile's dev/unknown labels.
       - name: Release contract and license notices
+        if: steps.scope.outputs.logic == 'true'
         run: |
           scripts/verify-release-image.sh amtrak-gtfs-rt:ci dev unknown ${{ matrix.arch }}
           scripts/verify-release-image.sh amtrak-gtfs-rt:ci-full dev unknown ${{ matrix.arch }}
@@ -168,6 +221,9 @@ jobs:
 
       - name: Test the network retry helper
         run: scripts/test-lib-retry.sh
+
+      - name: Test the CI scope classifier
+        run: scripts/test-ci-scope.sh
 
   offline-validators:
     name: Offline GTFS and GTFS-RT validators

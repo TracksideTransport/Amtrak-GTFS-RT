@@ -100,7 +100,7 @@ Download the official JAR from the MobilityData v8.0.1 release to `tools/gtfs-va
 
 ## Build, test, and lint
 
-CI (`.github/workflows/ci.yml`) builds and tests the Rust crate without ignored tests, runs the browser worker suite, builds the one image natively on amd64 and arm64 and runs `scripts/test-image-offline.sh` on it, runs `scripts/test-release-controls.sh`, and checks Compose/Bake config. Release-quality Rust changes also pass fmt and clippy.
+CI (`.github/workflows/ci.yml`) builds and tests the Rust crate without ignored tests, runs the browser worker suite, builds the one image natively on amd64 and arm64 and runs `scripts/test-image-offline.sh` on it, runs `scripts/test-release-controls.sh`, and checks Compose/Bake config. Release-quality Rust changes also pass fmt and clippy. The heavy jobs (Rust build and tests, the browser worker tests, and the two image builds) run only when a pull request changes implementation or logic: `scripts/ci-scope.sh` skips their steps when every changed file is documentation or a record (`*.md`, `docs/`, `.security/`, `.kiro/`, `LICENSE`), and any other path counts as logic, so an unrecognised file still runs CI. The skip is per step inside each job, so every required check still reports; do not move it to a workflow-level `paths:` filter or a job-level `if:`, which would leave required checks pending.
 
 ```bash
 cargo build --locked
