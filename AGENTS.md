@@ -39,6 +39,7 @@ Checked-in paths, until the split replaces them:
 | `src/config.rs` | Environment configuration, peer allowlist, validator JAR check |
 | `src/sources/mod.rs` | `RtSource` and the `RtBatch` model |
 | `src/sources/amtrak.rs` | Primary source; wraps the catenary crate |
+| `src/sources/asm.rs` | Fallback source (TransitDocs ASM map), used only when the primary errors or returns nothing. Original code; do not copy another project's. |
 | `src/sources/advisories.rs` | Optional notices scraper |
 | `src/sources/tracks/` | Track and gate stamp, RailData, Hartford, Amtrak status, refresher |
 | `src/static_augment.rs` | Adds platform stops to the published static ZIP when tracks are on |
@@ -143,7 +144,7 @@ The MobilityData gate is separate and, by default, fetches live feeds:
 ./scripts/validate-feeds.sh
 ```
 
-It needs Java 17 and Maven, or Docker (automatic fallback). It is not part of pull-request CI.
+It needs Java 17 and Maven, or Docker (automatic fallback). The live run is not part of pull-request CI; `./scripts/validate-feeds.sh --fixture` is (see "Data sources, feeds, and releases").
 
 ## Coding conventions
 
@@ -191,7 +192,7 @@ Release workflow:
 - Pushing a `v*.*.*` tag starts `.github/workflows/release.yml`. It publishes the one image, `linux/amd64` and `linux/arm64`, to `ghcr.io/sohampatwardhan/amtrak-gtfs-rt`, which is the only package. `amtrak-gtfs-rt-track-fetcher` and `amtrak-gtfs-rt-advisory-fetcher` (last published at v0.7.1) are deprecated and get no releases.
 - A release is complete only when the GitHub Release carries `image-release.txt` with the tag, revisions, manifest digest, and both platform digests. Until then the previous complete release stays the stable image. Current complete release is `v0.7.1`. Tags `v0.3.0`, `v0.6.0`, and `v0.6.1` never finished publication; do not deploy them or their partial images.
 - Pull requests that touch image inputs (`Dockerfile`, `.dockerignore`, `container/`, any file in `src/`, `Cargo.toml`, `Cargo.lock`, or the smoke, scanner, and policy scripts) run `.github/workflows/release-gates.yml`: a linux/amd64 image build, `scripts/test-container.sh` (live Amtrak fetch), and the pinned Grype policy (no Critical or High match that has a fix; the zero-match policy ended with the scratch image, #71). arm64 is still checked only by the release itself.
-- `./scripts/validate-feeds.sh` runs on a schedule and on pushes that touch the pipeline, not on every pull request, so an Amtrak outage does not block unrelated work.
+- `./scripts/validate-feeds.sh` runs on a schedule and on pushes that touch the pipeline, not on every pull request, so an Amtrak outage does not block unrelated work. `./scripts/validate-feeds.sh --fixture` is the pull-request counterpart: `cargo run --example validation_fixture` builds a deterministic feed set (a small static GTFS with platform and gate stops, plus a mock realtime batch through the real builder), both MobilityData validators must report zero ERROR notices, and no Amtrak call is made. The `Offline GTFS and GTFS-RT validators` job in `ci.yml` runs it when `src/`, `examples/`, `Cargo.*`, `validation/`, or the validation scripts change, and is not a required check. Network steps in the script retry with backoff (`scripts/lib-retry.sh`), because Maven Central answers HTTP 429 to a cold cache; validator cache keys hash the pins, not the script.
 
 ## What agents must not do
 

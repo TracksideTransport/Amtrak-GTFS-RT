@@ -20,6 +20,8 @@ on:
       - "Cargo.toml"
       - "Cargo.lock"
       - "scripts/validate-feeds.sh"
+      - "scripts/lib-retry.sh"
+      - "examples/**"
       - "scripts/test-live-amtrak.sh"
       - "validation/baseline.json"
       - ".github/workflows/validate-feeds.yml"
@@ -86,19 +88,23 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      - name: Cache validator jars
-        uses: actions/cache@v4
-        with:
-          path: .validator-cache
-          # Keyed on the script, which pins both validator versions.
-          key: validators-${{ hashFiles('scripts/validate-feeds.sh') }}
+      # The cache keys hash only the validator pins, not the whole script: an unrelated edit to
+      # validate-feeds.sh used to force a cold rebuild, which is when Maven Central answers 429.
+      - name: Read the validator pins
+        id: pins
+        run: |
+          key="$(grep -E '^(GTFS_VALIDATOR_VERSION|GTFS_VALIDATOR_SHA256|RT_VALIDATOR_COMMIT)=' scripts/validate-feeds.sh | sha256sum | cut -c1-16)"
+          printf 'key=%s\n' "$key" >>"$GITHUB_OUTPUT"
 
-      - name: Cache Maven repository
-        uses: actions/cache@v4
+      - name: Restore validator jars and the Maven repository
+        id: cache
+        uses: actions/cache/restore@v4
         with:
-          path: ~/.m2/repository
-          key: maven-${{ hashFiles('scripts/validate-feeds.sh') }}
-          restore-keys: maven-
+          path: |
+            .validator-cache
+            ~/.m2/repository
+          key: validators-${{ steps.pins.outputs.key }}
+          restore-keys: validators-
 
       - name: Run validation gate
         run: ./scripts/validate-feeds.sh
@@ -111,6 +117,17 @@ jobs:
       - name: Run validation gate with track assignments
         if: always()
         run: ./scripts/validate-feeds.sh --tracks
+
+      # Saved even when a later step fails, so a build that got the jars (or most of the Maven
+      # repository) is not thrown away. Skipped on an exact hit, where there is nothing new.
+      - name: Save validator jars and the Maven repository
+        if: always() && steps.cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            .validator-cache
+            ~/.m2/repository
+          key: validators-${{ steps.pins.outputs.key }}
 
       - name: Upload validation reports
         if: always()

@@ -17,6 +17,12 @@
 #   FEED_DIR=out scripts/validate-feeds.sh # validate feeds already in ./out
 #   scripts/validate-feeds.sh --offline-fixtures --as-of 2026-08-13
 #   scripts/validate-feeds.sh --tracks     # same pass with AMTRAK_TRACKS=on
+#   scripts/validate-feeds.sh --fixture    # offline: validate a deterministic fixture feed set
+#
+# The --fixture pass needs no network for the feeds: `cargo run --example validation_fixture`
+# builds one generation from mocks and a small static GTFS with platform and gate stops, and both
+# validators must report zero ERROR notices (an empty baseline, through the same ratchet). It is
+# the pull-request check; the live pass stays daily because it depends on Amtrak being up.
 #
 # The --tracks pass validates the platform stops added to static.zip and any
 # stamped assigned_stop_id values. It deliberately runs without RailData
@@ -34,6 +40,13 @@ RT_VALIDATOR_COMMIT="7041fa3fcaf674bf730e17325c179d329cdff6f2"
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
+# shellcheck source=scripts/lib-retry.sh
+. "$ROOT/scripts/lib-retry.sh"
+
+# Public registries rate-limit a cold CI cache (Maven Central answers HTTP 429), and the RT
+# validator has no published release to download. Network steps retry with linear backoff.
+NETWORK_ATTEMPTS="${VALIDATION_NETWORK_ATTEMPTS:-4}"
+NETWORK_BASE_DELAY="${VALIDATION_NETWORK_BASE_DELAY:-20}"
 
 CACHE_DIR="${VALIDATOR_CACHE_DIR:-.validator-cache}"
 FEED_DIR="${FEED_DIR:-out}"
@@ -49,6 +62,7 @@ while [ "$#" -gt 0 ]; do
   case "$1" in
     --offline-fixtures) MODE="offline-fixtures"; shift ;;
     --tracks) TRACKS="on"; shift ;;
+    --fixture) MODE="fixture"; shift ;;
     --as-of)
       [ "$#" -ge 2 ] || { echo "--as-of requires YYYY-MM-DD" >&2; exit 2; }
       AS_OF="$2"; shift 2 ;;
@@ -183,6 +197,14 @@ if [ "$MODE" = "offline-fixtures" ]; then
   exit $?
 fi
 
+# The fixture feed has none of the live-data mismatches behind the baseline entries, so it is held
+# to zero tolerance: the same ratchet runs against an empty baseline.
+if [ "$MODE" = "fixture" ]; then
+  mkdir -p "$REPORT_DIR"
+  BASELINE="$REPORT_DIR/fixture-baseline.json"
+  jq -n '{_comment: "zero tolerance for the offline fixture", static: {allowed_errors: []}, realtime: {allowed_errors: []}}' >"$BASELINE"
+fi
+
 # Fail on baseline schema/expiry before probing Java or touching live inputs.
 [ -f "$BASELINE" ] || fail "baseline file not found: $BASELINE"
 preflight_observed=$(mktemp "${TMPDIR:-/tmp}/amtrak-ratchet-preflight.XXXXXX")
@@ -223,12 +245,15 @@ run_java() {
 }
 
 run_mvn_package() {
+  # Retries inside Maven as well as around it: a 429 on one artifact should not restart the whole
+  # build, and artifacts fetched before the failure stay in the local repository for the retry.
+  local wagon=(-Dmaven.wagon.http.retryHandler.count=5 -Dmaven.wagon.http.retryHandler.requestSentEnabled=true)
   if [ "$USE_DOCKER" -eq 1 ]; then
     docker run --rm -v "$ROOT:/w" -w "/w/$RT_VALIDATOR_SRC" \
       maven:3.9-eclipse-temurin-17 \
-      mvn -q -B package -DskipTests -Dmaven.repo.local="/w/$CACHE_DIR/.m2"
+      mvn -q -B package -DskipTests "${wagon[@]}" -Dmaven.repo.local="/w/$CACHE_DIR/.m2"
   else
-    (cd "$RT_VALIDATOR_SRC" && mvn -q -B package -DskipTests)
+    (cd "$RT_VALIDATOR_SRC" && mvn -q -B package -DskipTests "${wagon[@]}")
   fi
 }
 
@@ -248,7 +273,7 @@ mkdir -p "$CACHE_DIR" "$REPORT_DIR"
 # ---------------------------------------------------------------------------
 if [ ! -f "$GTFS_VALIDATOR_JAR" ]; then
   log "Downloading gtfs-validator $GTFS_VALIDATOR_VERSION"
-  curl -sSfL -o "$GTFS_VALIDATOR_JAR" \
+  retry_with_backoff "$NETWORK_ATTEMPTS" "$NETWORK_BASE_DELAY" curl -sSfL -o "$GTFS_VALIDATOR_JAR" \
     "https://github.com/MobilityData/gtfs-validator/releases/download/v${GTFS_VALIDATOR_VERSION}/gtfs-validator-${GTFS_VALIDATOR_VERSION}-cli.jar"
 fi
 verify_gtfs_validator
@@ -257,11 +282,14 @@ if [ ! -f "$RT_VALIDATOR_JAR" ]; then
   log "Building gtfs-realtime-validator @ ${RT_VALIDATOR_COMMIT:0:7} (no releases published upstream)"
   if [ ! -d "$RT_VALIDATOR_SRC/.git" ]; then
     rm -rf "$RT_VALIDATOR_SRC"
-    git clone --quiet https://github.com/MobilityData/gtfs-realtime-validator.git "$RT_VALIDATOR_SRC"
+    retry_with_backoff "$NETWORK_ATTEMPTS" "$NETWORK_BASE_DELAY" \
+      git clone --quiet https://github.com/MobilityData/gtfs-realtime-validator.git "$RT_VALIDATOR_SRC"
   fi
-  git -C "$RT_VALIDATOR_SRC" fetch --quiet origin
+  retry_with_backoff "$NETWORK_ATTEMPTS" "$NETWORK_BASE_DELAY" git -C "$RT_VALIDATOR_SRC" fetch --quiet origin
   git -C "$RT_VALIDATOR_SRC" checkout --quiet "$RT_VALIDATOR_COMMIT"
-  run_mvn_package
+  # The pinned commit is checked out above and the GTFS validator's SHA-256 is verified before
+  # use; retrying changes neither.
+  retry_with_backoff "$NETWORK_ATTEMPTS" "$NETWORK_BASE_DELAY" run_mvn_package
   built=$(find "$RT_VALIDATOR_SRC" -name '*withAllDependencies.jar' -path '*target*' | head -1)
   [ -n "$built" ] || fail "RT validator build produced no jar"
   cp "$built" "$RT_VALIDATOR_JAR"
@@ -282,72 +310,81 @@ rm -rf "$INPUT_DIR"
 mkdir -p "$INPUT_DIR" "$FEED_DIR"
 rm -f "$MANIFEST"
 
-SERVICE_PID=""
-if [ -z "$SERVICE_URL" ]; then
-  log "Starting release candidate for manifest-first discovery"
-  cargo build --locked --release
-  SERVICE_URL="http://$VALIDATION_BIND_ADDR"
-  if [ "$USE_DOCKER" -eq 1 ]; then
-    JAVA_SHIM_DIR="$CACHE_DIR/docker-java-bin"
-    mkdir -p "$JAVA_SHIM_DIR"
-    cp scripts/validation-docker-java "$JAVA_SHIM_DIR/java"
-    chmod 700 "$JAVA_SHIM_DIR/java"
-    PATH="$ROOT/$JAVA_SHIM_DIR:$PATH"
-    export PATH VALIDATION_REPO_ROOT="$ROOT"
-  fi
-  AMTRAK_OUTPUT_DIR="$FEED_DIR" \
-    AMTRAK_TRACKS="$TRACKS" \
-    NJT_RAILDATA_USERNAME= \
-    NJT_RAILDATA_PASSWORD= \
-    AMTRAK_POLL_SECS=30 \
-    AMTRAK_BIND_ADDR="$VALIDATION_BIND_ADDR" \
-    AMTRAK_GTFS_VALIDATOR_JAR="$GTFS_VALIDATOR_JAR" \
-    ./target/release/amtrak-gtfs-rt-service > "$REPORT_DIR/service.log" 2>&1 &
-  SERVICE_PID=$!
-  # shellcheck disable=SC2064
-  trap "kill $SERVICE_PID 2>/dev/null || true" EXIT
-fi
-
-for _ in $(seq 1 180); do
-  if curl -fsS "$SERVICE_URL/v1/feed-set.json" -o "$MANIFEST"; then break; fi
-  if [ -n "$SERVICE_PID" ] && ! kill -0 "$SERVICE_PID" 2>/dev/null; then break; fi
-  sleep 1
-done
-if [ ! -s "$MANIFEST" ]; then
-  [ -z "$SERVICE_PID" ] || cat "$REPORT_DIR/service.log" >&2 || true
-  fail "could not fetch a feed-set manifest (candidate or Amtrak upstream unavailable)"
-fi
-
-generation_id=$(jq -er '.generation_id | select(type == "string" and test("^[0-9]+-[0-9]+$"))' "$MANIFEST") \
-  || fail "feed-set manifest has an invalid generation_id"
-for artifact in static_zip official_static_zip trip_updates vehicle_positions alerts; do
-  url=$(jq -er --arg artifact "$artifact" '.urls[$artifact] | select(type == "string")' "$MANIFEST") \
-    || fail "feed-set manifest is missing $artifact URL"
-  expected_prefix="/v1/generations/$generation_id/"
-  case "$url" in
-    "$expected_prefix"*) ;;
-    *) fail "feed-set URL does not name manifest generation: $artifact" ;;
-  esac
-  case "$artifact:$url" in
-    "static_zip:${expected_prefix}static.zip") output="static.zip" ;;
-    "official_static_zip:${expected_prefix}official-static.zip") output="official-static.zip" ;;
-    "trip_updates:${expected_prefix}trip-updates.pb") output="trip-updates.pb" ;;
-    "vehicle_positions:${expected_prefix}vehicle-positions.pb") output="vehicle-positions.pb" ;;
-    "alerts:${expected_prefix}alerts.pb") output="alerts.pb" ;;
-    *) fail "feed-set URL has an unexpected artifact name: $artifact" ;;
-  esac
-  curl -fsS "$SERVICE_URL$url" -o "$INPUT_DIR/$output" \
-    || fail "could not fetch manifest-pinned artifact: $artifact"
-done
-
-if [ -n "$SERVICE_PID" ]; then
-  kill "$SERVICE_PID" 2>/dev/null || true
-  wait "$SERVICE_PID" 2>/dev/null || true
+if [ "$MODE" = "fixture" ]; then
+  # Deterministic and offline: one generation built from mocks and a checked-in-by-code static
+  # fixture, with platform and gate stops. No service, no Amtrak, no manifest.
+  log "Building the deterministic fixture feed set"
+  cargo run --locked --quiet --example validation_fixture -- "$INPUT_DIR"
+  generation_id="fixture"
+else
   SERVICE_PID=""
-  trap - EXIT
+  if [ -z "$SERVICE_URL" ]; then
+    log "Starting release candidate for manifest-first discovery"
+    cargo build --locked --release
+    SERVICE_URL="http://$VALIDATION_BIND_ADDR"
+    if [ "$USE_DOCKER" -eq 1 ]; then
+      JAVA_SHIM_DIR="$CACHE_DIR/docker-java-bin"
+      mkdir -p "$JAVA_SHIM_DIR"
+      cp scripts/validation-docker-java "$JAVA_SHIM_DIR/java"
+      chmod 700 "$JAVA_SHIM_DIR/java"
+      PATH="$ROOT/$JAVA_SHIM_DIR:$PATH"
+      export PATH VALIDATION_REPO_ROOT="$ROOT"
+    fi
+    AMTRAK_OUTPUT_DIR="$FEED_DIR" \
+      AMTRAK_TRACKS="$TRACKS" \
+      NJT_RAILDATA_USERNAME= \
+      NJT_RAILDATA_PASSWORD= \
+      AMTRAK_POLL_SECS=30 \
+      AMTRAK_BIND_ADDR="$VALIDATION_BIND_ADDR" \
+      AMTRAK_GTFS_VALIDATOR_JAR="$GTFS_VALIDATOR_JAR" \
+      ./target/release/amtrak-gtfs-rt-service > "$REPORT_DIR/service.log" 2>&1 &
+    SERVICE_PID=$!
+    # shellcheck disable=SC2064
+    trap "kill $SERVICE_PID 2>/dev/null || true" EXIT
+  fi
+
+  for _ in $(seq 1 180); do
+    if curl -fsS "$SERVICE_URL/v1/feed-set.json" -o "$MANIFEST"; then break; fi
+    if [ -n "$SERVICE_PID" ] && ! kill -0 "$SERVICE_PID" 2>/dev/null; then break; fi
+    sleep 1
+  done
+  if [ ! -s "$MANIFEST" ]; then
+    [ -z "$SERVICE_PID" ] || cat "$REPORT_DIR/service.log" >&2 || true
+    fail "could not fetch a feed-set manifest (candidate or Amtrak upstream unavailable)"
+  fi
+
+  generation_id=$(jq -er '.generation_id | select(type == "string" and test("^[0-9]+-[0-9]+$"))' "$MANIFEST") \
+    || fail "feed-set manifest has an invalid generation_id"
+  for artifact in static_zip official_static_zip trip_updates vehicle_positions alerts; do
+    url=$(jq -er --arg artifact "$artifact" '.urls[$artifact] | select(type == "string")' "$MANIFEST") \
+      || fail "feed-set manifest is missing $artifact URL"
+    expected_prefix="/v1/generations/$generation_id/"
+    case "$url" in
+      "$expected_prefix"*) ;;
+      *) fail "feed-set URL does not name manifest generation: $artifact" ;;
+    esac
+    case "$artifact:$url" in
+      "static_zip:${expected_prefix}static.zip") output="static.zip" ;;
+      "official_static_zip:${expected_prefix}official-static.zip") output="official-static.zip" ;;
+      "trip_updates:${expected_prefix}trip-updates.pb") output="trip-updates.pb" ;;
+      "vehicle_positions:${expected_prefix}vehicle-positions.pb") output="vehicle-positions.pb" ;;
+      "alerts:${expected_prefix}alerts.pb") output="alerts.pb" ;;
+      *) fail "feed-set URL has an unexpected artifact name: $artifact" ;;
+    esac
+    curl -fsS "$SERVICE_URL$url" -o "$INPUT_DIR/$output" \
+      || fail "could not fetch manifest-pinned artifact: $artifact"
+  done
+
+  if [ -n "$SERVICE_PID" ]; then
+    kill "$SERVICE_PID" 2>/dev/null || true
+    wait "$SERVICE_PID" 2>/dev/null || true
+    SERVICE_PID=""
+    trap - EXIT
+  fi
 fi
+
 log "Manifest-pinned generation under validation: $generation_id"
-ls -lh "$MANIFEST" "$INPUT_DIR"/*.pb "$INPUT_DIR/static.zip" "$INPUT_DIR/official-static.zip"
+ls -lh "$INPUT_DIR"/*.pb "$INPUT_DIR/static.zip" "$INPUT_DIR/official-static.zip"
 
 # ---------------------------------------------------------------------------
 # 3. Static GTFS

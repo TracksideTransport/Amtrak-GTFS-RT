@@ -554,6 +554,9 @@ fn publish_inner(
     fail_at(failure, FailurePoint::MarkerDirectory)?;
 
     let mut loaded = load_generation(&final_dir, &id.0).map_err(PublishError)?;
+    // The on-disk manifest does not carry the match rate (so a rollback can still read it), but
+    // this process just measured it, so the live generation keeps it.
+    loaded.manifest.match_rate = manifest.match_rate;
     if loaded.static_zip.as_ref() == candidate.static_snapshot.zip.as_ref() {
         loaded.static_zip = candidate.static_snapshot.zip.clone();
     }
@@ -1515,6 +1518,7 @@ fn load_generation_from_handle(
         platform_addon_version,
         source,
         entity_counts,
+        match_rate: None,
         urls: artifact_urls(&id),
     };
     Ok(PublishedGeneration {
@@ -1602,6 +1606,7 @@ mod tests {
             vehicle_positions: Arc::from(feed.clone()),
             alerts: Arc::from(feed),
             entity_counts: EntityCounts::default(),
+            match_rate: crate::orchestrator::MatchRate::default(),
         }
     }
 

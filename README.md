@@ -12,8 +12,9 @@ decrypt → parse → match → encode work to the
 [`catenarytransit/amtrak-gtfs-rt`](https://github.com/catenarytransit/amtrak-gtfs-rt) crate, which
 fetches and decrypts Amtrak's `getTrainsData`, matches each train to a GTFS trip, and returns
 ready-made protobuf feeds. Complete static and realtime generations are persisted immutably and
-served by a small `axum` HTTP server. A neutral `RtSource` trait wraps the data source so fallback
-sources (TransitDocs, RailRat) can be added later without touching the core.
+served by a small `axum` HTTP server. A neutral `RtSource` trait wraps the data source, and a
+[fallback position source](#fallback-position-source) takes over when the Amtrak source fails or
+returns nothing.
 
 Two optional features add data Amtrak's feed does not carry. Both are on by default, each has an
 on/off flag, and both fail open, so a missing browser worker or a board outage never stops trip
@@ -98,6 +99,16 @@ flowchart LR
 > generation URLs or substitute a newer ID between artifact requests. Every realtime header is
 > stamped with the manifest's static version and generation timestamp, so the artifacts of
 > one manifest always belong together.
+
+**Match rate (additive).** `/v1/feed-set.json` also carries `match_rate` for a generation this
+process built: `trip_updates` and `vehicle_positions`, each with `emitted` (distinct entities the
+source returned) and `matched` (the ones that resolved against the generation's static feed). A
+fall in `matched / emitted` is the earliest sign that the static and realtime data disagree, for
+example after an Amtrak schedule change; the service also logs both numbers every cycle and warns
+when fewer than 80% of at least ten trip updates match. It is measured over what the source
+returned, because the source crate exposes no count of the raw trains it observed. A generation
+recovered from disk after a restart has no `match_rate` until the next one is built, since it is
+not stored in the on-disk manifest. Consumers that ignore unknown keys are unaffected.
 
 `static.zip` is still the feed to load if you want one file. It is the official zip plus the
 platform add-on. `assigned_stop_id` values such as `NYP:track:21` exist only in that combined
@@ -482,6 +493,8 @@ Restart=on-failure
 | `AMTRAK_OUTPUT_DIR` | `./out` | Where feed files are written and served from |
 | `AMTRAK_POLL_SECS` | `45` | Realtime poll interval (seconds) |
 | `AMTRAK_STATIC_REFRESH_SECS` | `86400` | Static feed refresh interval (seconds) |
+| `AMTRAK_FALLBACK_ASM` | on | The [fallback position source](#fallback-position-source): used only when the Amtrak source fails or returns nothing. Accepts the same on/off words as `AMTRAK_TRACKS`; any other value is a startup error |
+| `AMTRAK_FALLBACK_ASM_URL` | `https://asm-backend.transitdocs.com/map` | Override for the fallback's map URL. An explicitly empty value turns the fallback off |
 | `AMTRAK_FILTER_CAPITAL_CORRIDOR` | off | Drop Capital Corridor (route 84); a better feed exists via 511.org. Accepts the same on/off words as `AMTRAK_TRACKS`; any other value is a startup error |
 | `AMTRAK_BIND_ADDR` | `127.0.0.1:8080` | HTTP bind address; non-loopback requires an allowlist |
 | `AMTRAK_ALLOWED_PEER_IPS` | empty | Comma-separated exact peer IPs, or the keyword `gateway` (the IPv4 default gateway, resolved at startup; the image default); empty admits loopback only |
@@ -629,6 +642,27 @@ docker run -d -p 127.0.0.1:8090:8080 -v amtrak-data:/data amtrak-gtfs-rt:local
 From v0.7.1 (the service plus the two fetcher sidecars), remove the `track-fetcher` and
 `advisory-fetcher` services and any `AMTRAK_TRACKS_AMTRAK_URL` or `AMTRAK_ADVISORIES_URL` that
 points at them; the built-in worker replaces both.
+
+## Fallback position source
+
+When the Amtrak source errors or returns an empty batch, the next source in the chain takes over,
+so the feed keeps publishing positions and delays instead of going stale. The fallback reads the
+[TransitDocs](https://transitdocs.com) ASM train map (`asm-backend.transitdocs.com/map`), the same
+endpoint the catenary crate already reads for alerts. It makes **no request while the Amtrak source
+is healthy**, and at most one per cycle while it is not.
+
+Each Amtrak train in the map is matched to a static trip by its train number (`trip_short_name`)
+and the service calendar on the train's origin date, and a train with no active matching trip is
+left out, so every trip and stop id in the batch resolves against the static feed. Delays are the
+map's per-stop `variance` values (seconds); positions convert mph to metres per second. On the day
+this was written, 82 of 93 live Amtrak trains resolved to a static trip. While the fallback is
+the source, `/v1/feed-set.json` names it (`source: transitdocs-asm`), trips carry no track or gate
+stamps, and `alerts.pb` has only what the notices source supplies.
+
+The client is original code written against the endpoint's public JSON, not a copy of anyone's
+code. Credit for the data goes to TransitDocs. I could not find published terms of use for that
+endpoint; check that your use suits them, or turn the fallback off with `AMTRAK_FALLBACK_ASM=off`.
+RailRat, named in the original design, is not implemented.
 
 ## Service Alerts & Notices
 
