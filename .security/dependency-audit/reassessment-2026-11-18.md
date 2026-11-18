@@ -43,7 +43,7 @@ None of these is in the CISA KEV catalog per the record; I did not re-query KEV 
 
 ## 4. Recommendation
 
-1. **Fix the three in-range ones** (`rustix`, `quinn-proto`, `quinn-udp`) with a lockfile-only update, and rebuild and test.
+1. **Fix the three in-range ones** (`rustix`, `quinn-proto`, `quinn-udp`) with a lockfile-only update, and rebuild and test. **Done in the PR that carries this file:** the audit goes from 13 vulnerabilities to 10 (`zip` 7, `rust-crypto`, `rustc-serialize`, `time` 1 each), and `cargo test --locked` passes (190).
 2. **Rewrite the record** for the one-container layout (replace the mitigation section), list the current exact set (13 vulnerabilities + 10 warnings today, minus whatever step 1 clears), and add the new zip and unmaintained records.
 3. **Then approve with an expiry no later than 2027-02-12.** Keep the review triggers as written, and add one: any `amtrak-gtfs-rt` revision change (re-check the `rust-crypto` exclusion on a musl binary).
 4. **Optional hardening:** run `nm` on the musl release binary to close the one unverified claim; no CI check currently fails on an expired record beyond the existing "approved acceptances" step.
