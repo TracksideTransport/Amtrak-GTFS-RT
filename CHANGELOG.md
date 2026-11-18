@@ -9,18 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Tracks observed while the service runs are added to `static.zip` again. A static snapshot built
+- **Observed tracks reach `static.zip` while the service runs.** A static snapshot built
   from the configured platforms alone no longer counts as current once a track is observed, so the
   rebuild downloads `GTFS.zip` in full instead of accepting a `304`. Before, observed platforms were
   published only after a fresh start or a new upstream feed. A scheduled rebuild now logs
-  `new track observed; static rebuild scheduled`. (#112)
-- `static.zip`'s `feed_info.txt` now carries the published static version,
-  `{feed_version}+tracks.{digest}`, so it matches `feed_version` in every GTFS-Realtime header, as
-  the reference requires. Before, it kept Amtrak's version, and two `static.zip` files with
+  `new track observed; static rebuild scheduled` (#112).
+- **`static.zip`'s `feed_info.feed_version` matches the realtime headers.** It now carries the
+  published static version, `{feed_version}+tracks.{digest}`, as the GTFS-Realtime reference
+  requires. Before, it kept Amtrak's version, and two `static.zip` files with
   different platform stops shared one `feed_version`. `official-static.zip` is unchanged, and
   `platform-addon.zip` now lists `feed_info.txt` among its files. Consumers that read
   `feed_info.feed_version` to compare with Amtrak's own version should strip the `+tracks.` suffix
-  or read `official-static.zip`. (#108)
+  or read `official-static.zip` (#108).
 - **A stalled `GTFS.zip` download times out.** The download had no timeout, so a connection that
   stalled could hang startup or the daily refresh until the operating system gave up. It now
   allows 30 seconds to connect and 5 minutes in all, and a timeout is reported like any other
