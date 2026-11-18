@@ -320,7 +320,7 @@ fi
 
 generation_id=$(jq -er '.generation_id | select(type == "string" and test("^[0-9]+-[0-9]+$"))' "$MANIFEST") \
   || fail "feed-set manifest has an invalid generation_id"
-for artifact in static_zip trip_updates vehicle_positions alerts; do
+for artifact in static_zip official_static_zip trip_updates vehicle_positions alerts; do
   url=$(jq -er --arg artifact "$artifact" '.urls[$artifact] | select(type == "string")' "$MANIFEST") \
     || fail "feed-set manifest is missing $artifact URL"
   expected_prefix="/v1/generations/$generation_id/"
@@ -330,6 +330,7 @@ for artifact in static_zip trip_updates vehicle_positions alerts; do
   esac
   case "$artifact:$url" in
     "static_zip:${expected_prefix}static.zip") output="static.zip" ;;
+    "official_static_zip:${expected_prefix}official-static.zip") output="official-static.zip" ;;
     "trip_updates:${expected_prefix}trip-updates.pb") output="trip-updates.pb" ;;
     "vehicle_positions:${expected_prefix}vehicle-positions.pb") output="vehicle-positions.pb" ;;
     "alerts:${expected_prefix}alerts.pb") output="alerts.pb" ;;
@@ -346,7 +347,7 @@ if [ -n "$SERVICE_PID" ]; then
   trap - EXIT
 fi
 log "Manifest-pinned generation under validation: $generation_id"
-ls -lh "$MANIFEST" "$INPUT_DIR"/*.pb "$INPUT_DIR/static.zip"
+ls -lh "$MANIFEST" "$INPUT_DIR"/*.pb "$INPUT_DIR/static.zip" "$INPUT_DIR/official-static.zip"
 
 # ---------------------------------------------------------------------------
 # 3. Static GTFS
@@ -363,6 +364,20 @@ static_errors=$(jq -r '[.notices[] | select(.severity=="ERROR") | .code] | uniqu
 echo "Static notices by severity:"
 jq -r '.notices | group_by(.severity)[] | "  \(.[0].severity): \(map(.totalNotices)|add) across \(length) code(s)"' \
   "$REPORT_DIR/static/report.json"
+
+# Amtrak's own download is validated separately, so a notice can be pinned on Amtrak's data
+# or on the repair and platform stops this service adds. The official ZIP is gated at zero ERROR.
+log "Validating the official static GTFS (Amtrak's download, byte for byte)"
+rm -rf "$REPORT_DIR/official-static"
+run_java -jar "$GTFS_VALIDATOR_JAR" -i "$INPUT_DIR/official-static.zip" -o "$REPORT_DIR/official-static" >/dev/null 2>&1 \
+  || fail "gtfs-validator did not run to completion on the official ZIP"
+[ -f "$REPORT_DIR/official-static/report.json" ] || fail "gtfs-validator produced no report.json for the official ZIP"
+echo "Official static notices by severity:"
+jq -r '.notices | group_by(.severity)[] | "  \(.[0].severity): \(map(.totalNotices)|add) across \(length) code(s)"' \
+  "$REPORT_DIR/official-static/report.json"
+official_errors=$(jq -r '[.notices[] | select(.severity=="ERROR") | .code] | unique | join("\n")' \
+  "$REPORT_DIR/official-static/report.json")
+[ -z "$official_errors" ] || fail "Amtrak's official static GTFS has ERROR notices: $(printf '%s' "$official_errors" | tr '\n' ' ')"
 
 # ---------------------------------------------------------------------------
 # 4. GTFS-Realtime
