@@ -1,4 +1,4 @@
-use crate::sources::{RtBatch, RtSource};
+use crate::sources::{describe_error, RtBatch, RtSource};
 use crate::static_gtfs::StaticSnapshotState;
 use crate::writer::{GenerationPublisher, GenerationStore, PublishError, PublishedGeneration};
 use async_trait::async_trait;
@@ -8,6 +8,7 @@ use prost::Message;
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::str::FromStr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -269,7 +270,30 @@ impl std::fmt::Display for ValidationError {
 
 impl std::error::Error for ValidationError {}
 
+/// Whether the first (primary) source failed on its last attempt.
+///
+/// The poller keeps one across cycles, so the primary's recovery is logged once at `INFO`
+/// instead of every cycle.
+#[derive(Debug, Default)]
+pub struct PrimaryHealth {
+    failing: AtomicBool,
+}
+
+impl PrimaryHealth {
+    fn mark_failed(&self) {
+        self.failing.store(true, Ordering::Relaxed);
+    }
+
+    /// Marks the primary healthy and reports whether it was failing.
+    fn mark_recovered(&self) -> bool {
+        self.failing.swap(false, Ordering::Relaxed)
+    }
+}
+
 /// Tries sources in order and returns the first successful non-empty batch.
+///
+/// Every source that errors or returns nothing is logged at `WARN` with its reason, so a
+/// generation from the fallback says why the primary was skipped.
 ///
 /// # Errors
 ///
@@ -278,15 +302,53 @@ pub async fn select_batch(
     sources: &[Box<dyn RtSource>],
     gtfs: &Gtfs,
 ) -> Result<SelectedBatch, RefreshError> {
-    for source in sources {
-        match source.fetch(gtfs).await {
+    select_batch_tracking(sources, gtfs, &PrimaryHealth::default()).await
+}
+
+/// [`select_batch`], plus one `INFO` line when the primary succeeds after `primary` saw it fail.
+async fn select_batch_tracking(
+    sources: &[Box<dyn RtSource>],
+    gtfs: &Gtfs,
+    primary: &PrimaryHealth,
+) -> Result<SelectedBatch, RefreshError> {
+    for (index, source) in sources.iter().enumerate() {
+        let reason = match source.fetch(gtfs).await {
             Ok(batch) if !batch.is_empty() => {
+                if index == 0 && primary.mark_recovered() {
+                    tracing::info!(
+                        source = source.name(),
+                        "primary realtime source recovered; generations come from it again"
+                    );
+                }
                 return Ok(SelectedBatch {
                     source_name: source.name(),
                     batch,
                 });
             }
-            Ok(_) | Err(_) => {}
+            Ok(_) => "returned no entities".to_string(),
+            Err(error) => describe_error(error.as_ref()),
+        };
+        if index == 0 {
+            primary.mark_failed();
+        }
+        match sources.get(index + 1) {
+            Some(next) if index == 0 => tracing::warn!(
+                source = source.name(),
+                fallback = next.name(),
+                error = %reason,
+                "primary realtime source failed; falling back"
+            ),
+            Some(next) => tracing::warn!(
+                source = source.name(),
+                next = next.name(),
+                error = %reason,
+                "realtime source failed; trying the next source"
+            ),
+            None => tracing::warn!(
+                source = source.name(),
+                error = %reason,
+                "realtime source failed; no source left to try"
+            ),
         }
     }
     Err(RefreshError(
@@ -583,6 +645,7 @@ pub async fn refresh_generation_once(
         snapshots,
         committer,
         &DefaultGenerationProcessor,
+        &PrimaryHealth::default(),
         generated_at,
     )
     .await
@@ -593,11 +656,12 @@ async fn refresh_generation_once_with(
     snapshots: &StaticSnapshotState,
     committer: &dyn GenerationCommitter,
     processor: &dyn GenerationProcessor,
+    primary: &PrimaryHealth,
     generated_at: SystemTime,
 ) -> RefreshTelemetry {
     let started = Instant::now();
     let (snapshot, was_pending) = snapshots.candidate().await;
-    let selected = match select_batch(sources, &snapshot.parsed).await {
+    let selected = match select_batch_tracking(sources, &snapshot.parsed, primary).await {
         Ok(selected) => selected,
         Err(_) => {
             return finish_refresh(
@@ -752,12 +816,15 @@ pub async fn run_poller(
     interval: Duration,
 ) {
     let mut ticker = tokio::time::interval(interval);
+    let primary = PrimaryHealth::default();
     loop {
         ticker.tick().await;
-        refresh_generation_once(
+        refresh_generation_once_with(
             sources.as_slice(),
             &snapshots,
             committer.as_ref(),
+            &DefaultGenerationProcessor,
+            &primary,
             SystemTime::now(),
         )
         .await;
@@ -1299,6 +1366,136 @@ mod tests {
                 .unwrap()
                 .source_name,
             "c"
+        );
+    }
+
+    /// A source that fails while `failing` is set and otherwise returns one entity.
+    struct Switchable {
+        failing: Arc<AtomicBool>,
+    }
+
+    #[async_trait]
+    impl RtSource for Switchable {
+        fn name(&self) -> &'static str {
+            "amtrak"
+        }
+
+        async fn fetch(&self, _gtfs: &Gtfs) -> Result<RtBatch, crate::sources::SourceError> {
+            if self.failing.load(Ordering::SeqCst) {
+                Err("operation timed out fetching https://maps.example/getTrainsData".into())
+            } else {
+                Ok(batch_with(1))
+            }
+        }
+    }
+
+    /// Log lines written while the returned guard is alive on this thread.
+    #[derive(Clone, Default)]
+    struct CapturedLogs(Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for CapturedLogs {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl CapturedLogs {
+        fn capture(&self) -> tracing::subscriber::DefaultGuard {
+            let writer = self.clone();
+            tracing::subscriber::set_default(
+                tracing_subscriber::fmt()
+                    .with_ansi(false)
+                    .with_writer(move || writer.clone())
+                    .finish(),
+            )
+        }
+
+        fn take(&self) -> String {
+            String::from_utf8(std::mem::take(&mut *self.0.lock().unwrap())).unwrap()
+        }
+    }
+
+    /// #110: falling back names the primary's error at WARN; recovery is one INFO line.
+    #[tokio::test(flavor = "current_thread")]
+    async fn falling_back_warns_with_the_reason_and_recovery_is_logged_once() {
+        let failing = Arc::new(AtomicBool::new(true));
+        let chain: Vec<Box<dyn RtSource>> = vec![
+            Box::new(Switchable {
+                failing: failing.clone(),
+            }),
+            Box::new(MockSource {
+                name: "transitdocs-asm",
+                behavior: Behavior::Ok(batch_with(2)),
+            }),
+        ];
+        let primary = PrimaryHealth::default();
+        let logs = CapturedLogs::default();
+        let _guard = logs.capture();
+        let gtfs = Gtfs::default();
+
+        for _ in 0..2 {
+            let selected = select_batch_tracking(&chain, &gtfs, &primary)
+                .await
+                .unwrap();
+            assert_eq!(selected.source_name, "transitdocs-asm");
+            let lines = logs.take();
+            assert!(lines.contains("WARN"), "{lines}");
+            assert!(
+                lines.contains("primary realtime source failed; falling back"),
+                "{lines}"
+            );
+            assert!(lines.contains("source=\"amtrak\""), "{lines}");
+            assert!(lines.contains("fallback=\"transitdocs-asm\""), "{lines}");
+            assert!(lines.contains("error=operation timed out"), "{lines}");
+            assert!(!lines.contains("https://"), "{lines}");
+            assert!(!lines.contains("recovered"), "{lines}");
+        }
+
+        failing.store(false, Ordering::SeqCst);
+        let selected = select_batch_tracking(&chain, &gtfs, &primary)
+            .await
+            .unwrap();
+        assert_eq!(selected.source_name, "amtrak");
+        let lines = logs.take();
+        assert_eq!(
+            lines.matches("primary realtime source recovered").count(),
+            1
+        );
+        assert!(lines.contains(" INFO "), "{lines}");
+        assert!(!lines.contains("WARN"), "{lines}");
+
+        for _ in 0..3 {
+            select_batch_tracking(&chain, &gtfs, &primary)
+                .await
+                .unwrap();
+        }
+        assert_eq!(logs.take(), "", "a healthy primary logs nothing per cycle");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn an_empty_primary_and_an_exhausted_chain_are_warned() {
+        let chain = sources(vec![
+            ("amtrak", Behavior::Empty),
+            ("transitdocs-asm", Behavior::Fail),
+        ]);
+        let logs = CapturedLogs::default();
+        let _guard = logs.capture();
+        assert!(select_batch(&chain, &Gtfs::default()).await.is_err());
+        let lines = logs.take();
+        assert!(
+            lines.contains("primary realtime source failed; falling back")
+                && lines.contains("error=returned no entities"),
+            "{lines}"
+        );
+        assert!(
+            lines.contains("realtime source failed; no source left to try")
+                && lines.contains("error=mock failure"),
+            "{lines}"
         );
     }
 
@@ -1902,6 +2099,7 @@ mod tests {
                 &snapshots,
                 &RejectCommitter,
                 &RejectProcessor(stage),
+                &PrimaryHealth::default(),
                 UNIX_EPOCH + Duration::from_secs(100),
             )
             .await;

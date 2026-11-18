@@ -35,6 +35,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Notification`, with `Train 98 service alert` or `Service alert` as the fallback. An alert whose
   notices are all delay notifications gets `effect: SIGNIFICANT_DELAYS`; other alerts keep no
   effect. Alerts that already had a header are unchanged (#107).
+- **Falling back to `transitdocs-asm` says why.** Each cycle in which the Amtrak source errors or
+  returns nothing logs `WARN primary realtime source failed; falling back` with the source, the
+  fallback, and the error (timeout, connect, HTTP status, decode), with URLs removed. A fallback
+  that also fails, or a chain with no fallback, is warned too. When the Amtrak source succeeds
+  again, one `INFO` line says it recovered; a healthy source logs nothing extra. The README no
+  longer claims that a fallback generation keeps the notices: its `alerts.pb` is empty. The bare
+  `ASM data successfully downloaded` line each cycle is a `println!` in the pinned
+  `amtrak-gtfs-rt` crate and still appears (#110).
 
 ## [0.8.0] - 2026-11-18
 
