@@ -134,3 +134,12 @@ That excludes the vulnerable surface of:
   the direct dependency would leave gtfs-structures' affected zip in the graph.
 - The rust-crypto exclusion depends on the catenary crate never calling `crypto::`. Re-check it
   whenever the amtrak-gtfs-rt git revision moves.
+
+## 2026-11-18 re-key (issue #58)
+
+The advisory database now folds GHSA-8HXF-QR8P-62X4, GHSA-9HJ8-73FH-9963, and GHSA-M665-V7PM-7GRJ
+into one record with the primary id RUSTSEC-2026-0545 (aliases RUSTSEC-2026-0547 and -0548). The
+three claims above are unchanged and now live under that one key in
+2026-11-cargo-reachability.json. Re-checked on main after #87: `ZipArchive::new`, `by_index`,
+`by_name`, and `ZipWriter` are the only zip APIs used in src/; there is no `extract()` and no
+`ZipStreamReader`; the resolved zip features are `deflate` only.
