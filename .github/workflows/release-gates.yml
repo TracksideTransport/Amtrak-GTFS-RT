@@ -5,9 +5,8 @@ name: Release gates
 # immutable tag. It builds linux/amd64 only and is path-gated to the image inputs: the smoke test
 # fetches live Amtrak data, so it stays off unrelated PRs. The weekly run rescans the current main
 # image against a fresh vulnerability database so new advisories surface before release day.
-# The browser sidecars get their own policy (no fixable Critical or High match) and their offline
-# smoke test, on linux/amd64 and linux/arm64. The service gate stays amd64-only because its smoke
-# test calls Amtrak; the sidecar smoke test does not.
+# The service gate stays amd64-only because its smoke test calls Amtrak; CI's One image checks
+# build and smoke-test the image offline on amd64 and arm64.
 
 on:
   pull_request:
@@ -21,8 +20,6 @@ on:
       - "scripts/test-container.sh"
       - "scripts/release-vulnerability-policy.sh"
       - "scripts/install-release-scanners.sh"
-      - "scripts/test-fetcher-image.sh"
-      - "browser-worker/Dockerfile"
       - "browser-worker/requirements.txt"
       - "browser-worker/worker/**"
       - "src/**"
@@ -137,67 +134,6 @@ jobs:
         with:
           name: release-gates-compose-stack-${{ github.run_attempt }}
           path: validation-reports/compose-stack/
-          if-no-files-found: warn
-          retention-days: 14
-
-  sidecar-gates:
-    name: ${{ matrix.image }} smoke test and vulnerability gate (linux/${{ matrix.arch }})
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 90
-    strategy:
-      fail-fast: false
-      matrix:
-        image: [track-fetcher, advisory-fetcher]
-        arch: [amd64, arm64]
-        include:
-          - arch: amd64
-            runner: ubuntu-24.04
-          - arch: arm64
-            runner: ubuntu-24.04-arm
-    env:
-      LOCAL_IMAGE: ${{ matrix.image }}:release-gates
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      # Not cached: the base image and apt packages are not digest-pinned, so a fresh build
-      # scans what a release built today would contain.
-      - name: Build the sidecar image
-        run: docker build --file browser-worker/Dockerfile --target ${{ matrix.image }} --tag "$LOCAL_IMAGE" .
-
-      - name: Prepare report directory
-        run: mkdir -p release-gates
-
-      - name: Smoke-test the image
-        run: scripts/test-fetcher-image.sh "$LOCAL_IMAGE" ${{ matrix.image }}
-
-      - name: Install checksum-pinned release scanners
-        run: |
-          scripts/install-release-scanners.sh "$RUNNER_TEMP/release-tools"
-          printf '%s\n' "$RUNNER_TEMP/release-tools" >>"$GITHUB_PATH"
-
-      - name: Generate SBOM and Grype report
-        run: |
-          set -euo pipefail
-          syft "$LOCAL_IMAGE" -o spdx-json=release-gates/sbom.spdx.json
-          scripts/release-vulnerability-policy.sh validate-sbom release-gates/sbom.spdx.json
-          grype "$LOCAL_IMAGE" -o json >release-gates/cves-grype.json
-          scripts/release-vulnerability-policy.sh summarize release-gates/cves-grype.json \
-            release-gates/cves-grype.txt
-          {
-            printf '### Grype matches (${{ matrix.image }}, linux/${{ matrix.arch }})\n\n```\n'
-            cat release-gates/cves-grype.txt
-            printf '```\n'
-          } >>"$GITHUB_STEP_SUMMARY"
-
-      - name: Enforce the fixable Critical and High policy
-        run: scripts/release-vulnerability-policy.sh enforce-fixable release-gates/cves-grype.json
-
-      - name: Upload gate diagnostics
-        if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: release-gates-${{ matrix.image }}-linux-${{ matrix.arch }}-${{ github.run_attempt }}
-          path: release-gates/
           if-no-files-found: warn
           retention-days: 14
 
