@@ -35,7 +35,7 @@ Checked-in paths, until the split replaces them:
 
 | Path | Role |
 | --- | --- |
-| `src/main.rs` | Wires config, sources, static bootstrap, and supervised tasks for the single binary |
+| `src/main.rs` | Wires config, sources, static bootstrap, and supervised tasks for the service |
 | `src/config.rs` | Environment configuration, peer allowlist, validator JAR check |
 | `src/sources/mod.rs` | `RtSource` and the `RtBatch` model |
 | `src/sources/amtrak.rs` | Primary source; wraps the catenary crate |
