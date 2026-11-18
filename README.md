@@ -423,11 +423,14 @@ created. The release workflow no longer builds or publishes the two fetcher imag
 tag that published them (`v0.7.0`, `v0.7.1`) is not supported, because their images and release
 evidence are already complete.
 
-The project is licensed `AGPL-3.0-only`. The complete project license, generated Rust
-third-party notices, and `/licenses/NOTICES.md` (which says where the license text of every other
-component lives: the validator, the Java runtime, Debian packages, Python and its packages, and
-Chromium) are available inside every released image, in the repository, and as GitHub Release
-assets. `scripts/verify-release-image.sh` fails a release whose image is missing any of them. OCI labels identify the exact source repository, revision, version, and project license.
+The project is licensed `AGPL-3.0-only`. The complete project license and generated Rust
+third-party notices are available inside every released image at `/licenses/`, in the repository,
+and as GitHub Release assets. `/licenses/README` (`container/licenses/README`) is the index of the
+notices for everything else in the image: the MobilityData validator, the Chromium and ffmpeg
+downloads, the Java runtime, every Debian package, CPython and every Python package, and the
+Node.js bundled with Playwright. `scripts/verify-release-image.sh` checks them all, on both
+architectures in every pull request's CI and on each release platform digest, so a release with a
+missing notice cannot be published. OCI labels identify the exact source repository, revision, version, and project license.
 
 > [!NOTE]
 > Still out of scope: anonymous public exposure of a running feed service, reverse-proxy or

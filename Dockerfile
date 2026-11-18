@@ -13,6 +13,9 @@
 #   python -m worker          browser-worker/worker, on 127.0.0.1:8081 only.
 #   /opt/java                 a jlink'd glibc Java 17 runtime for the validator.
 #   the validator JAR         rebuilt from pinned MobilityData v8.0.1 source, digest-checked.
+#   /licenses                 license notices for all of the above; /licenses/README is the index.
+#
+# It is the repository's only package, ghcr.io/sohampatwardhan/amtrak-gtfs-rt (#74).
 #
 # `docker build .` builds it; the last stage is `runtime`. Run it with:
 #
@@ -102,6 +105,13 @@ RUN --mount=type=cache,target=/root/.gradle \
     mkdir -p /out && \
     cp cli/build/libs/gtfs-validator-8.0.1-cli.jar \
       /out/gtfs-validator-v8.0.1-amtrak-hardened.1-cli.jar
+
+# The validator's own license (Apache-2.0), from the same digest-checked source, for /licenses.
+# A separate step, so it does not invalidate the cached build and test above. The JAR's bundled
+# dependencies keep their notices in its META-INF.
+RUN grep -q 'Apache License' /build/validator/LICENSE && \
+    mkdir -p /out/licenses/gtfs-validator && \
+    install -m 0444 /build/validator/LICENSE /out/licenses/gtfs-validator/LICENSE
 
 # -------------------------------------------------------------------------------------------------
 # Stage 3 — glibc Java 17 runtime for the validator
@@ -214,7 +224,18 @@ RUN pip install --no-cache-dir \
     && test -n "${shell}" \
     && ! ldd "${shell}" | grep 'not found' \
     && chmod -R a+rX /ms-playwright \
-    && python -m pip uninstall --yes pip
+    && python -m pip uninstall --yes pip \
+    && mkdir -p /licenses/playwright-browsers \
+    && for dir in /ms-playwright/*/; do \
+        name="$(basename "${dir}")"; \
+        dest="/licenses/playwright-browsers/${name%-*}"; \
+        mkdir -p "${dest}"; \
+        find "${dir}" -type f \( -name 'LICENSE*' -o -name 'COPYING*' -o -name ABOUT \) \
+            -exec cp {} "${dest}/" \; ; \
+        ls "${dest}" | grep -Eq '^(LICENSE|COPYING)' \
+            || { echo "no license notice under ${dir}" >&2; exit 1; }; \
+    done \
+    && chmod -R a+rX,go-w /licenses
 
 # One unprivileged user. Its home holds Chromium's profile and caches (a tmpfs under Compose's
 # read-only root filesystem). /data is the only volume; owning the mount point keeps a
@@ -232,25 +253,28 @@ RUN ! LD_LIBRARY_PATH=/opt/java/lib/server ldd /opt/java/bin/java /opt/java/lib/
         /opt/java/lib/server/*.so 2>/dev/null | grep 'not found' \
     && /opt/java/bin/java -version
 
-# COPY --chmod would create /licenses itself as 0444, which an unprivileged user cannot traverse.
-RUN install -d -m 0755 /licenses
 COPY --from=builder --chmod=0555 /out/amtrak-gtfs-rt-service /usr/local/bin/amtrak-gtfs-rt-service
 RUN ldd /usr/local/bin/amtrak-gtfs-rt-service 2>&1 | grep -Eq 'statically linked|not a dynamic executable'
 COPY --from=validator --chmod=0444 \
     /out/gtfs-validator-v8.0.1-amtrak-hardened.1-cli.jar \
     /opt/amtrak/gtfs-validator-v8.0.1-amtrak-hardened.1-cli.jar
+# License notices for everything in the image. /licenses/README is the index: it lists these files
+# and the notices that already ship in place (Debian copyright files, Python dist-info, the Java
+# runtime's legal/ directory, Playwright's Node.js notices). scripts/verify-release-image.sh checks
+# them all.
+COPY --chmod=0444 container/licenses/README /licenses/README
 COPY --chmod=0444 container/licenses/AGPL-3.0-only.txt /licenses/AGPL-3.0-only.txt
 COPY --chmod=0444 THIRD_PARTY_LICENSES.html /licenses/THIRD_PARTY_LICENSES.html
-COPY --chmod=0444 container/licenses/NOTICES.md /licenses/NOTICES.md
-# The validator's own license, from the exact source the JAR is built from.
-COPY --from=validator --chmod=0444 /build/validator/LICENSE /licenses/gtfs-validator-LICENSE
+COPY --from=validator /out/licenses/ /licenses/
 COPY --chmod=u=rwX,go=rX browser-worker/worker/ /app/worker/
 
+# `licenses` is the project's own license. Third-party components keep theirs; see /licenses/README.
 LABEL org.opencontainers.image.title="Amtrak GTFS-RT" \
-      org.opencontainers.image.description="Validated static and realtime GTFS feeds for Amtrak" \
+      org.opencontainers.image.description="Validated static GTFS and GTFS-Realtime feeds for Amtrak, with the browser worker and GTFS validator they use" \
       org.opencontainers.image.source="https://github.com/sohampatwardhan/Amtrak-GTFS-RT" \
       org.opencontainers.image.documentation="https://github.com/sohampatwardhan/Amtrak-GTFS-RT#container" \
       org.opencontainers.image.licenses="AGPL-3.0-only" \
+      org.opencontainers.image.base.name="docker.io/library/python:3.12-slim-bookworm" \
       org.opencontainers.image.version="$OCI_VERSION" \
       org.opencontainers.image.revision="$OCI_REVISION"
 
