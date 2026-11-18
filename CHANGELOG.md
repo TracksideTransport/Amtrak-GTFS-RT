@@ -54,6 +54,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   does not use a number up. It still starts at 0 after a restart; the timestamp prefix keeps ids
   unique, and an id already on disk is skipped. Ids remain opaque: fetch `/v1/feed-set.json`
   rather than predicting them (#117).
+- **A cold start no longer logs a traceback.** Until the service writes its first train list
+  (`{AMTRAK_OUTPUT_DIR}/tracks/fleet-trains.json`), the worker's track poll logs one INFO line,
+  `waiting for the service's first train list`, and retries on the next tick. A train list that
+  exists but cannot be read, is not JSON, or is not `amtrak-fleet-trains/v1` still logs at ERROR
+  (#103).
 
 ## [0.8.0] - 2026-11-18
 

@@ -28,7 +28,7 @@ from ..browser import LAUNCH_ARGS, Lease, SharedBrowser
 from .config import Config
 from .decrypt import DecryptError, decrypt_payload
 from .lead_time import LeadProfile
-from .select import DueTrain, choose_fetches, due_trains, is_hot
+from .select import FLEET_TRAINS_SCHEMA, DueTrain, choose_fetches, due_trains, is_hot
 from .store import TrackStore
 
 logger = logging.getLogger(__name__)
@@ -114,15 +114,27 @@ def load_trains(cfg: Config) -> dict:
     return parsed
 
 
+class TrainListNotReady(FileNotFoundError):
+    """The service has not written its first train list yet. Expected on a cold start."""
+
+
 def load_train_list_file(path: str) -> dict:
     """The ``amtrak-fleet-trains/v1`` list the one-container service writes after each generation.
 
-    Raises ``OSError`` until the service has published its first generation; the cycle is retried.
+    Raises :class:`TrainListNotReady` until the service has published its first generation; the
+    cycle is retried on the next tick. A file that exists but cannot be read raises ``OSError``,
+    one that is not JSON or not an ``amtrak-fleet-trains/v1`` object raises ``ValueError``.
     """
-    with open(path, encoding="utf-8") as handle:
-        parsed = json.loads(handle.read())
+    try:
+        with open(path, encoding="utf-8") as handle:
+            text = handle.read()
+    except FileNotFoundError:
+        raise TrainListNotReady("the service has not written its first train list yet") from None
+    parsed = json.loads(text)
     if not isinstance(parsed, dict):
         raise ValueError("fleet train list is not an object")
+    if parsed.get("schema") != FLEET_TRAINS_SCHEMA:
+        raise ValueError(f"fleet train list schema is not {FLEET_TRAINS_SCHEMA}")
     return parsed
 
 
@@ -436,6 +448,11 @@ async def run_forever(
                     status_fetcher=status,
                     full=full,
                 )
+            except TrainListNotReady:
+                # A cold start: the service publishes its first generation shortly. Not a failure.
+                logger.info("waiting for the service's first train list")
+                succeeded = False
+                raised = True
             except Exception:  # noqa: BLE001 — a failed cycle must not crash the worker
                 logger.exception("track poll failed; keeping the last snapshot")
                 succeeded = False
