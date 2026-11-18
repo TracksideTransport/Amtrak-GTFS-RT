@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | **Draft, pending owner approval** (rewritten 2026-11-18 for the one-container layout) |
+| Status | **Approved** 2026-11-18 (rewritten that day for the one-container layout) |
 | Supersedes | [v0.2.0 Cargo dependency risk acceptance](v0.2.0-cargo-dependencies.md) (expires 2026-11-12) |
 | Prepared | 2026-11-07; rewritten 2026-11-18 |
 | Audit revision | `ac52a48c24e80a7559a2a8e0e3cb289bbd42d86e` (`main` after #86, plus the lockfile update in #87). The 2026-11-07 audit was at `088104119f86c09b0073674791fd531115316ab3`; `Cargo.lock` is unchanged between them except for #87. |
@@ -125,14 +125,20 @@ Revoke and re-audit on any of these:
 
 ## Approval record
 
-**Pending.** No approval has been given, and none is implied by this draft. The owner must approve this exact set in conversation.
-Proposed approval sentence:
+**Approved 2026-11-18.** The repository owner replied "approve" in conversation to the proposed
+sentence below, for this exact set of sixteen records through 2027-02-12:
 
 > I explicitly accept the documented sixteen-warning Cargo dependency risk in
 > .security/risk-acceptance/2026-11-cargo-dependencies.md through 2027-02-12.
 
-On approval, record the date and the sentence here, change Status to **Approved**, and put the
-same approval text in each `approval` field of
-[2026-11-cargo-dependencies.json](2026-11-cargo-dependencies.json). Those fields are empty now,
-so `--acceptance` rejects the file (fail-closed). Then re-run the release-mode audit with
-`--acceptance` and `--reachability`.
+Evidence at approval: the 2026-11-18 `main` audit (WARNINGS, 0 blocked, 16 findings: 7 proven
+unreachable, 9 with no authoritative fix; inventory fingerprint in the table above) and a CISA KEV
+re-query (catalog 2026.11.17, 1,782 entries; no match, with the limitation that only 5 of the
+records carry a CVE id). Known gaps accepted with it: the NVD source returned *partial* severity
+data, and the `rust-crypto` "never referenced" claim was symbol-checked on an aarch64 macOS build
+only, not on the musl container binary (a review trigger above).
+
+The same text is in each `approval` field of
+[2026-11-cargo-dependencies.json](2026-11-cargo-dependencies.json), so `--acceptance` accepts the
+file. The acceptance expires 2027-02-12; `scripts/check-risk-acceptance-expiry.py` fails CI after
+that date.
