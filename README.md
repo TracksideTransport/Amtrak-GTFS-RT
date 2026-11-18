@@ -138,9 +138,10 @@ source returned) and `matched` (the ones that resolved against the generation's 
 fall in `matched / emitted` is the earliest sign that the static and realtime data disagree, for
 example after an Amtrak schedule change; the service also logs both numbers every cycle and warns
 when fewer than 80% of at least ten trip updates match. It is measured over what the source
-returned, because the source crate exposes no count of the raw trains it observed. A generation
-recovered from disk after a restart has no `match_rate` until the next one is built, since it is
-not stored in the on-disk manifest. Consumers that ignore unknown keys are unaffected.
+returned, because the source crate exposes no count of the raw trains it observed. It is stored
+with each generation (`match-rate.txt`, beside the unchanged manifest), so the feed set served
+from disk right after a restart carries it too. Only a generation written by 0.8.0 or earlier,
+before that file existed, has no `match_rate`. Consumers that ignore unknown keys are unaffected.
 
 `static.zip` is still the feed to load if you want one file. It is the official zip plus the
 platform add-on. `assigned_stop_id` values such as `NYP:track:21` exist only in that combined

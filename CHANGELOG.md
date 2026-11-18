@@ -43,6 +43,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   longer claims that a fallback generation keeps the notices: its `alerts.pb` is empty. The bare
   `ASM data successfully downloaded` line each cycle is a `println!` in the pinned
   `amtrak-gtfs-rt` crate and still appears (#110).
+- **The feed set served right after a restart has `match_rate`.** Each generation now stores its
+  match rate in `match-rate.txt` beside `manifest.txt`, and recovery reads it, so the manifest
+  served from disk matches the live one. `manifest.txt` keeps its exact shape, so 0.8.0 can still
+  recover these generations after a rollback, and a generation written by 0.8.0 still loads, with
+  no `match_rate` (#116).
 
 ## [0.8.0] - 2026-11-18
 

@@ -197,8 +197,8 @@ pub struct FeedSetManifest {
     pub platform_addon_version: String,
     pub source: String,
     pub entity_counts: EntityCounts,
-    /// Present for a generation built by this process. A generation recovered from disk has none,
-    /// because the on-disk manifest format is unchanged so that a rollback can still read it.
+    /// Stored with the generation in `match-rate.txt`, so a generation recovered from disk after
+    /// a restart reports it too. `None` only for a generation written before that file existed.
     pub match_rate: Option<MatchRate>,
     pub urls: ArtifactUrls,
 }
