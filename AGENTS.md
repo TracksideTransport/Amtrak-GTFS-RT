@@ -220,6 +220,18 @@ Release workflow:
 - Run the offline commands in "Build, test, and lint" before pushing. Say which ignored live tests you did not run.
 - A PR that changes image inputs should expect the release-gates workflow, which needs network access to Amtrak and can fail when Amtrak is down.
 
+## GitHub issues
+
+When you create or triage an issue, fill in every field GitHub offers where it fits. Leave a field empty rather than invent a value.
+
+- Assignee: `sohampatwardhan`, unless told otherwise.
+- Labels: use the existing ones (`bug`, `enhancement`, `documentation`, `question`). Do not create new labels.
+- Type: always set exactly one. **Task** is a specific piece of work (chores, renewals, refactors, CI, docs). **Bug** is an unexpected problem or behavior. **Feature** is a request, idea, or new functionality.
+- Projects and milestone: the repo has no milestones and no repo-level project. Do not add issues to the owner's user-level projects, which belong to other work.
+- Relationships: read the other open issues first. Use a parent or sub-issue for real containment, blocked by or blocking for real ordering, and relates to for issues that share an area (for example a release-gate issue and a dependency-audit issue). Set them through the GraphQL mutations `addSubIssue`, `addBlockedBy`, and `addRelatesTo`.
+- Development: link the pull request with a closing keyword (`Closes #N`) in its body.
+- Security alert: Dependabot alerts are disabled on this repo. Do not link one, and do not enable the setting without asking.
+
 ## Cursor Cloud specific instructions
 
 Cloud Agent setup is `bash .cursor/install.sh`, from `.cursor/environment.json`. The script is idempotent and uses Cursor's default image. There is no `.cursor/Dockerfile`, and there is no `start` or `terminals` entry: unit tests do not need the HTTP server, the browser worker, or Docker.
