@@ -21,6 +21,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `platform-addon.zip` now lists `feed_info.txt` among its files. Consumers that read
   `feed_info.feed_version` to compare with Amtrak's own version should strip the `+tracks.` suffix
   or read `official-static.zip`. (#108)
+- **A stalled `GTFS.zip` download times out.** The download had no timeout, so a connection that
+  stalled could hang startup or the daily refresh until the operating system gave up. It now
+  allows 30 seconds to connect and 5 minutes in all, and a timeout is reported like any other
+  download failure (#106).
 - **A fatal startup error says what failed.** It is logged at `ERROR` through tracing with its
   stage (`configuration`, `static GTFS bootstrap`, `HTTP listener bind`, ...) and the full cause
   chain, for example `static GTFS download failed: error sending request: client error
@@ -54,6 +58,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   does not use a number up. It still starts at 0 after a restart; the timestamp prefix keeps ids
   unique, and an id already on disk is skipped. Ids remain opaque: fetch `/v1/feed-set.json`
   rather than predicting them (#117).
+- **A stalled notices request no longer holds up the feeds.** The service's request to the
+  notices page had no timeout, and it runs while the generation is assembled, so a worker that
+  accepted the connection and then stopped answering held up every feed. It now gives up after 5
+  seconds to connect or 30 seconds in all, and the generation publishes with the last good notices
+  (#109).
 - **A cold start no longer logs a traceback.** Until the service writes its first train list
   (`{AMTRAK_OUTPUT_DIR}/tracks/fleet-trains.json`), the worker's track poll logs one INFO line,
   `waiting for the service's first train list`, and retries on the next tick. A train list that

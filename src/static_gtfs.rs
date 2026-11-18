@@ -279,11 +279,32 @@ enum Download {
     Body(Arc<[u8]>, Option<StaticValidators>),
 }
 
+/// Longest one `GTFS.zip` download may take, connection to last byte. The file is about 18 MB, so
+/// this leaves room for a slow link on a Raspberry Pi while keeping a stalled connection from
+/// hanging startup or the refresh loop.
+const STATIC_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// Longest wait for the download's connection itself.
+const STATIC_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+
 async fn download_static(
     url: &str,
     validators: Option<&StaticValidators>,
 ) -> Result<Download, StaticError> {
-    let mut request = reqwest::Client::new().get(url);
+    download_static_within(url, validators, STATIC_DOWNLOAD_TIMEOUT).await
+}
+
+async fn download_static_within(
+    url: &str,
+    validators: Option<&StaticValidators>,
+    timeout: Duration,
+) -> Result<Download, StaticError> {
+    let client = reqwest::Client::builder()
+        .connect_timeout(STATIC_CONNECT_TIMEOUT.min(timeout))
+        .timeout(timeout)
+        .build()
+        .map_err(download_error)?;
+    let mut request = client.get(url);
     if let Some(validators) = validators {
         if let Some(etag) = &validators.etag {
             request = request.header(reqwest::header::IF_NONE_MATCH, etag);
@@ -1861,6 +1882,34 @@ t,10:00:00,10:00:00,NWK,1\nt,10:30:00,10:30:00,OSM,2\n";
             "{outcome:?}"
         );
         assert_eq!(*requests.lock().unwrap(), vec![None, None]);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn a_stalled_static_download_times_out_and_names_the_cause() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/GTFS.zip", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((stream, _)) = listener.accept().await {
+                held.push(stream);
+            }
+        });
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            download_static_within(&url, None, Duration::from_millis(300)),
+        )
+        .await
+        .expect("a stalled download must not hang");
+        let Err(StaticError(message)) = result else {
+            panic!("a stalled download must fail");
+        };
+        assert!(
+            message.starts_with("static GTFS download failed: "),
+            "{message}"
+        );
+        assert!(message.contains("timed out"), "{message}");
+        assert!(!message.contains("127.0.0.1"), "{message}");
         server.abort();
     }
 
