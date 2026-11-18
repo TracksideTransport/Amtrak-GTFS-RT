@@ -31,7 +31,7 @@ use gtfs_realtime::{
 use gtfs_structures::Gtfs;
 use scraper::{Html, Selector};
 use std::collections::HashMap;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 
 /// Cached advisory alerts plus the instant they were fetched, for TTL reuse.
@@ -51,12 +51,32 @@ pub struct WithAdvisories<S> {
     cache: Mutex<Option<Cached>>,
 }
 
+/// Longest one notices request may take, connection to last body byte. The fetch runs inside
+/// generation assembly and holds the cache lock, so a worker that accepted a connection and then
+/// stalled would otherwise hold up every feed, and notices must fail open.
+const ADVISORY_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Longest wait for the notices connection itself.
+const ADVISORY_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+
+fn advisory_client(timeout: Duration) -> reqwest::Client {
+    reqwest::Client::builder()
+        .connect_timeout(ADVISORY_CONNECT_TIMEOUT.min(timeout))
+        .timeout(timeout)
+        .build()
+        .unwrap_or_default()
+}
+
 impl<S> WithAdvisories<S> {
     /// Wraps `inner`, scraping advisories from `config.url` no more than once per `config.ttl`.
     pub fn new(inner: S, config: AdvisoryConfig) -> Self {
+        Self::with_request_timeout(inner, config, ADVISORY_REQUEST_TIMEOUT)
+    }
+
+    fn with_request_timeout(inner: S, config: AdvisoryConfig, timeout: Duration) -> Self {
         Self {
             inner,
-            client: reqwest::Client::new(),
+            client: advisory_client(timeout),
             config,
             cache: Mutex::new(None),
         }
@@ -614,6 +634,45 @@ mod tests {
                 })),
             }
         }
+    }
+
+    /// A loopback server that accepts each connection, reads the request, and never answers.
+    async fn stalled_server() -> (String, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let mut buffer = [0_u8; 1024];
+                let _ = tokio::io::AsyncReadExt::read(&mut stream, &mut buffer).await;
+                held.push(stream);
+            }
+        });
+        (
+            format!("http://{address}/service-alerts-and-notices"),
+            server,
+        )
+    }
+
+    #[tokio::test]
+    async fn a_stalled_notices_worker_times_out_instead_of_holding_generation() {
+        let (url, server) = stalled_server().await;
+        let source = WithAdvisories::with_request_timeout(
+            MockSource {
+                name: "amtrak",
+                behavior: Behavior::Ok(asm_batch()),
+            },
+            cfg(&url),
+            Duration::from_millis(300),
+        );
+        let batch = tokio::time::timeout(Duration::from_secs(5), source.fetch(&gtfs()))
+            .await
+            .expect("a stalled notices request must not hold the fetch")
+            .unwrap();
+        // Fail open: the inner batch passes through without notices.
+        assert_eq!(batch.alerts.entity.len(), 1);
+        assert_eq!(batch.alerts.entity[0].id, "asm");
+        server.abort();
     }
 
     fn cfg(url: &str) -> AdvisoryConfig {
