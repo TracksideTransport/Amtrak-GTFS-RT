@@ -292,22 +292,23 @@ async fn download_static(
             request = request.header(reqwest::header::IF_MODIFIED_SINCE, modified);
         }
     }
-    let response = request
-        .send()
-        .await
-        .map_err(|_| StaticError("static fetch failed".into()))?;
+    let response = request.send().await.map_err(download_error)?;
     if validators.is_some() && response.status() == reqwest::StatusCode::NOT_MODIFIED {
         return Ok(Download::NotModified);
     }
-    let response = response
-        .error_for_status()
-        .map_err(|_| StaticError("static fetch status failed".into()))?;
+    let response = response.error_for_status().map_err(download_error)?;
     let received = StaticValidators::from_headers(response.headers());
-    let bytes = response
-        .bytes()
-        .await
-        .map_err(|_| StaticError("static body failed".into()))?;
+    let bytes = response.bytes().await.map_err(download_error)?;
     Ok(Download::Body(Arc::from(bytes.to_vec()), received))
+}
+
+/// Names the download stage and keeps the whole cause chain (timeout, DNS, connect, TLS, or the
+/// HTTP status), with the request URL removed so a configured URL never reaches a log line.
+fn download_error(error: reqwest::Error) -> StaticError {
+    StaticError(format!(
+        "static GTFS download failed: {}",
+        error_chain(&error.without_url())
+    ))
 }
 
 async fn fetch_static_at(
@@ -428,7 +429,7 @@ fn stamp_official(snapshot: &mut StaticSnapshot, official: Arc<[u8]>) {
 
 /// An error and its sources, joined with `: `. GTFS parse errors name the file, id, or value that
 /// failed; they never carry a URL or credential, because the bytes are parsed from memory.
-fn error_chain(error: &dyn std::error::Error) -> String {
+pub(crate) fn error_chain(error: &dyn std::error::Error) -> String {
     let mut text = error.to_string();
     let mut source = error.source();
     while let Some(cause) = source {
@@ -642,8 +643,9 @@ async fn stage_conditional(
 /// Once a download has supplied `ETag` or `Last-Modified`, later refreshes send them back and a
 /// `304` keeps the current snapshot without downloading or validating again.
 ///
-/// Failures are intentionally summarized rather than returning or logging raw
-/// request/tool errors, which could contain configured URLs or credentials.
+/// Failures are summarized rather than returning or logging raw request/tool errors, which could
+/// contain configured URLs or credentials. A download failure keeps its cause chain with the URL
+/// removed.
 pub async fn refresh_snapshot_once(
     state: &StaticSnapshotState,
     static_url: &str,
@@ -692,7 +694,8 @@ pub async fn refresh_snapshot_once(
             StaticRefreshOutcome::Staged(version)
         }
         Err(error) => {
-            // StaticError messages are fixed summaries plus parse detail; none carries a URL.
+            // StaticError messages are fixed summaries plus parse or transport detail with the
+            // request URL removed; none carries a URL.
             tracing::warn!(%error, stage = "static", "static refresh failed");
             StaticRefreshOutcome::Rejected
         }

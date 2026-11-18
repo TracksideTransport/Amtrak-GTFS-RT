@@ -105,6 +105,86 @@ impl fmt::Display for ServiceError {
 
 impl std::error::Error for ServiceError {}
 
+/// A fatal error that stops the service, with the stage it happened in.
+///
+/// [`exit_code`] logs it at `ERROR` through tracing, with the stage and the full cause chain, and
+/// turns it into a non-zero exit status. Stages name what failed ("static GTFS bootstrap",
+/// "configuration") rather than a URL, and every wrapped error is already URL-free.
+#[derive(Debug)]
+pub struct FatalError {
+    stage: &'static str,
+    source: Box<dyn std::error::Error + Send + Sync>,
+}
+
+impl FatalError {
+    /// Wraps `source` as a failure of `stage`.
+    pub fn new(
+        stage: &'static str,
+        source: impl Into<Box<dyn std::error::Error + Send + Sync>>,
+    ) -> Self {
+        Self {
+            stage,
+            source: source.into(),
+        }
+    }
+
+    /// The stage that failed, such as `static GTFS bootstrap`.
+    pub fn stage(&self) -> &'static str {
+        self.stage
+    }
+
+    /// The wrapped error and every cause beneath it, joined with `: `.
+    pub fn chain(&self) -> String {
+        static_gtfs::error_chain(self.source.as_ref())
+    }
+}
+
+impl fmt::Display for FatalError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // The cause is `source()`, not repeated here; `chain` joins the two.
+        write!(formatter, "{} failed", self.stage)
+    }
+}
+
+impl std::error::Error for FatalError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.source.as_ref())
+    }
+}
+
+/// Attaches the failing stage to a fallible startup step.
+trait AtStage<T> {
+    fn at_stage(self, stage: &'static str) -> Result<T, FatalError>;
+}
+
+impl<T, E> AtStage<T> for Result<T, E>
+where
+    E: Into<Box<dyn std::error::Error + Send + Sync>>,
+{
+    fn at_stage(self, stage: &'static str) -> Result<T, FatalError> {
+        self.map_err(|error| FatalError::new(stage, error))
+    }
+}
+
+/// The process exit status for the result of [`run_service`].
+///
+/// A [`FatalError`] is logged at `ERROR` with its stage and cause chain, and exits with status 1,
+/// so a supervisor that checks exit codes (`restart: on-failure`, systemd) sees a failure.
+pub fn exit_code(result: Result<(), FatalError>) -> std::process::ExitCode {
+    match result {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(error) => {
+            // `run_service` installs the subscriber before anything can fail.
+            tracing::error!(
+                stage = error.stage(),
+                error = %error.chain(),
+                "fatal error; exiting with a non-zero status"
+            );
+            std::process::ExitCode::FAILURE
+        }
+    }
+}
+
 /// Runs all required activities as one failure domain.
 ///
 /// Any success, error, or panic is unexpected. The supervisor aborts and awaits
@@ -275,14 +355,17 @@ async fn initial_snapshots(
     static_url: &str,
     validator: &dyn StaticStandardsValidator,
     platforms: &[PlatformTable],
-) -> Result<StaticSnapshotState, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<StaticSnapshotState, FatalError> {
     if let Some(generation) = store.current().await {
-        return Ok(recover_static(
+        return recover_static(
             generation.static_zip.clone(),
             generation.manifest.static_version.clone(),
-        )?);
+        )
+        .at_stage("static GTFS recovery");
     }
-    Ok(bootstrap_static(static_url, validator, platforms).await?)
+    bootstrap_static(static_url, validator, platforms)
+        .await
+        .at_stage("static GTFS bootstrap")
 }
 
 /// `--healthcheck`: `/livez` must answer `200`, and when the service runs the built-in browser
@@ -391,18 +474,21 @@ fn healthcheck_address(bind_address: &str) -> std::io::Result<SocketAddr> {
 ///
 /// # Errors
 ///
-/// Returns a configuration, static-snapshot, or server error, including a leftover
-/// `AMTRAK_ROLE` from the three-container layout. `--healthcheck` returns an I/O error
-/// when `/livez` is not `200` or the browser worker it runs is not answering.
-pub async fn run_service() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("--healthcheck")) {
-        container_healthcheck()?;
-        return Ok(());
-    }
+/// Returns a [`FatalError`] naming the stage: a configuration, static-snapshot, or server error,
+/// including a leftover `AMTRAK_ROLE` from the three-container layout. `--healthcheck` fails when
+/// `/livez` is not `200` or the browser worker it runs is not answering. Pass the result to
+/// [`exit_code`].
+pub async fn run_service() -> Result<(), FatalError> {
     tracing_subscriber::fmt::try_init().ok();
-    check_role(std::env::var("AMTRAK_ROLE").ok().as_deref())?;
+    if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("--healthcheck")) {
+        return container_healthcheck().at_stage("healthcheck");
+    }
+    check_role(std::env::var("AMTRAK_ROLE").ok().as_deref()).at_stage(CONFIGURATION)?;
     run_combined().await
 }
+
+/// Stage name for every environment-configuration failure.
+const CONFIGURATION: &str = "configuration";
 
 /// `AMTRAK_ROLE` is gone with the three-container layout. Unset, empty, or `combined` is
 /// accepted; any other value refuses to start instead of silently running every feed.
@@ -417,12 +503,20 @@ pub fn check_role(role: Option<&str>) -> Result<(), config::ConfigError> {
     }
 }
 
-pub async fn run_combined() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+/// Runs every feed in this process until a fatal error or `SIGTERM`.
+///
+/// # Errors
+///
+/// Returns a [`FatalError`] for the startup stage or the supervised activity that failed.
+pub async fn run_combined() -> Result<(), FatalError> {
     // Validation and durable recovery finish before any task or listener exists.
-    let config = Config::from_env()?.validate()?;
+    let config = Config::from_env()
+        .and_then(Config::validate)
+        .at_stage(CONFIGURATION)?;
     let store =
         GenerationStore::open_with_retention(&config.output_dir, config.generation_retention)
-            .await?;
+            .await
+            .at_stage("generation store recovery")?;
     let validator: Arc<dyn StaticStandardsValidator> = Arc::new(CachedStaticValidator::new(
         MobilityDataStaticValidator::new(config.gtfs_validator_jar.clone()),
         config.output_dir.join("validator-cache"),
@@ -430,7 +524,7 @@ pub async fn run_combined() -> Result<(), Box<dyn std::error::Error + Send + Syn
     ));
     // With tracks on, every static snapshot is augmented with the configured platform stops, so
     // the same table must reach both the bootstrap below and the periodic refresh task.
-    let track_config = crate::config::TrackConfig::from_env()?;
+    let track_config = crate::config::TrackConfig::from_env().at_stage(CONFIGURATION)?;
     let observed_platforms = config
         .output_dir
         .join("tracks")
@@ -458,7 +552,7 @@ pub async fn run_combined() -> Result<(), Box<dyn std::error::Error + Send + Syn
     // advisory scraper and the track board. Both are on by default, read the built-in browser
     // worker, and fail open, so a missing worker never risks generation publication. Their
     // flags (`AMTRAK_ADVISORIES`, `AMTRAK_TRACKS`, `AMTRAK_TRACKS_AMTRAK`, ...) turn them off.
-    let advisory_config = crate::config::AdvisoryConfig::from_env()?;
+    let advisory_config = crate::config::AdvisoryConfig::from_env().at_stage(CONFIGURATION)?;
     // The built-in browser worker runs only for the browser sources that read it, and only when
     // its package is installed (the container image). Elsewhere those sources fail open.
     let worker_root = std::path::Path::new(worker::DEFAULT_WORKER_ROOT);
@@ -515,7 +609,7 @@ pub async fn run_combined() -> Result<(), Box<dyn std::error::Error + Send + Syn
     // The fallback runs only when the source above errors or returns an empty batch. Its trips
     // are not track-stamped and carry no advisories, and the manifest names it as the source.
     let mut chain = vec![source];
-    let fallback = crate::config::FallbackConfig::from_env()?;
+    let fallback = crate::config::FallbackConfig::from_env().at_stage(CONFIGURATION)?;
     if let Some(url) = fallback.asm_url {
         tracing::info!(
             source = sources::asm::SOURCE_NAME,
@@ -554,7 +648,7 @@ pub async fn run_combined() -> Result<(), Box<dyn std::error::Error + Send + Syn
     // A `train` or `station` query on trip updates asks the worker's track poller for an early,
     // debounced refresh. The response never waits: the hook only records the request.
     if worker_plan.as_ref().is_some_and(|plan| plan.tracks) {
-        let early = crate::config::EarlyRefreshConfig::from_env()?;
+        let early = crate::config::EarlyRefreshConfig::from_env().at_stage(CONFIGURATION)?;
         let scheduler = Arc::new(std::sync::Mutex::new(
             schedule::TrackScheduler::from_config(&early),
         ));
@@ -565,7 +659,9 @@ pub async fn run_combined() -> Result<(), Box<dyn std::error::Error + Send + Syn
         state = state.with_trip_interest(schedule::trip_interest_hook(scheduler));
     }
     let app = serve::router(state);
-    let listener = tokio::net::TcpListener::bind(config.bind_addr).await?;
+    let listener = tokio::net::TcpListener::bind(config.bind_addr)
+        .await
+        .at_stage("HTTP listener bind")?;
     println!("{banner}");
 
     let poller_snapshots = snapshots.clone();
@@ -612,8 +708,8 @@ pub async fn run_combined() -> Result<(), Box<dyn std::error::Error + Send + Syn
         worker,
         shutdown_signal(),
     )
-    .await?;
-    Ok(())
+    .await
+    .at_stage("service supervision")
 }
 
 #[cfg(test)]
@@ -1168,5 +1264,95 @@ mod tests {
             "127.0.0.1:7000".parse::<SocketAddr>().unwrap()
         );
         assert!(healthcheck_address("not-an-address").is_err());
+    }
+
+    /// The bootstrap error a fresh store gets from `url`, as `run_combined` would report it.
+    async fn bootstrap_failure(label: &str, url: &str) -> FatalError {
+        let output = output_directory(label);
+        let store = GenerationStore::open(&output).await.unwrap();
+        let error = match initial_snapshots(&store, url, &RejectIfCalled, &[]).await {
+            Ok(_) => panic!("the download must fail"),
+            Err(error) => error,
+        };
+        std::fs::remove_dir_all(output).unwrap();
+        error
+    }
+
+    /// #106: a static download that cannot connect is fatal, names its stage and cause, keeps the
+    /// URL out of the message, and exits non-zero.
+    #[tokio::test]
+    async fn a_refused_static_download_is_fatal_and_names_its_stage_and_cause() {
+        let closed_port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let url = format!("http://127.0.0.1:{closed_port}/content/gtfs/GTFS.zip");
+        let error = bootstrap_failure("refused", &url).await;
+        assert_eq!(error.stage(), "static GTFS bootstrap");
+        let chain = error.chain();
+        assert!(
+            chain.starts_with("static GTFS download failed: error sending request"),
+            "{chain}"
+        );
+        assert!(chain.to_ascii_lowercase().contains("connect"), "{chain}");
+        assert!(!chain.contains("http://"), "{chain}");
+        assert!(!chain.contains("GTFS.zip"), "{chain}");
+        assert_eq!(exit_code(Err(error)), std::process::ExitCode::FAILURE);
+        assert_eq!(exit_code(Ok(())), std::process::ExitCode::SUCCESS);
+    }
+
+    /// #106: an HTTP error status is named in the fatal error.
+    #[tokio::test]
+    async fn a_static_download_http_status_is_named() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 1024];
+            let _ = stream.read(&mut request).unwrap();
+            stream
+                .write_all(
+                    b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .unwrap();
+        });
+        let url = format!("http://127.0.0.1:{port}/content/gtfs/GTFS.zip");
+        let chain = bootstrap_failure("not-found", &url).await.chain();
+        server.join().unwrap();
+        assert!(
+            chain.starts_with("static GTFS download failed: "),
+            "{chain}"
+        );
+        assert!(chain.contains("404 Not Found"), "{chain}");
+        assert!(!chain.contains("http://"), "{chain}");
+    }
+
+    #[derive(Debug)]
+    struct Wrapped(std::io::Error);
+
+    impl fmt::Display for Wrapped {
+        fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str("request failed")
+        }
+    }
+
+    impl std::error::Error for Wrapped {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            Some(&self.0)
+        }
+    }
+
+    #[test]
+    fn a_fatal_error_reports_its_stage_and_full_cause_chain() {
+        let timeout = std::io::Error::new(std::io::ErrorKind::TimedOut, "operation timed out");
+        let error = FatalError::new("static GTFS bootstrap", Wrapped(timeout));
+        assert_eq!(error.stage(), "static GTFS bootstrap");
+        assert_eq!(error.chain(), "request failed: operation timed out");
+        assert_eq!(error.to_string(), "static GTFS bootstrap failed");
+        assert_eq!(
+            std::error::Error::source(&error).unwrap().to_string(),
+            "request failed"
+        );
     }
 }

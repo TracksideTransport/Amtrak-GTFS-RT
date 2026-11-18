@@ -21,6 +21,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `platform-addon.zip` now lists `feed_info.txt` among its files. Consumers that read
   `feed_info.feed_version` to compare with Amtrak's own version should strip the `+tracks.` suffix
   or read `official-static.zip`. (#108)
+- **A fatal startup error says what failed.** It is logged at `ERROR` through tracing with its
+  stage (`configuration`, `static GTFS bootstrap`, `HTTP listener bind`, ...) and the full cause
+  chain, for example `static GTFS download failed: error sending request: client error
+  (Connect): tcp connect error: Connection refused`, in place of a bare
+  `Error: StaticError("static fetch failed")`. A failed static download now names the timeout,
+  DNS, connect, TLS, or HTTP status cause in scheduled refresh warnings too. URLs are never
+  logged. The process exits with status 1, as before: the `exit=0` in the report is what
+  `docker inspect` shows for a container that a restart policy has already started again (#106).
 
 ## [0.8.0] - 2026-11-18
 
