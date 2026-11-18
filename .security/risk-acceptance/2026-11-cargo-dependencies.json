@@ -1,18 +1,6 @@
 {
   "schema_version": "1",
   "acceptances": {
-    "GHSA-8HXF-QR8P-62X4": {
-      "mitigation": "zip 6.0.0 is built without the aes-crypto feature by both consumers, so AE-x entries cannot be decrypted. The fix (zip 9.0.0) is not reachable while gtfs-structures requires zip 6 (0.46.1) or ^8.6 (0.52.0). Controls and review triggers are in 2026-11-cargo-dependencies.md.",
-      "approval": ""
-    },
-    "GHSA-9HJ8-73FH-9963": {
-      "mitigation": "zip 6.0.0 is built without legacy-zip, and nothing calls extract(). The fix (zip 9.0.0) is not reachable through gtfs-structures. Controls and review triggers are in 2026-11-cargo-dependencies.md.",
-      "approval": ""
-    },
-    "GHSA-M665-V7PM-7GRJ": {
-      "mitigation": "Only ZipArchive reads archives in-process; ZipStreamReader is never constructed, so the crate's two readers never disagree inside the service. official-static.zip is still served byte for byte to consumers. The fix (zip 9.0.5) is not reachable through gtfs-structures. Controls and review triggers are in 2026-11-cargo-dependencies.md.",
-      "approval": ""
-    },
     "RUSTSEC-2016-0005": {
       "mitigation": "rust-crypto 0.2.36 is declared by catenarytransit/amtrak-gtfs-rt but never referenced; Amtrak decryption uses amtk with RustCrypto aes/block-modes/pbkdf2. The release binary has zero rust-crypto symbols. No released safe version exists. Controls and review triggers are in 2026-11-cargo-dependencies.md.",
       "approval": ""
@@ -67,6 +55,10 @@
     },
     "RUSTSEC-2026-0543": {
       "mitigation": "chrono 0.4.45 is linked through the amtrak-gtfs-rt (catenary) crate for time arithmetic. The advisory is an unmaintained notice with no vulnerability claim and no fix, and no maintained same-chain replacement exists. Controls and review triggers are in 2026-11-cargo-dependencies.md.",
+      "approval": ""
+    },
+    "RUSTSEC-2026-0545": {
+      "mitigation": "zip 6.0.0 has one folded advisory record covering three flaws (GHSA-8HXF-QR8P-62X4 AES authentication, GHSA-9HJ8-73FH-9963 legacy decoder preallocation, GHSA-M665-V7PM-7GRJ ZipStreamReader header names; also RUSTSEC-2026-0547 and -0548). The aes-crypto and legacy-zip features are off, and the service never constructs a ZipStreamReader or calls extract(). The fix (zip 9.0.5) is not reachable through gtfs-structures. Residual: official-static.zip is served byte for byte. Controls and review triggers are in 2026-11-cargo-dependencies.md.",
       "approval": ""
     },
     "RUSTSEC-2026-0555": {

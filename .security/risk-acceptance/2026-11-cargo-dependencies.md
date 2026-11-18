@@ -6,8 +6,8 @@
 | Supersedes | [v0.2.0 Cargo dependency risk acceptance](v0.2.0-cargo-dependencies.md) (expires 2026-11-12) |
 | Prepared | 2026-11-07; rewritten 2026-11-18 |
 | Audit revision | `ac52a48c24e80a7559a2a8e0e3cb289bbd42d86e` (`main` after #86, plus the lockfile update in #87). The 2026-11-07 audit was at `088104119f86c09b0073674791fd531115316ab3`; `Cargo.lock` is unchanged between them except for #87. |
-| Inventory | The 2026-11-07 figures (375 packages, 969 edges) are not re-derived here. Regenerate with the audit tool before approval. |
-| Inventory fingerprint | **Stale.** `613f04a586eb…` belongs to the 2026-11-07 lockfile. Regenerate with the audit tool; this draft does not invent one. |
+| Inventory | 375 packages, complete (fresh `main` audit, 2026-11-18, revision above). |
+| Inventory fingerprint | `ecd7910b29d7f844d75129c7756e56bf1d0888b41bae621a997cbbe376ffa6f7` (2026-11-18 `main` audit). The 2026-11-07 value, `613f04a586eb…`, belonged to the lockfile before #87. Regenerate it if `Cargo.lock` changes again. |
 | Audits | [main 2026-11-07](../dependency-audit/main-2026-11-07.md) (WARNINGS, 0 blocking); [release 2026-11-07](../dependency-audit/release-2026-11-07.md) (UNAVAILABLE until this record is approved); [reassessment 2026-11-18](../dependency-audit/reassessment-2026-11-18.md) (`cargo audit` against the 2026-11-17 database) |
 | Reachability evidence | [2026-11-cargo-reachability.txt](evidence/2026-11-cargo-reachability.txt), [.json](evidence/2026-11-cargo-reachability.json) (2026-11-07), extended by the 2026-11-18 `cargo tree` and source greps in the reassessment |
 | Scope | `main` and the next release cut from it; re-review on any dependency change |
@@ -15,8 +15,8 @@
 
 ## Decision requested
 
-This record asks to accept the exact 18 warning records below through 2027-02-12. It is not a
-clean audit. The 2026-11-07 version of this record asked for 16; the 2026-11-18 reassessment found
+This record asks to accept the exact 16 warning records below through 2027-02-12. It is not a
+clean audit. The 2026-11-07 version of this record listed 16 rows; the 2026-11-18 reassessment found
 two more (`chrono`, `chrono-tz`, both unmaintained notices) and cleared three (`quinn-proto`,
 `quinn-udp`, `rustix`) with a lockfile-only update. KEV result: none of the records was in the
 CISA Known Exploited Vulnerabilities catalog (version 2026.11.06, 1,769 entries) when checked on
@@ -62,9 +62,7 @@ entry that no target builds and carries no advisory; it is noted here, not accep
 | `rustc-serialize 0.3.25` | `RUSTSEC-2022-0004` / `GHSA-2226-4V3C-CFF8` | Medium | None published | `amtrak-gtfs-rt → rust-crypto → rustc-serialize` | Same as above |
 | `rustc-serialize 0.3.25` | `RUSTSEC-2025-0025` | Unknown | None; unmaintained | `amtrak-gtfs-rt → rust-crypto → rustc-serialize` | Same as above |
 | `time 0.1.45` | `RUSTSEC-2020-0071` / `CVE-2020-26235` | Medium | Needs rust-crypto removed upstream | `amtrak-gtfs-rt → rust-crypto → time` | Same as above; service never calls `set_var` |
-| `zip 6.0.0` | `GHSA-8HXF-QR8P-62X4` / `CVE-2026-115906` | Medium | 9.0.0; not reachable via gtfs-structures | service direct; `gtfs-structures → zip` | `aes-crypto` feature off (`enabled-zip-features`) |
-| `zip 6.0.0` | `GHSA-9HJ8-73FH-9963` / `CVE-2026-115907` | High | 9.0.0; not reachable via gtfs-structures | as above | `legacy-zip` off; no `extract()` (`enabled-zip-features`) |
-| `zip 6.0.0` | `GHSA-M665-V7PM-7GRJ` / `CVE-2026-115905` | Critical | 9.0.5; not reachable via gtfs-structures | as above | No `ZipStreamReader` (`zip-api-call-sites`); see residual |
+| `zip 6.0.0` | `RUSTSEC-2026-0545` (folds `GHSA-8HXF-QR8P-62X4` / `CVE-2026-115906`, `GHSA-9HJ8-73FH-9963` / `CVE-2026-115907` as `RUSTSEC-2026-0547`, and `GHSA-M665-V7PM-7GRJ` / `CVE-2026-115905` as `RUSTSEC-2026-0548`) | Critical | 9.0.0 (9.0.5 for the header-name flaw); not reachable via gtfs-structures | service direct; `gtfs-structures → zip` | `aes-crypto` and `legacy-zip` off; no `extract()`; no `ZipStreamReader` (`enabled-zip-features`, `zip-api-call-sites`); see residual |
 | `zip 6.0.0` | `RUSTSEC-2026-0367` / `GHSA-VV5M-JXXH-4627` | High | 9.0.0; not reachable via gtfs-structures | as above | No `extract()` (`zip-api-call-sites`) |
 | `zip 6.0.0` | `RUSTSEC-2026-0368` / `GHSA-4V9H-P7M9-RH26` | Unknown | 9.0.0; not reachable via gtfs-structures | as above | No `extract()` (`zip-api-call-sites`) |
 | `zip 6.0.0` | `RUSTSEC-2026-0369` / `GHSA-4684-H2Q9-2VCP` | Critical | 9.0.0; not reachable via gtfs-structures | as above | No `ZipStreamReader::extract` (`zip-api-call-sites`) |
@@ -130,7 +128,7 @@ Revoke and re-audit on any of these:
 **Pending.** No approval has been given, and none is implied by this draft. The owner must approve this exact set in conversation.
 Proposed approval sentence:
 
-> I explicitly accept the documented eighteen-warning Cargo dependency risk in
+> I explicitly accept the documented sixteen-warning Cargo dependency risk in
 > .security/risk-acceptance/2026-11-cargo-dependencies.md through 2027-02-12.
 
 On approval, record the date and the sentence here, change Status to **Approved**, and put the
