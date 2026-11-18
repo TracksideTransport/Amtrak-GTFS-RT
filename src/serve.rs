@@ -251,9 +251,28 @@ pub async fn artifact(
         return StatusCode::NOT_FOUND.into_response();
     };
     let (content_type, bytes) = artifact.bytes(&generation);
+    let slot = artifact.slot();
     if bytes.is_empty() {
         return StatusCode::NOT_FOUND.into_response();
     }
+    // A generation is immutable, so each artifact is hashed once. The first request for a large
+    // artifact hashes it off the async workers so it cannot stall other handlers.
+    let etag = match generation.etags.cached(slot) {
+        Some(etag) => etag.to_string(),
+        None => {
+            let etags = generation.etags.clone();
+            let body = bytes.clone();
+            match tokio::task::spawn_blocking(move || {
+                etags.get_or_compute(slot, body.as_ref()).to_string()
+            })
+            .await
+            {
+                Ok(etag) => etag,
+                Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+            }
+        }
+    };
+    // Spawned last, with no await before the response, so a slow hook never delays it.
     let interest = interest_from_query(raw_query.as_deref().unwrap_or(""));
     if matches!(artifact, Artifact::TripUpdates)
         && (!interest.trains.is_empty() || !interest.stations.is_empty())
@@ -265,7 +284,8 @@ pub async fn artifact(
     }
     cached_bytes(
         content_type,
-        bytes.as_ref(),
+        bytes,
+        etag,
         generation.manifest.generated_at_unix,
         &headers,
     )
@@ -298,27 +318,35 @@ fn interest_from_query(query: &str) -> TripInterest {
     }
 }
 
+/// Whether the request's validators say the client already holds this representation.
+///
+/// RFC 9110 section 13.1.3: `If-Modified-Since` is evaluated only when `If-None-Match` is absent,
+/// so a stale entity tag is a miss even when the date is newer.
+fn not_modified(headers: &HeaderMap, etag: &str, modified_unix: u64) -> bool {
+    if let Some(value) = headers.get(header::IF_NONE_MATCH) {
+        return value.to_str().is_ok_and(|value| {
+            value
+                .split(',')
+                .map(str::trim)
+                .any(|part| part == "*" || part == etag || part.strip_prefix("W/") == Some(etag))
+        });
+    }
+    headers
+        .get(header::IF_MODIFIED_SINCE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(parse_http_date)
+        .is_some_and(|since| since >= modified_unix)
+}
+
 fn cached_bytes(
     content_type: &'static str,
-    bytes: &[u8],
+    bytes: Arc<[u8]>,
+    etag: String,
     modified_unix: u64,
     headers: &HeaderMap,
 ) -> Response {
-    use sha2::{Digest, Sha256};
-    let mut hasher = Sha256::new();
-    hasher.update(bytes);
-    let etag = format!("\"{}\"", hex_encode(&hasher.finalize()));
     let modified = http_date(modified_unix);
-    if headers
-        .get(header::IF_NONE_MATCH)
-        .and_then(|value| value.to_str().ok())
-        .is_some_and(|value| value.split(',').any(|part| part.trim() == etag))
-        || headers
-            .get(header::IF_MODIFIED_SINCE)
-            .and_then(|value| value.to_str().ok())
-            .and_then(parse_http_date)
-            .is_some_and(|since| since >= modified_unix)
-    {
+    if not_modified(headers, &etag, modified_unix) {
         return (
             StatusCode::NOT_MODIFIED,
             [
@@ -337,7 +365,8 @@ fn cached_bytes(
             (header::LAST_MODIFIED, modified),
             (header::CACHE_CONTROL, "private, no-cache".to_string()),
         ],
-        bytes.to_vec(),
+        // Shares the generation's bytes with the response; nothing is copied per request.
+        axum::body::Body::from(axum::body::Bytes::from_owner(bytes)),
     )
         .into_response()
 }
@@ -545,6 +574,17 @@ impl FromStr for Artifact {
 }
 
 impl Artifact {
+    fn slot(self) -> usize {
+        match self {
+            Self::Static => 0,
+            Self::OfficialStatic => 1,
+            Self::PlatformAddon => 2,
+            Self::TripUpdates => 3,
+            Self::VehiclePositions => 4,
+            Self::Alerts => 5,
+        }
+    }
+
     fn bytes(self, generation: &PublishedGeneration) -> (&'static str, Arc<[u8]>) {
         match self {
             Self::Static => ("application/zip", generation.static_zip.clone()),
@@ -604,6 +644,15 @@ mod tests {
         now: u64,
         published_at: Option<u64>,
     ) -> (AppState, PathBuf) {
+        fixture_state_with_static(label, now, published_at, Arc::from(&b"PK fixture"[..])).await
+    }
+
+    async fn fixture_state_with_static(
+        label: &str,
+        now: u64,
+        published_at: Option<u64>,
+        static_zip: Arc<[u8]>,
+    ) -> (AppState, PathBuf) {
         let output = output_directory(label);
         let store = GenerationStore::open(&output).await.unwrap();
         if let Some(generated_at) = published_at {
@@ -616,7 +665,7 @@ mod tests {
                 Arc::new(StaticSnapshot::identical(
                     "STATIC-V1",
                     Arc::new(Gtfs::default()),
-                    Arc::from(&b"PK fixture"[..]),
+                    static_zip,
                 )),
                 SelectedBatch {
                     source_name: "fixture",
@@ -1065,6 +1114,112 @@ mod tests {
                 .status(),
             StatusCode::SERVICE_UNAVAILABLE
         );
+        std::fs::remove_dir_all(output).unwrap();
+    }
+
+    /// RFC 9110 section 13.1.3: with `If-None-Match` present, `If-Modified-Since` is ignored.
+    #[tokio::test]
+    async fn a_stale_etag_beats_a_newer_if_modified_since() {
+        let (state, output) = fixture_state("precedence", 100, Some(100)).await;
+        let app = router(state).layer(MockConnectInfo(SocketAddr::from(([127, 0, 0, 1], 41))));
+        let manifest = body_json(
+            app.clone()
+                .oneshot(request("/v1/feed-set.json"))
+                .await
+                .unwrap(),
+        )
+        .await;
+        let url = manifest["urls"]["trip_updates"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let first = app.clone().oneshot(request(&url)).await.unwrap();
+        let etag = first.headers()[header::ETAG].to_str().unwrap().to_string();
+        let future = http_date(4_000_000_000);
+        let get = |name, value: &str| {
+            Request::builder()
+                .uri(url.clone())
+                .header(name, value)
+                .body(Body::empty())
+                .unwrap()
+        };
+        // Date alone revalidates.
+        let by_date = app
+            .clone()
+            .oneshot(get(header::IF_MODIFIED_SINCE, &future))
+            .await
+            .unwrap();
+        assert_eq!(by_date.status(), StatusCode::NOT_MODIFIED);
+        // A stale tag plus that same newer date is a miss.
+        let stale = Request::builder()
+            .uri(url.clone())
+            .header(header::IF_NONE_MATCH, "\"stale\"")
+            .header(header::IF_MODIFIED_SINCE, &future)
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(
+            app.clone().oneshot(stale).await.unwrap().status(),
+            StatusCode::OK
+        );
+        // A matching tag, a list containing it, a weak form, and `*` all match.
+        for value in [
+            etag.clone(),
+            format!("\"x\", {etag}"),
+            format!("W/{etag}"),
+            "*".into(),
+        ] {
+            let matched = app
+                .clone()
+                .oneshot(get(header::IF_NONE_MATCH, &value))
+                .await
+                .unwrap();
+            assert_eq!(matched.status(), StatusCode::NOT_MODIFIED, "{value}");
+        }
+        std::fs::remove_dir_all(output).unwrap();
+    }
+
+    /// Req 2.3 on the largest artifact: a 20 MB static ZIP is hashed once and shared, not copied
+    /// and rehashed per request, so warm reads and revalidations stay far under 100 ms.
+    #[tokio::test]
+    async fn a_20_mb_artifact_stays_under_100ms_warm_and_hashes_once() {
+        let big: Arc<[u8]> = Arc::from(vec![7_u8; 20 * 1024 * 1024]);
+        let (state, output) =
+            fixture_state_with_static("big-artifact", 100, Some(100), big.clone()).await;
+        let generation = state.store.current().await.unwrap();
+        let app = router(state).layer(MockConnectInfo(SocketAddr::from(([127, 0, 0, 1], 42))));
+        let url = generation.manifest.urls.static_zip.clone();
+        assert!(generation.etags.cached(0).is_none());
+        let first = app.clone().oneshot(request(&url)).await.unwrap();
+        let etag = first.headers()[header::ETAG].to_str().unwrap().to_string();
+        assert_eq!(
+            to_bytes(first.into_body(), 64 << 20).await.unwrap().len(),
+            big.len()
+        );
+        assert_eq!(generation.etags.cached(0), Some(etag.as_str()));
+        let mut samples = Vec::new();
+        for index in 0..100 {
+            let started = std::time::Instant::now();
+            let response = if index % 2 == 0 {
+                app.clone().oneshot(request(&url)).await.unwrap()
+            } else {
+                let conditional = Request::builder()
+                    .uri(url.clone())
+                    .header(header::IF_NONE_MATCH, &etag)
+                    .body(Body::empty())
+                    .unwrap();
+                app.clone().oneshot(conditional).await.unwrap()
+            };
+            let expected = if index % 2 == 0 {
+                StatusCode::OK
+            } else {
+                StatusCode::NOT_MODIFIED
+            };
+            assert_eq!(response.status(), expected);
+            samples.push(started.elapsed().as_micros() as u64);
+        }
+        samples.sort_unstable();
+        let p99 = samples[(samples.len() * 99) / 100];
+        assert!(p99 < 100_000, "p99 {p99} microseconds exceeds 100 ms");
         std::fs::remove_dir_all(output).unwrap();
     }
 

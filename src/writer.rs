@@ -22,9 +22,43 @@ const STATIC_FILE: &str = "static.zip";
 const PUBLISH_FREE_MARGIN: u64 = 1024 * 1024;
 static GENERATION_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+/// Strong ETags for one immutable generation's artifacts, each hashed at most once.
+///
+/// A generation never changes, so the first request for an artifact pays for its SHA-256 and every
+/// later request, including `304` revalidations of the roughly 19 MB static ZIP, reuses it.
+#[derive(Default)]
+pub struct ArtifactEtags {
+    cells: [std::sync::OnceLock<String>; 6],
+}
+
+impl ArtifactEtags {
+    /// The cached ETag for `slot`, if already computed.
+    pub fn cached(&self, slot: usize) -> Option<&str> {
+        self.cells.get(slot)?.get().map(String::as_str)
+    }
+
+    /// The ETag for `slot`, hashing `bytes` only the first time.
+    pub fn get_or_compute(&self, slot: usize, bytes: &[u8]) -> &str {
+        use sha2::{Digest, Sha256};
+        self.cells[slot].get_or_init(|| {
+            let digest = Sha256::digest(bytes);
+            let mut etag = String::with_capacity(66);
+            etag.push('"');
+            for byte in digest {
+                use std::fmt::Write;
+                let _ = write!(etag, "{byte:02x}");
+            }
+            etag.push('"');
+            etag
+        })
+    }
+}
+
 /// One complete immutable generation loaded into memory for lock-free response copies.
 #[derive(Clone)]
 pub struct PublishedGeneration {
+    /// Per-artifact ETags, shared by every clone of this generation.
+    pub etags: Arc<ArtifactEtags>,
     pub id: GenerationId,
     pub manifest: FeedSetManifest,
     pub static_zip: Arc<[u8]>,
@@ -1484,6 +1518,7 @@ fn load_generation_from_handle(
         urls: artifact_urls(&id),
     };
     Ok(PublishedGeneration {
+        etags: Arc::new(ArtifactEtags::default()),
         id,
         manifest,
         static_zip,
