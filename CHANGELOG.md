@@ -75,6 +75,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `advisories markup not obtained this cycle` line now gives the reason: the navigation error, a
   gate that never appeared, or a page still changing at the timeout. A failed detail page also
   logs its reason. Any URL in these lines keeps only its scheme, host, port, and path (#115).
+- **Validation reports carry only their own run.** `validation-reports/` held two tracked
+  records from August 2026, so every `scripts/validate-feeds.sh` run overwrote the tracked
+  `release-evidence.json` and the `validation-reports` and `offline-validation-reports`
+  artifacts paired fresh evidence with a stale "block" `release-decision.json`. The two records
+  now live in `.security/release-gate/2026-08-14/`, `validation-reports/` is fully ignored, and
+  `scripts/test-release-controls.sh` fails if a file under it is tracked (#102).
 
 ## [0.8.0] - 2026-11-18
 

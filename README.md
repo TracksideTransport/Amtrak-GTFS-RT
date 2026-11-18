@@ -1122,7 +1122,8 @@ feeds generated from live data:
 
 The script generates feeds (or reuses `out/`), fetches and pins both validators, validates each RT
 feed type in its own directory, and prints every notice by severity. Reports land in
-`validation-reports/`. It needs Java 17 and Maven, and falls back to Docker automatically if they
+`validation-reports/`, which is ignored run output: nothing there is tracked, so a run never
+changes a checked-in file. It needs Java 17 and Maven, and falls back to Docker automatically if they
 aren't installed.
 
 **How the gate decides.** It fails when a validator reports an ERROR code that is not listed in

@@ -198,7 +198,7 @@ Release workflow:
 ## What agents must not do
 
 - Do not commit secrets, `.env` files, RailData tokens, or `raildata-token.json`. Pass `NJT_RAILDATA_USERNAME` and `NJT_RAILDATA_PASSWORD` only through the environment or Cursor's Secrets tab.
-- Do not commit `tools/*.jar`, `/out`, `/target`, or `validation-reports/` other than the two release evidence files already tracked.
+- Do not commit `tools/*.jar`, `/out`, `/target`, or anything under `validation-reports/`. That directory is run output only and is ignored; `scripts/test-release-controls.sh` fails if a file there is tracked. The August 2026 release decision and feed evidence are kept as history in `.security/release-gate/2026-08-14/`.
 - Do not change the generation API, platform-stop ids, `platform_code` text (`24 (Gate H)`), or the `+tracks.{digest}` suffix without an explicit consumer-migration note in the README.
 - Do not serve the generation directory with a generic file server. That bypasses peer checks, readiness, and manifest-first discovery.
 - Do not treat `X-Forwarded-For` or `Forwarded` as the client.

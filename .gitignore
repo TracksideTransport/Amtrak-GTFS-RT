@@ -6,7 +6,5 @@
 .env.*
 *.env
 .validator-cache/
-/validation-reports/*
-!/validation-reports/release-decision.json
-!/validation-reports/release-evidence.json
+/validation-reports/
 /out-tracks/
