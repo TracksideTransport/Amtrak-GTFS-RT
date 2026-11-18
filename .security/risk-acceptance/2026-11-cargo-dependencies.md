@@ -2,29 +2,39 @@
 
 | Field | Value |
 |---|---|
-| Status | **Pending owner approval** |
+| Status | **Draft, pending owner approval** (rewritten 2026-11-18 for the one-container layout) |
 | Supersedes | [v0.2.0 Cargo dependency risk acceptance](v0.2.0-cargo-dependencies.md) (expires 2026-11-12) |
-| Prepared | 2026-11-07 |
-| Audit revision | `088104119f86c09b0073674791fd531115316ab3` |
-| Inventory | 375 packages, 969 dependency edges; complete |
-| Inventory fingerprint | `613f04a586eb3b2235046ba81d7d2c757a559c1e8613723c3341546ef34d01fc` |
-| Audits | [main 2026-11-07](../dependency-audit/main-2026-11-07.md) (WARNINGS, 0 blocking); [release 2026-11-07](../dependency-audit/release-2026-11-07.md) (UNAVAILABLE until this record is approved) |
-| Reachability evidence | [2026-11-cargo-reachability.txt](evidence/2026-11-cargo-reachability.txt), [.json](evidence/2026-11-cargo-reachability.json) |
+| Prepared | 2026-11-07; rewritten 2026-11-18 |
+| Audit revision | `ac52a48c24e80a7559a2a8e0e3cb289bbd42d86e` (`main` after #86, plus the lockfile update in #87). The 2026-11-07 audit was at `088104119f86c09b0073674791fd531115316ab3`; `Cargo.lock` is unchanged between them except for #87. |
+| Inventory | The 2026-11-07 figures (375 packages, 969 edges) are not re-derived here. Regenerate with the audit tool before approval. |
+| Inventory fingerprint | **Stale.** `613f04a586eb…` belongs to the 2026-11-07 lockfile. Regenerate with the audit tool; this draft does not invent one. |
+| Audits | [main 2026-11-07](../dependency-audit/main-2026-11-07.md) (WARNINGS, 0 blocking); [release 2026-11-07](../dependency-audit/release-2026-11-07.md) (UNAVAILABLE until this record is approved); [reassessment 2026-11-18](../dependency-audit/reassessment-2026-11-18.md) (`cargo audit` against the 2026-11-17 database) |
+| Reachability evidence | [2026-11-cargo-reachability.txt](evidence/2026-11-cargo-reachability.txt), [.json](evidence/2026-11-cargo-reachability.json) (2026-11-07), extended by the 2026-11-18 `cargo tree` and source greps in the reassessment |
 | Scope | `main` and the next release cut from it; re-review on any dependency change |
 | Expiry | 2027-02-12 |
 
 ## Decision requested
 
-This record asks to accept the exact 16 warning records below through 2027-02-12. It is not a
-clean audit. KEV result: none of these records is in the CISA Known Exploited Vulnerabilities
-catalog (version 2026.11.06, 1,769 entries; also checked independently). None of them has an
-authoritative fixed version that can be reached without upstream changes.
+This record asks to accept the exact 18 warning records below through 2027-02-12. It is not a
+clean audit. The 2026-11-07 version of this record asked for 16; the 2026-11-18 reassessment found
+two more (`chrono`, `chrono-tz`, both unmaintained notices) and cleared three (`quinn-proto`,
+`quinn-udp`, `rustix`) with a lockfile-only update. KEV result: none of the records was in the
+CISA Known Exploited Vulnerabilities catalog (version 2026.11.06, 1,769 entries) when checked on
+2026-11-07; it was **not** re-queried on 2026-11-18. None of them has an authoritative fixed
+version that can be reached without upstream changes. A yanked `chacha20 0.10.1` is a lockfile
+entry that no target builds and carries no advisory; it is noted here, not accepted.
 
 ### What changed since v0.2.0
 
 - All nine v0.2.0 warnings are still present. No fix was published for any of them, and
   `catenarytransit/amtrak-gtfs-rt` upstream (`b33dc280`, 2026-11-07, crate 0.10.0) still
   declares `rust-crypto = "0.2"`.
+- The 2026-11-18 reassessment found that three more `quinn-proto`/`quinn-udp` records and one
+  `rustix` record were published after the 2026-11-07 audit. All four were cleared by a
+  lockfile-only update (`quinn-proto` 0.11.19, `quinn-udp` 0.5.16, `rustix` 1.1.6). It also found
+  `chrono 0.4.45` (RUSTSEC-2026-0543) and `chrono-tz 0.10.4` (RUSTSEC-2026-0555), unmaintained
+  notices pulled in by the catenary crate, which are added below. The RUSTSEC ids RUSTSEC-2026-0545,
+  -0547, and -0548 are aliases of GHSA-8HXF, -9HJ8, and -M665 already listed, not new records.
 - The fresh audit at `4c328d1` found 16 more records. Commit `0881041` cleared nine of them,
   including the blocking high-severity `quinn-proto` RUSTSEC-2026-0338, with a lockfile-only
   update to each advisory's fixed version: h2 0.4.16, quinn-proto 0.11.18, rustls 0.23.46,
@@ -43,6 +53,8 @@ authoritative fixed version that can be reached without upstream changes.
 |---|---|---:|---|---|---|
 | `atomic-polyfill 1.0.3` | `RUSTSEC-2023-0089` | Unknown | None; unmaintained | lockfile only: `geo-types → rstar (old) → heapless 0.7.17 → atomic-polyfill` | Not built in any target or feature set (`locked-not-built`) |
 | `derivative 2.2.0` | `RUSTSEC-2024-0388` | Unknown | None; unmaintained | `gtfs-structures → derivative` (proc-macro) | Compile-time only (`build-time-only`) |
+| `chrono 0.4.45` | `RUSTSEC-2026-0543` | Unknown | None; unmaintained | `amtrak-gtfs-rt → chrono` (also used by the optional `amtrak-status` CLI behind the `status` feature) | Linked into the service through the catenary crate for time arithmetic; an unmaintained notice with no vulnerability claim (`chrono-linked`) |
+| `chrono-tz 0.10.4` | `RUSTSEC-2026-0555` | Unknown | None; unmaintained | `amtrak-gtfs-rt → chrono-tz` | Linked through the catenary crate for time-zone tables; no vulnerability claim (`chrono-linked`) |
 | `fxhash 0.2.1` | `RUSTSEC-2025-0057` | Unknown | None; unmaintained | `amtrak-gtfs-rt` / service `→ scraper → selectors → fxhash` | **Reachable** from HTML parsers (`fxhash-reachable`) |
 | `gcc 0.3.55` | `RUSTSEC-2025-0121` | Unknown | None; deprecated | `amtrak-gtfs-rt → rust-crypto → gcc` (build-dependency) | Build script only (`build-time-only`) |
 | `rust-crypto 0.2.36` | `RUSTSEC-2016-0005` | Unknown | No released safe version | `amtrak-gtfs-rt → rust-crypto` | Never referenced; 0 symbols in release binary (`rust-crypto-unreferenced`) |
@@ -73,24 +85,29 @@ The owner should review the claims before approving.
   `ZipArchive`-only read flaw. A future one would be.
 - The rust-crypto exclusion holds only while the catenary crate never calls `crypto::`.
 
-## Mitigations and controls (current three-container layout)
+## Mitigations and controls (one-container layout)
 
-- One Rust binary runs in three Compose services selected by `AMTRAK_ROLE`. Only
-  `vehicle-positions` publishes a port, `127.0.0.1:8090` on the host. `trip-updates` and
-  `alerts` have no published port.
-- The `vehicle-positions` image is the root `Dockerfile` `runtime` stage: `FROM scratch`, UID/GID
-  `10001`, no shell or package manager. `trip-updates` and `alerts` are `python:3.12-slim-bookworm`
-  images with Chromium that run as the unprivileged `fetcher` user. They have a larger surface
-  than the scratch image and are not covered by the scratch-image claims.
-- Controlled routes authorize the direct socket peer. Compose sets an explicit
-  `AMTRAK_ALLOWED_PEER_IPS`, and a non-loopback bind without an allowlist refuses to start.
-  `Forwarded` and `X-Forwarded-For` are ignored.
-- The static ZIP comes only from `content.amtrak.com` over HTTPS. It is validated with the
+- One image, `ghcr.io/sohampatwardhan/amtrak-gtfs-rt`, runs one service. Compose publishes only
+  `127.0.0.1:8090`. The browser worker listens on `127.0.0.1:8081` inside the container and is
+  never published.
+- The image is `python:3.12-slim-bookworm` with Chromium, a glibc Java 17 runtime, and the service
+  binary: not the `scratch` image that earlier versions of this record described. It runs as UID/GID
+  `10001` under tini. Compose sets a read-only root filesystem, tmpfs `/tmp` and home, all
+  capabilities dropped, `no-new-privileges`, and memory and PID limits.
+- Controlled routes authorize the direct socket peer. The image defaults to
+  `AMTRAK_ALLOWED_PEER_IPS=gateway` (the container's default gateway, where a published port
+  arrives from), so the `-p` binding decides who can reach it; a host binary that binds a
+  non-loopback address with no allowlist refuses to start. `Forwarded` and `X-Forwarded-For` are
+  ignored.
+- The static ZIP comes only from `content.amtrak.com` over HTTPS and is validated with the
   digest-pinned MobilityData validator before publication. A failure keeps the previous
-  generation.
-- The `release-gates` workflow builds the image, runs the container smoke test, and applies the
-  pinned Grype zero-match policy. Grype does not see Cargo advisories, so a clean scan does not
-  clear the findings above.
+  generation. The refresh is conditional (`ETag`/`Last-Modified`), so an unchanged file is not
+  re-downloaded.
+- The `release-gates` workflow and the release run the container smoke test and apply the pinned
+  Grype policy: **no Critical or High match that has a fix**. The previous zero-match policy ended
+  with the `scratch` image, because the Debian and Chromium base always carries unfixed matches.
+  Grype does not see Cargo advisories, so a clean scan does not clear the findings above.
+- CI fails when an approved acceptance is past its expiry (`scripts/check-risk-acceptance-expiry.py`).
 
 ## Review triggers
 
@@ -104,14 +121,16 @@ Revoke and re-audit on any of these:
 - a newly published fix;
 - evidence of reachability or exploitation;
 - a failed release gate;
+- a change of the `amtrak-gtfs-rt` git revision, at which point the `rust-crypto` exclusion must
+  be re-checked on a **musl** release binary (only an aarch64 macOS build was symbol-inspected);
 - expiry on 2027-02-12.
 
 ## Approval record
 
-**Pending.** No approval has been given. The owner must approve this exact set in conversation.
+**Pending.** No approval has been given, and none is implied by this draft. The owner must approve this exact set in conversation.
 Proposed approval sentence:
 
-> I explicitly accept the documented sixteen-warning Cargo dependency risk in
+> I explicitly accept the documented eighteen-warning Cargo dependency risk in
 > .security/risk-acceptance/2026-11-cargo-dependencies.md through 2027-02-12.
 
 On approval, record the date and the sentence here, change Status to **Approved**, and put the
