@@ -10,6 +10,9 @@ POLICY="$ROOT/scripts/release-vulnerability-policy.sh"
 ASSEMBLE="$ROOT/scripts/assemble-release-manifest.sh"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
+# The manifest tests below put a fake `docker` first on PATH; the standalone Compose check at the
+# end needs the real one, when there is one.
+REAL_DOCKER="$(command -v docker || true)"
 
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 expect_fail() { "$@" >/dev/null 2>&1 && fail "command unexpectedly succeeded: $*"; return 0; }
@@ -290,5 +293,28 @@ grep -Fqx "      - 'v*.*.*'" "$ROOT/.github/workflows/release.yml" \
 jq -e '.conditions.ref_name.include == ["refs/tags/v*.*.*"]' \
   "$ROOT/.github/rulesets/release-tags.json" >/dev/null \
   || fail 'release-tags ruleset does not cover refs/tags/v*.*.*'
+
+# The README's Docker install downloads docker-compose.yml from the GitHub Release, so the
+# release must attach it, and it must not depend on a file from the checkout: no env_file,
+# config, secret, or bind mount, and no build-only service outside an opt-in profile.
+grep -Eq '^ +LICENSE THIRD_PARTY_LICENSES\.html docker-compose\.yml \.\./image-release\.txt \\$' \
+  "$ROOT/.github/workflows/release.yml" \
+  || fail 'release.yml no longer attaches docker-compose.yml to the GitHub Release'
+if grep -Eq '^ *(env_file|configs|secrets):' "$ROOT/docker-compose.yml"; then
+  fail 'docker-compose.yml reads a file from the checkout, so the released copy cannot run alone'
+fi
+if [ -n "$REAL_DOCKER" ] && "$REAL_DOCKER" compose version >/dev/null 2>&1; then
+  mkdir "$TMP/standalone"
+  cp "$ROOT/docker-compose.yml" "$TMP/standalone/"
+  standalone_images="$(cd "$TMP/standalone" && "$REAL_DOCKER" compose config --images)" \
+    || fail 'docker-compose.yml does not load by itself in an empty directory'
+  (cd "$TMP/standalone" && "$REAL_DOCKER" compose config --format json) \
+    | jq -e '[.services[].volumes[]? | select(.type == "bind")] | length == 0' >/dev/null \
+    || fail 'docker-compose.yml bind-mounts a host path, so the released copy cannot run alone'
+  printf '%s\n' "$standalone_images" | grep -Eqx 'ghcr\.io/sohampatwardhan/amtrak-gtfs-rt:[0-9]+\.[0-9]+\.[0-9]+' \
+    || fail 'docker-compose.yml alone must run only the released amtrak-gtfs-rt image'
+  test "$(printf '%s\n' "$standalone_images" | wc -l | tr -d ' ')" = 1 \
+    || fail 'docker-compose.yml alone must run only the amtrak-gtfs-rt service by default'
+fi
 
 printf 'release-control tests passed\n'

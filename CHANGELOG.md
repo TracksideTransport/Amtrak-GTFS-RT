@@ -7,41 +7,199 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-- **License notices are checked package by package, and the Rust notices are current.** Carried over from the closed duplicate PR #80. `/licenses/README` replaces `NOTICES.md` as the index and now also covers the Node.js bundled with Playwright and the offer of source for the AGPL service. The build copies Playwright's browser notices (Chromium headless shell, ffmpeg) into `/licenses/playwright-browsers/` and fails if a download has none. `scripts/verify-release-image.sh` checks every Debian package's copyright file, every Python distribution's license, the Java runtime's `legal/` directory for each module in the image, and the OCI `base.name` label, ports, and volumes, and CI runs it on both architectures and both browser bundles for every pull request (before, only a release did). `scripts/check-release-metadata.sh` now also rejects any other `ghcr.io` package in Compose or bake. `THIRD_PARTY_LICENSES.html` is regenerated against the current `Cargo.lock`; the checked-in copy predated the lockfile updates, and the release metadata check compares it with a fresh `cargo about` run (#74).
-- **Pull requests run the validators on a deterministic fixture.** `scripts/validate-feeds.sh --fixture` validates a feed set that `cargo run --example validation_fixture` builds without any network: a small static GTFS augmented with a gated platform and a plain platform (and a parent station), plus a mock realtime batch with a stamped `assigned_stop_id`, run through the real generation builder and validator. Both MobilityData validators must report zero ERROR notices, through the same ratchet against an empty baseline. The new `Offline GTFS and GTFS-RT validators` CI job runs it when feed-shaping paths change (the path filter is inside the job, so it always reports), and the existing release-control job now also runs `--offline-fixtures`. It is not a required check yet. The fixture catches static spec errors and realtime errors such as E022 (checked by breaking it on purpose); neither the pinned RT validator nor the builder checks that an `assigned_stop_id` names a real stop, so the fixture generator asserts that itself. The live daily gate and `validation/baseline.json` are unchanged (#88).
-- **The validate-feeds gate retries Maven Central rate limits.** The RT validator is built from the pinned commit on every cold cache, and Maven answered HTTP 429, failing the run before it validated anything. The clone, fetch, Maven build, and GTFS validator download now retry with linear backoff (`scripts/lib-retry.sh`, `VALIDATION_NETWORK_ATTEMPTS`, default 4, and `VALIDATION_NETWORK_BASE_DELAY`, default 20 s), Maven retries inside itself, the caches hash only the validator pins instead of the whole script, and they are saved even when a later step fails. The pinned commit and the GTFS validator's SHA-256 check are unchanged (#89).
-- **A fallback position source takes over when the Amtrak source fails.** `AMTRAK_FALLBACK_ASM` (default on) and `AMTRAK_FALLBACK_ASM_URL` add TransitDocs' ASM train map after the Amtrak source in the source chain. It runs only when the Amtrak source errors or returns an empty batch, matches each train to a static trip by train number and service calendar, and publishes only trains whose trip and stop ids resolve, with delays in seconds and positions converted from mph. The manifest's `source` reads `transitdocs-asm` while it supplies a generation; its trips carry no track or gate stamps. Live check: 82 of 93 Amtrak trains resolved. The README credits TransitDocs and notes that no terms of use were found for the endpoint. **Upgrade:** set `AMTRAK_FALLBACK_ASM=off` to keep the old behavior of publishing nothing while the Amtrak source is down. `chrono` is now a non-optional dependency (already in the build through the catenary crate; the lockfile is unchanged) (#62).
-- **The feed set reports a match rate.** `/v1/feed-set.json` adds `match_rate` (`trip_updates` and `vehicle_positions`, each `emitted` and `matched`): how many of the source's entities resolved against the generation's static feed. The same numbers are logged every cycle, and a warning fires when fewer than 80% of at least ten trip updates match, which is the earliest sign of a static and realtime mismatch such as a schedule change. It is measured over what the source returned (the catenary crate exposes no raw observed-train count), and a generation recovered from disk has none until the next one is built, so the on-disk manifest format is unchanged and a rollback can still read it. Also removes an unused `hex_encode` helper left by the ETag change (#61).
-- **Patched `rustix`, `quinn-proto`, and `quinn-udp` in the lockfile.** `rustix` 1.1.6 fixes RUSTSEC-2026-0486 (the xattr functions it affects are not used here), and `quinn-proto` 0.11.19 and `quinn-udp` 0.5.16 fix RUSTSEC-2026-0523, -0524, and -0538 (neither is built into any target). Lockfile only; `Cargo.toml` is unchanged. A reassessment of the pending risk acceptance is in `.security/dependency-audit/reassessment-2026-11-18.md` (#58).
-- **Docs match the one-container layout.** The README's container, Compose, Raspberry Pi, advisories, and track-source passages describe the one image and its built-in worker; its configuration table now lists `AMTRAK_TRACKS_BASE_INTERVAL_SECS`, `AMTRAK_TRACKS_LEAD_TIME_FILE`, `AMTRAK_TRACKS_DEBOUNCE_SECS`, `AMTRAK_TRACKS_MIN_GAP_SECS`, `AMTRAK_TRACKS_MAX_EARLY`, and the removed `AMTRAK_ROLE`. The 2026-07-29 design records its resolved decisions (#57).
-- **`amtrak-gtfs-rt` is the only published image.** The release workflow no longer builds, scans, attests, or publishes `amtrak-gtfs-rt-track-fetcher` and `amtrak-gtfs-rt-advisory-fetcher`, and `image-release.txt` lists only the one image's manifest and both platform digests. `browser-worker/Dockerfile`, `scripts/test-fetcher-image.sh`, the `sidecar-gates` release gate, and the fetcher bake targets are removed; `docker-compose.yml` and `docker-bake.hcl` name only `amtrak-gtfs-rt`. **Deprecated:** the two fetcher packages (last published at v0.7.1) get no new versions and are replaced by the worker inside the one image; unlinking and deleting them waits for the owner's confirmation after the first one-image release. The image now carries `/licenses/NOTICES.md` (where each component's license lives) and the validator's license, and `scripts/verify-release-image.sh` checks them, the entrypoint, and the title label on every release image (#74, supersedes #50).
-- **The daily `GTFS.zip` refresh is conditional.** Once a download supplies an `ETag` or `Last-Modified`, later refreshes send `If-None-Match` and `If-Modified-Since`, and a `304` keeps the current snapshot without downloading or running the validator again. A restart recovers from disk without validators, so its first refresh is a full download. A rebuild for new platform tables (a newly observed track) always downloads, because a `304` answers for the old tables too. Feed contents, versions, and URLs are unchanged (#60).
-- **Artifacts are hashed once and served without a copy; conditional requests follow RFC 9110.** Each generation hashes an artifact's SHA-256 ETag on first request and reuses it, and responses share the generation's bytes instead of copying them, so warm reads and `304` revalidations of the roughly 19 MB `static.zip` no longer re-hash and re-copy it on every request (a new test holds a 20 MB artifact under 100 ms at p99). `If-Modified-Since` is now ignored when `If-None-Match` is present, so a stale tag with a newer date returns `200`; `*` and weak tags match. ETag values, headers, and URLs are unchanged (#56).
-- **Combined-mode tests and a separate official-ZIP validation.** A test pins one upstream poll per generation cycle through the train-list committer, beside the existing fault-injection test that proves the manifest does not advance unless every artifact is written. `scripts/validate-feeds.sh` now downloads `official-static.zip` from the manifest and validates it on its own, with its own report directory (`official-static/`) and a zero-ERROR gate, so a notice can be pinned on Amtrak's data or on the repair and platform stops (#55).
-- **One track scheduler per concern.** The browser worker's poller is the only implementation of the base and hot schedule (`AMTRAK_TRACKS_BASE_INTERVAL_SECS`, `AMTRAK_TRACKS_LEAD_TIME_FILE`, `TRACK_HOT_WINDOW_SECS`); the service's copies, `src/lead_time.rs` and `TrackScheduler::base_due`, only ran in tests and are deleted. The service is the only implementation of request debouncing, the minimum gap, and the 24-per-flush cap (`AMTRAK_TRACKS_DEBOUNCE_SECS`, `AMTRAK_TRACKS_MIN_GAP_SECS`, `AMTRAK_TRACKS_MAX_EARLY`); the worker's `worker/tracks/schedule.py` and its unused `debounce_secs` and `min_gap_secs` settings are deleted. The Rust lead-time cases (`covered` stations, a missing hot window, a foreign schema) now run against the Python implementation, and a new test pins the base-interval cadence. `AMTRAK_TRACKS_BASE_INTERVAL_SECS` is now checked by the worker alone, so a bad value stops the worker rather than the service at startup. Two fixes to the surviving scheduler: with a lead-time profile, a train is hot when any upcoming stop is inside its own station's hot window (before, the tightest window of all its stations was compared with its soonest stop, so a profile station like PVD could hide a global station that was due); and a train named by an early-refresh hint skips the worker's 90-second cooldown, which had consumed and lost a hint that arrived between cooldowns. A lead-time file that is missing, unreadable, or has the wrong schema now logs a warning (#66).
-- **The three-container roles are removed.** Combined mode is the only mode. `src/roles.rs`, `src/cohort.rs`, the fleet and contribution snapshots on the shared volume, `trip-updates.Dockerfile`, `alerts.Dockerfile`, and their bake targets are gone, which retires #49 (snapshots copied every poll and never pruned), #51 (a stopped role stalled every feed), and #54 (new platforms waited up to 24 hours; the in-process notifier now stages them after its 30-second debounce, at most once per 10 minutes). **Upgrade:** an `AMTRAK_ROLE` other than unset, empty, or `combined` now refuses to start, and the README's "Upgrading from the three-container layout" says what to change and how to delete the old `fleet/` and `contrib/` directories (#72).
-- **Early track refreshes work in the one container.** A `train` or `station` query on trip updates again queues a debounced refresh for the browser worker (`tracks/early-refresh/`); only the removed VehiclePositions role had wired it. `AMTRAK_TRACKS_DEBOUNCE_SECS`, `AMTRAK_TRACKS_MIN_GAP_SECS`, and `AMTRAK_TRACKS_MAX_EARLY` are now parsed with the rest of the configuration, so a non-numeric value is a startup error that names the variable. A blank value (`AMTRAK_TRACKS_MAX_EARLY=`) counts as unset, as it does for the worker. A worker beside the service with no train list now fails its cycle instead of ever polling `getTrainsData` (#72).
-- **CI builds the one image on both architectures.** The required `One image (amd64)` and `One image (arm64)` checks build the default and full bundles natively and run `scripts/test-image-offline.sh` (image contract, Java, Chromium under the Compose confinement, fail-closed startup, the `AMTRAK_ROLE` rejection, the worker's `/healthz` and `SIGTERM`, Xvfb). They replace the four fetcher-image checks in `.github/rulesets/main.json`; an admin runs `scripts/apply-rulesets.sh` after merging. The release still publishes the two fetcher images, so their release gate and `scripts/test-fetcher-image.sh` stay until #74 (#72).
-- **One image with every feed and helper.** The root `Dockerfile` now builds the one image from `docs/one-container.md` on `python:3.12-slim-bookworm` (digest-pinned): `tini` as PID 1, the static musl service, the browser worker with Playwright's `chromium-headless-shell`, and a `jlink`'d glibc Java 17 runtime with the same digest-checked validator JAR. It is no longer `scratch`, and it is about 1 GB uncompressed on linux/arm64. `docker run -d -p 127.0.0.1:8090:8080 -v amtrak-data:/data <image>` serves the full feed with no other settings. `BROWSER_BUNDLE=full` adds full Chromium and Xvfb (#71).
-- **The service supervises the browser worker.** It starts `python3 -m worker` on `127.0.0.1:8081` only when `AMTRAK_TRACKS_AMTRAK` or `AMTRAK_ADVISORIES` is on and reads the built-in worker, restarts it with backoff (2 s doubling to 60 s), and exits non-zero after 5 exits in a row so the restart policy takes over; a run of 5 minutes resets the count. With both off, no Python or Chromium process runs. The worker runs in its own process group, which is killed after every exit. On `SIGTERM` the service stops the worker (`SIGTERM`, then `SIGKILL` after 5 s), then itself, and exits `0` inside Docker's 10-second grace period. `--healthcheck` also fails while the worker's listener is not answering. The worker gets the service's output directory and train list as absolute paths and does not inherit `NJT_RAILDATA_USERNAME` or `NJT_RAILDATA_PASSWORD` (#71, #52).
-- **The worker reads the service's train list instead of a fleet snapshot.** Combined mode writes `{AMTRAK_OUTPUT_DIR}/tracks/fleet-trains.json` (`amtrak-fleet-trains/v1`) after each published generation, as one atomically replaced file, and passes it to the worker as `AMTRAK_FLEET_TRAINS_FILE`. Before this, Amtrak's own track numbers never published in combined mode, because only the three-container VehiclePositions role wrote `fleet/CURRENT`. A track cycle that could not read a train list (before the first generation) now retries the full poll on the next `POLL_INTERVAL_SECS` tick instead of waiting `AMTRAK_TRACKS_BASE_INTERVAL_SECS`, so tracks arrive about two minutes after a cold start instead of fifteen (#71).
-- **`gateway` in `AMTRAK_ALLOWED_PEER_IPS`.** The keyword resolves at startup to the IPv4 default gateway from `/proc/net/route`, which inside a container is where requests through a published port arrive. The image defaults to `AMTRAK_BIND_ADDR=0.0.0.0:8080` and `AMTRAK_ALLOWED_PEER_IPS=gateway` (decision D1), so the `-p` binding decides who can reach it. With no default route the keyword admits nobody. A host binary is unchanged: a non-loopback bind with no allowlist still refuses to start. **Upgrade:** with `--network host` the default gateway is the LAN router and `0.0.0.0` is every host interface, so a host-networked run must set `AMTRAK_BIND_ADDR=127.0.0.1:8080` (and may clear `AMTRAK_ALLOWED_PEER_IPS`) to keep the old loopback-only posture (#71).
-- **The service image's vulnerability gate is now "no fixable Critical or High".** The one image's Debian, Python, and Chromium base always carries Grype matches with no fix (479 on linux/arm64 at this change, including 4 Critical that Debian marks won't-fix in glibc, GLib, and SQLite), so the scratch image's zero-match policy cannot hold. The release and the PR release gate now fail on any Critical or High match that has a fix (the rule the retired fetcher images already used); the image is still one image, and the full Grype report remains a release asset. The image's own Java runtime moves to Temurin 17.0.21 (17.0.19 had fixable High advisories CVE-2026-41254 and CVE-2026-47063), and pip is removed from the image (#71).
-- **One hardened Compose service.** `docker-compose.yml` runs `amtrak-gtfs-rt` (the v0.7.1 name) on `127.0.0.1:8090` with a read-only root filesystem, tmpfs `/tmp` and `/home/amtrak`, all capabilities dropped, `no-new-privileges`, a 1.5 GB memory limit, a 512-process limit, and a 64 MB `/dev/shm`. The `vehicle-positions`, `trip-updates`, and `alerts` services and the `advisory-snapshots` volume are gone. The optional proxy now forwards to `amtrak-gtfs-rt`. **Upgrade:** a `docker-compose.override.yml` that names `vehicle-positions` must name `amtrak-gtfs-rt` (#71).
-- **One browser worker with one Chromium replaces the track and advisory fetchers.** `browser-worker/` (`python -m worker`) runs Amtrak's train-status documents and the Service Alerts & Notices pages in one process, serves `/tracks.json`, `/service-alerts-and-notices`, and `/alert/...` from one listener (default `127.0.0.1:8081`), and lends one Chromium to both: each source opens its own browser context, the track page keeps the browser resident, and with tracks off a notices cycle launches the browser and closes it afterward. It reads the service's own flags (`AMTRAK_TRACKS`, `AMTRAK_TRACKS_AMTRAK`, `AMTRAK_ADVISORIES`). The trip-updates and alerts images start it with the other source off, so the alerts worker now listens on 8081 and keeps its snapshots under `/data/notices`. The two standalone images are now targets of `browser-worker/Dockerfile`, built from the repository root, on their old ports. `track-fetcher/`, `advisory-fetcher/` (including its standalone Compose file), and both `display.py` copies are gone. **Upgrade:** notices-only settings now carry `NOTICES_` (`NOTICES_POLL_INTERVAL_SECS`, `NOTICES_MAX_STALE_SECS`, `NOTICES_SOURCE_URL`, `NOTICES_SNAPSHOT_DIR`, `NOTICES_GATE_SELECTOR`, `NOTICES_DETAIL_TTL_SECS`, `NOTICES_DETAIL_MAX_STALE_SECS`, `NOTICES_RENDER_STABLE_MS`, `NOTICES_RENDER_POLL_MS`), because `POLL_INTERVAL_SECS` and `MAX_STALE_SECS` belong to the track source. `SERVE_PATH` is gone. The one-shot tools are `python -m worker.tracks.dump` and `python -m worker.tracks.coverage`. CI runs one `Browser worker offline tests` job in place of the two fetcher suites (#73).
-- **An on/off flag for every optional source, and notices on by default.** `AMTRAK_TRACKS_AMTRAK` and `AMTRAK_TRACKS_HARTFORD` (both default on) turn Amtrak's own track documents and the Hartford board off without blanking a URL. `AMTRAK_ADVISORIES` now defaults **on**. `AMTRAK_ADVISORIES_URL` and `AMTRAK_TRACKS_AMTRAK_URL` default to the built-in browser worker on `127.0.0.1:8081` and remain overrides. An explicitly empty URL still skips its source. Without a reachable worker both sources fail open and log a warning. `AMTRAK_ADVISORIES` and `AMTRAK_FILTER_CAPITAL_CORRIDOR` now accept the same words as `AMTRAK_TRACKS` (`on`/`true`/`1`/`yes`, `off`/`false`/`0`/`no`), and any other value is a startup error instead of being read as off. **Upgrade:** set `AMTRAK_ADVISORIES=off` to keep notices off. The startup banner names each source, says why one is off, and shows the Capital Corridor filter. It never prints a source URL. See `docs/one-container.md` (#70).
-- **Patched Rust TLS and transport crates.** The lockfile moves h2 to 0.4.16, quinn-proto to 0.11.18 (RUSTSEC-2026-0338, high), rustls to 0.23.46, rustls-webpki to 0.103.16, tokio to 1.53.3, and webpki-root-certs to 1.0.10, which are the advisories' fixed releases. A new Cargo risk acceptance, pending owner approval, replaces the v0.2.0 record that expires 2026-11-12.
-- **gtfs-mcp and Trackside are the named consumers.** Both read `feed-set.json`, the untouched official zip, the platform add-on, and the three protobufs. Public URLs, content types, manifest fields, and protobuf header meanings stay. New names are additions. A contract test pins the URL list and the artifact cache headers.
-- **Optional Caddy proxy.** `docker compose --profile proxy up` adds gzip, a per-IP rate limit, access logs, and TLS when `AMTRAK_PROXY_TLS` is set. It is off by default. Vehicle-positions still serves `127.0.0.1:8090`. The image is built from digest-pinned Caddy tags and scanned by the release gate.
-- **Validator JSON report is the static gate.** OGNL 3.4.13 removes `DefaultMemberAccess`, so Thymeleaf's HTML export exits non-zero after `report.json` is written. A report with no `ERROR` notices is accepted.
-- **Official static GTFS is served untouched.** `official-static.zip` is Amtrak's download. `platform-addon.zip` (`amtrak-platform-addon/v1`, plus a digest when it changes a file) holds the dangling-stop repair and platform stops. `static.zip` is still the combined feed. `feed-set.json` names all three and `platform_addon_version`.
-- **Sidecar images ship Node 24.22.1.** Playwright is pinned to 1.64.1. 1.64.0 bundled Node 24.21.0, which has fixable High advisories CVE-2026-105482, CVE-2026-105483, CVE-2026-106069, and CVE-2026-111497.
-- **The validator JAR forces Guava 33.7.2 and OGNL 3.4.13.** Those are the fixed releases for GHSA-xxph-c9ww-hj94 (Guava 32.0.0-jre) and GHSA-crwc-vw2r-qr6m (OGNL 3.1.26). The service image keeps the zero-match Grype policy.
-- **Three feed containers.** `AMTRAK_ROLE=vehicle-positions` is the only `getTrainsData` poller and the public HTTP front. `trip-updates` stamps tracks and gates. `alerts` merges notices. `/v1/feed-set.json` advances only when both contributions for that poll are on disk. Artifact responses send `ETag` and `Last-Modified` and answer `304` from memory.
-- **TripUpdates and Alerts start in their own images.** They no longer require the GTFS validator JAR or Java, which only VehiclePositions ships. Both images default `AMTRAK_OUTPUT_DIR` to the shared `/data` volume. Before this fix the three-container stack never published a generation. Release gates now start the three-role Compose stack and download every artifact its manifest names.
-- **VehiclePositions is now the only `getTrainsData` poller.** It writes `trains.json` (`amtrak-fleet-trains/v1`: train number, service date, per-station times) into each fleet snapshot, and the track poller in TripUpdates reads it instead of fetching and decrypting the map feed again. Early track-refresh hints are queued one file per flush under `tracks/early-refresh/` and consumed once; a `station` query now refreshes the due trains that stop there.
-- **Track schedule.** Full track polls default to every 15 minutes (`AMTRAK_TRACKS_BASE_INTERVAL_SECS`). A `train` or `station` query on trip updates enqueues a debounced background refresh and still returns the cached protobuf. `AMTRAK_TRACKS_LEAD_TIME_FILE` loads an `amtrak-station-lead-time/v1` profile. `observed` stations marked `wider` use their suggested windows. Other stations keep the global window. Hot checks still run between base polls.
-- **Station track coverage.** `python -m worker.tracks.coverage` writes that `amtrak-station-lead-time/v1` file. `tracks` queries named trains, `survey` walks the active fleet, and `merge` folds snapshots. Point `AMTRAK_TRACKS_LEAD_TIME_FILE` at `survey.profile.json`.
+## [0.8.0] - 2026-11-18
+
+The first release of the one image: the service, its browser worker with one Chromium, and the
+GTFS validator in `ghcr.io/sohampatwardhan/amtrak-gtfs-rt`, installable with Docker alone.
+
+### Upgrading from 0.7.1
+
+- **Drop the two sidecars.** Remove the `track-fetcher` and `advisory-fetcher` services and any
+  `AMTRAK_TRACKS_AMTRAK_URL` or `AMTRAK_ADVISORIES_URL` that points at them. The worker inside the
+  image replaces both. The Compose service keeps its name, `amtrak-gtfs-rt`, and its published
+  port, `127.0.0.1:8090`.
+- **Notices are on by default.** Set `AMTRAK_ADVISORIES=off` to keep them off (#70).
+- **The fallback position source is on by default.** Set `AMTRAK_FALLBACK_ASM=off` to keep
+  publishing nothing while the Amtrak source is down (#62).
+- **The image binds `0.0.0.0:8080` and admits `gateway`.** The `-p` binding decides who can reach
+  the feed. With `--network host`, set `AMTRAK_BIND_ADDR=127.0.0.1:8080` (and you may clear
+  `AMTRAK_ALLOWED_PEER_IPS`) to keep the old loopback-only posture (#71).
+- **Notices-only settings carry `NOTICES_`.** `NOTICES_POLL_INTERVAL_SECS`,
+  `NOTICES_MAX_STALE_SECS`, `NOTICES_SOURCE_URL`, `NOTICES_SNAPSHOT_DIR`,
+  `NOTICES_GATE_SELECTOR`, `NOTICES_DETAIL_TTL_SECS`, `NOTICES_DETAIL_MAX_STALE_SECS`,
+  `NOTICES_RENDER_STABLE_MS`, and `NOTICES_RENDER_POLL_MS`, because `POLL_INTERVAL_SECS` and
+  `MAX_STALE_SECS` belong to the track source. `SERVE_PATH` is gone (#73).
+- **`AMTRAK_ROLE` is rejected.** Any value other than unset, empty, or `combined` refuses to
+  start. This only affects a deployment of `main` between releases; the README's "Upgrading from
+  the three-container layout" says what to change and how to delete the old `fleet/` and
+  `contrib/` directories (#72).
+
+### Added
+
+- **Install with Docker alone.** Each GitHub Release attaches `docker-compose.yml`, which pulls
+  and runs the release it names from an empty directory, with no checkout, toolchain, or registry
+  login. The README opens with the three commands, and the Raspberry Pi steps no longer clone the
+  repository. `docker run -p 127.0.0.1:8090:8080 -v amtrak-data:/data
+  ghcr.io/sohampatwardhan/amtrak-gtfs-rt:0.8.0` serves the full feed with no other settings.
+- **One image with every feed and helper.** The root `Dockerfile` builds the image from
+  `docs/one-container.md` on `python:3.12-slim-bookworm` (digest-pinned): `tini` as PID 1, the
+  static musl service, the browser worker with Playwright's `chromium-headless-shell`, and a
+  `jlink`'d glibc Java 17 runtime (Temurin 17.0.21) with the same digest-checked validator JAR.
+  It is no longer `scratch`, and it is about 1 GB uncompressed on linux/arm64. pip is removed from
+  the image. `BROWSER_BUNDLE=full` adds full Chromium and Xvfb (#71).
+- **The service supervises the browser worker.** It starts `python3 -m worker` on
+  `127.0.0.1:8081` only when `AMTRAK_TRACKS_AMTRAK` or `AMTRAK_ADVISORIES` is on, restarts it with
+  backoff (2 s doubling to 60 s), and exits non-zero after 5 exits in a row so the restart policy
+  takes over; a run of 5 minutes resets the count. With both off, no Python or Chromium process
+  runs. The worker runs in its own process group, which is killed after every exit. On `SIGTERM`
+  the service stops the worker (`SIGTERM`, then `SIGKILL` after 5 s), then itself, and exits `0`
+  inside Docker's 10-second grace period. `--healthcheck` also fails while the worker's listener
+  is not answering. The worker does not inherit `NJT_RAILDATA_USERNAME` or
+  `NJT_RAILDATA_PASSWORD` (#71, #52).
+- **`gateway` in `AMTRAK_ALLOWED_PEER_IPS`.** The keyword resolves at startup to the IPv4 default
+  gateway from `/proc/net/route`, which inside a container is where requests through a published
+  port arrive. With no default route it admits nobody. A host binary is unchanged: a non-loopback
+  bind with no allowlist still refuses to start (#71).
+- **An on/off flag for every optional source.** `AMTRAK_TRACKS_AMTRAK` and
+  `AMTRAK_TRACKS_HARTFORD` (both default on) turn Amtrak's own track documents and the Hartford
+  board off without blanking a URL. `AMTRAK_ADVISORIES_URL` and `AMTRAK_TRACKS_AMTRAK_URL` default
+  to the built-in worker and remain overrides; an explicitly empty URL still skips its source.
+  `AMTRAK_ADVISORIES` and `AMTRAK_FILTER_CAPITAL_CORRIDOR` accept the same words as
+  `AMTRAK_TRACKS` (`on`/`true`/`1`/`yes`, `off`/`false`/`0`/`no`), and any other value is a
+  startup error instead of being read as off. The startup banner names each source, says why one
+  is off, and shows the Capital Corridor filter; it never prints a source URL (#70).
+- **A fallback position source.** `AMTRAK_FALLBACK_ASM` (default on) and
+  `AMTRAK_FALLBACK_ASM_URL` add TransitDocs' ASM train map after the Amtrak source. It runs only
+  when the Amtrak source errors or returns an empty batch, matches each train to a static trip by
+  train number and service calendar, and publishes only trains whose trip and stop ids resolve,
+  with delays in seconds and positions converted from mph. The manifest's `source` reads
+  `transitdocs-asm` while it supplies a generation; its trips carry no track or gate stamps. Live
+  check: 82 of 93 Amtrak trains resolved. The README credits TransitDocs and notes that no terms
+  of use were found for the endpoint (#62).
+- **The feed set reports a match rate.** `/v1/feed-set.json` adds `match_rate` (`trip_updates`
+  and `vehicle_positions`, each `emitted` and `matched`). The same numbers are logged every cycle,
+  and a warning fires when fewer than 80% of at least ten trip updates match, the earliest sign of
+  a static and realtime mismatch. A generation recovered from disk has none until the next one is
+  built, so the on-disk manifest format is unchanged and a rollback can still read it (#61).
+- **Official static GTFS is served untouched.** `official-static.zip` is Amtrak's download.
+  `platform-addon.zip` (`amtrak-platform-addon/v1`, plus a digest when it changes a file) holds the
+  dangling-stop repair and platform stops. `static.zip` is still the combined feed.
+  `feed-set.json` names all three and `platform_addon_version`.
+- **Optional Caddy proxy.** `docker compose --profile proxy up` adds gzip, a per-IP rate limit,
+  access logs, and TLS when `AMTRAK_PROXY_TLS` is set. It is off by default, builds from the
+  repository's `proxy/` directory, and `amtrak-gtfs-rt` still serves `127.0.0.1:8090`.
+- **Track schedule and station lead times.** Full track polls default to every 15 minutes
+  (`AMTRAK_TRACKS_BASE_INTERVAL_SECS`), with hot checks between them. `AMTRAK_TRACKS_LEAD_TIME_FILE`
+  loads an `amtrak-station-lead-time/v1` profile; `observed` stations marked `wider` use their
+  suggested windows and other stations keep the global window. `python -m
+  worker.tracks.coverage` writes that file (`tracks` queries named trains, `survey` walks the
+  active fleet, `merge` folds snapshots).
+- **Early track refreshes.** A `train` or `station` query on trip updates queues a debounced
+  background refresh (one file per flush under `tracks/early-refresh/`) and still returns the
+  cached protobuf; a `station` query refreshes the due trains that stop there.
+  `AMTRAK_TRACKS_DEBOUNCE_SECS`, `AMTRAK_TRACKS_MIN_GAP_SECS`, and `AMTRAK_TRACKS_MAX_EARLY` are
+  parsed with the rest of the configuration, so a non-numeric value is a startup error that names
+  the variable; a blank value counts as unset (#72).
+- **Pull requests run the validators on a deterministic fixture.** `scripts/validate-feeds.sh
+  --fixture` validates a feed set that `cargo run --example validation_fixture` builds without
+  any network, through the real generation builder. Both MobilityData validators must report zero
+  ERROR notices. The `Offline GTFS and GTFS-RT validators` CI job runs it when feed-shaping paths
+  change; it is not a required check yet. The live daily gate and `validation/baseline.json` are
+  unchanged (#88).
+
+### Changed
+
+- **One browser worker with one Chromium replaces the track and advisory fetchers.**
+  `browser-worker/` (`python -m worker`) runs Amtrak's train-status documents and the Service
+  Alerts & Notices pages in one process, serves `/tracks.json`, `/service-alerts-and-notices`, and
+  `/alert/...` from one listener on `127.0.0.1:8081`, and lends one Chromium to both: each source
+  opens its own browser context, the track page keeps the browser resident, and with tracks off a
+  notices cycle launches the browser and closes it afterward. It reads the service's own flags.
+  The one-shot tools are `python -m worker.tracks.dump` and `python -m worker.tracks.coverage`
+  (#73).
+- **One `getTrainsData` poll feeds every product.** The service writes
+  `{AMTRAK_OUTPUT_DIR}/tracks/fleet-trains.json` (`amtrak-fleet-trains/v1`) after each published
+  generation and passes it to the worker as `AMTRAK_FLEET_TRAINS_FILE`, so the worker never polls
+  the map. A track cycle with no train list yet retries on the next `POLL_INTERVAL_SECS` tick, so
+  tracks arrive about two minutes after a cold start instead of fifteen. A test pins one upstream
+  poll per generation cycle (#71, #55).
+- **One track scheduler per concern.** The worker's poller is the only implementation of the base
+  and hot schedule and the lead-time profile; the service is the only implementation of request
+  debouncing, the minimum gap, and the 24-per-flush cap. With a lead-time profile, a train is hot
+  when any upcoming stop is inside its own station's hot window, and a train named by an
+  early-refresh hint skips the worker's 90-second cooldown. A lead-time file that is missing,
+  unreadable, or has the wrong schema logs a warning. `AMTRAK_TRACKS_BASE_INTERVAL_SECS` is now
+  checked by the worker alone (#66).
+- **One hardened Compose service.** `docker-compose.yml` runs `amtrak-gtfs-rt` from the released
+  image on `127.0.0.1:8090` with a read-only root filesystem, tmpfs `/tmp` and `/home/amtrak`, all
+  capabilities dropped, `no-new-privileges`, a 1.5 GB memory limit, a 512-process limit, and a
+  64 MB `/dev/shm` (#71).
+- **The daily `GTFS.zip` refresh is conditional.** Later refreshes send `If-None-Match` and
+  `If-Modified-Since`, and a `304` keeps the current snapshot without downloading or validating
+  again. A restart's first refresh, and a rebuild for new platform tables, always download (#60).
+- **Artifacts are hashed once and served without a copy; conditional requests follow RFC 9110.**
+  Warm reads and `304` revalidations of the roughly 19 MB `static.zip` no longer re-hash and
+  re-copy it on every request. `If-Modified-Since` is ignored when `If-None-Match` is present;
+  `*` and weak tags match. ETag values, headers, and URLs are unchanged (#56).
+- **`scripts/validate-feeds.sh` also validates `official-static.zip`** on its own, with its own
+  report directory and a zero-ERROR gate, so a notice can be pinned on Amtrak's data or on the
+  repair and platform stops (#55). Its network steps retry Maven Central's HTTP 429 with backoff
+  (`VALIDATION_NETWORK_ATTEMPTS`, `VALIDATION_NETWORK_BASE_DELAY`), and its caches hash only the
+  validator pins (#89).
+- **The validator's JSON report is the static gate.** OGNL 3.4.13 removes `DefaultMemberAccess`,
+  so Thymeleaf's HTML export exits non-zero after `report.json` is written. A report with no
+  `ERROR` notices is accepted.
+- **The image's vulnerability gate is "no fixable Critical or High".** The Debian, Python, and
+  Chromium base always carries Grype matches with no fix (479 on linux/arm64 at this change,
+  including 4 Critical that Debian marks won't-fix), so the `scratch` image's zero-match policy
+  cannot hold. The full Grype report remains a release asset (#71).
+- **License notices are checked package by package.** `/licenses/README` indexes the notices for
+  everything in the image: the validator, Playwright's Chromium and ffmpeg downloads, the Java
+  runtime, every Debian package, CPython and every Python package, and the Node.js bundled with
+  Playwright, plus the offer of source for the AGPL service. `scripts/verify-release-image.sh`
+  checks them on both architectures in every pull request. `THIRD_PARTY_LICENSES.html` is
+  regenerated against the current `Cargo.lock`, and the release metadata check compares it with
+  a fresh `cargo about` run (#74).
+- **CI builds the one image on both architectures.** The required `One image (amd64)` and
+  `One image (arm64)` checks build both browser bundles natively and run
+  `scripts/test-image-offline.sh`. Heavy CI jobs skip their steps when a pull request changes only
+  documentation (#72, #96).
+- **gtfs-mcp and Trackside are the named consumers.** Public URLs, content types, manifest
+  fields, and protobuf header meanings stay; new names are additions. A contract test pins the URL
+  list and the artifact cache headers.
+- **Docs match the one-container layout.** The README's container, Compose, Raspberry Pi,
+  advisories, and track-source passages describe the one image, and its configuration table lists
+  every new variable (#57).
+
+### Deprecated
+
+- **`amtrak-gtfs-rt-track-fetcher` and `amtrak-gtfs-rt-advisory-fetcher`** (last published at
+  v0.7.1) get no new versions. Unlinking and deleting them waits for the owner's confirmation
+  after this release (#74).
+
+### Removed
+
+- **The three-container roles that `main` briefly ran.** `src/roles.rs`, `src/cohort.rs`, the
+  fleet and contribution snapshots on the shared volume, `trip-updates.Dockerfile`,
+  `alerts.Dockerfile`, and their bake targets are gone, which retires #49, #51, and #54; new
+  platforms are staged by an in-process notifier after a 30-second debounce, at most once per 10
+  minutes (#72).
+- **The fetcher images.** The release no longer builds, scans, attests, or publishes them, and
+  `image-release.txt` lists only the one image. `browser-worker/Dockerfile`,
+  `scripts/test-fetcher-image.sh`, `track-fetcher/`, `advisory-fetcher/`, and the fetcher bake
+  targets are removed (#73, #74).
+
+### Security
+
+- **Patched Rust crates.** The lockfile moves h2 to 0.4.16, rustls to 0.23.46, rustls-webpki to
+  0.103.16, tokio to 1.53.3, webpki-root-certs to 1.0.10, `rustix` to 1.1.6 (RUSTSEC-2026-0486),
+  and `quinn-proto` to 0.11.19 and `quinn-udp` to 0.5.16 (RUSTSEC-2026-0338, -0523, -0524, and
+  -0538). The 2026-11 Cargo risk acceptance is approved and replaces the v0.2.0 record (#58).
+- **Playwright 1.64.1 with Node 24.22.1.** 1.64.0 bundled Node 24.21.0, which has fixable High
+  advisories CVE-2026-105482, CVE-2026-105483, CVE-2026-106069, and CVE-2026-111497.
+- **The validator JAR forces Guava 33.7.2 and OGNL 3.4.13**, the fixed releases for
+  GHSA-xxph-c9ww-hj94 and GHSA-crwc-vw2r-qr6m. The Java runtime moves to Temurin 17.0.21, which
+  fixes CVE-2026-41254 and CVE-2026-47063 (#71).
 
 ## [0.7.1] - 2026-10-21
 
@@ -400,7 +558,8 @@ against Amtrak's production endpoints (145 trip updates, 145 vehicle positions,
 - 21 tests, including live integration tests against Amtrak's real endpoints
   (run with `cargo test -- --include-ignored`).
 
-[Unreleased]: https://github.com/sohampatwardhan/Amtrak-GTFS-RT/compare/v0.7.1...HEAD
+[Unreleased]: https://github.com/sohampatwardhan/Amtrak-GTFS-RT/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/sohampatwardhan/Amtrak-GTFS-RT/compare/v0.7.1...v0.8.0
 [0.7.1]: https://github.com/sohampatwardhan/Amtrak-GTFS-RT/releases/tag/v0.7.1
 [0.7.0]: https://github.com/sohampatwardhan/Amtrak-GTFS-RT/compare/v0.6.2...v0.7.0
 [0.6.2]: https://github.com/sohampatwardhan/Amtrak-GTFS-RT/compare/v0.6.1...v0.6.2

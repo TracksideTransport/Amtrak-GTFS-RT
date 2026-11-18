@@ -5,6 +5,10 @@
 #
 #   docker compose pull && docker compose up -d
 #
+# No checkout is needed for that: each GitHub Release attaches this file, so the file alone in an
+# empty directory pulls and runs the release it names. Only `--build` and the `proxy` profile need
+# the repository.
+#
 # `--build` builds from this checkout instead and tags the result with the same name. To keep
 # local builds apart from the pulled release, give them another tag:
 #
@@ -41,7 +45,7 @@ services:
       target: runtime
       args:
         BROWSER_BUNDLE: ${FETCHER_BROWSER_BUNDLE:-headless-shell}
-    image: ghcr.io/sohampatwardhan/amtrak-gtfs-rt:${AMTRAK_IMAGE_TAG:-0.7.1}
+    image: ghcr.io/sohampatwardhan/amtrak-gtfs-rt:${AMTRAK_IMAGE_TAG:-0.8.0}
     restart: unless-stopped
     environment:
       AMTRAK_TRACKS: ${AMTRAK_TRACKS:-on}
@@ -74,12 +78,12 @@ services:
     networks: [amtrak]
 
   # Optional edge. Off unless started with `docker compose --profile proxy up`.
-  # Vehicle-positions keeps publishing 127.0.0.1:8090. This does not replace it.
+  # amtrak-gtfs-rt keeps publishing 127.0.0.1:8090. This does not replace it.
   proxy:
     profiles: ["proxy"]
     build:
       context: proxy
-    image: amtrak-gtfs-rt-proxy:${AMTRAK_IMAGE_TAG:-0.7.1}
+    image: amtrak-gtfs-rt-proxy:${AMTRAK_IMAGE_TAG:-0.8.0}
     restart: unless-stopped
     depends_on:
       - amtrak-gtfs-rt
