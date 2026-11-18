@@ -154,6 +154,105 @@ jobs:
       - name: Fail on expired approved risk acceptances
         run: python3 scripts/check-risk-acceptance-expiry.py
 
+      # No network and no Java: the validator gate's baseline ratchet logic and its retry helper
+      # run on every pull request, while the live gate stays daily (#88, #89).
+      - name: Test the validation baseline ratchet
+        run: scripts/validate-feeds.sh --offline-fixtures --as-of 2026-08-13
+
+      - name: Test the network retry helper
+        run: scripts/test-lib-retry.sh
+
+  offline-validators:
+    name: Offline GTFS and GTFS-RT validators
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      # Path filtering happens inside the job, not in the workflow's `on:` block, so this check
+      # always reports. A workflow-level filter would leave a required check pending forever on
+      # a pull request that touches none of these paths. A push to main always runs it.
+      - name: Decide whether feed-shaping paths changed
+        id: paths
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_EVENT_NAME}" != pull_request ]; then
+            echo 'run=true' >>"$GITHUB_OUTPUT"
+            exit 0
+          fi
+          base="${{ github.event.pull_request.base.sha }}"
+          if git diff --name-only "$base"...HEAD | grep -E '^(src/|examples/|Cargo\.(toml|lock)$|validation/|scripts/validate-feeds\.sh$|scripts/lib-retry\.sh$|\.github/workflows/(ci|validate-feeds)\.yml$)'; then
+            echo 'run=true' >>"$GITHUB_OUTPUT"
+          else
+            echo 'run=false' >>"$GITHUB_OUTPUT"
+            echo 'No feed-shaping path changed; skipping the validators.'
+          fi
+
+      - name: Install protoc
+        if: steps.paths.outputs.run == 'true'
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+        if: steps.paths.outputs.run == 'true'
+        with:
+          toolchain: stable
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        if: steps.paths.outputs.run == 'true'
+
+      - name: Set up Java 17
+        if: steps.paths.outputs.run == 'true'
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      # Same keys as the daily live gate, so both share one set of validator jars. They hash the
+      # validator pins only: an unrelated edit to validate-feeds.sh must not force a cold Maven
+      # build, which is when Maven Central answers HTTP 429 (#89).
+      - name: Read the validator pins
+        id: pins
+        if: steps.paths.outputs.run == 'true'
+        run: |
+          key="$(grep -E '^(GTFS_VALIDATOR_VERSION|GTFS_VALIDATOR_SHA256|RT_VALIDATOR_COMMIT)=' scripts/validate-feeds.sh | sha256sum | cut -c1-16)"
+          printf 'key=%s\n' "$key" >>"$GITHUB_OUTPUT"
+
+      - name: Restore validator jars and the Maven repository
+        id: cache
+        if: steps.paths.outputs.run == 'true'
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            .validator-cache
+            ~/.m2/repository
+          key: validators-${{ steps.pins.outputs.key }}
+          restore-keys: validators-
+
+      - name: Validate the fixture feed set (zero ERROR notices)
+        if: steps.paths.outputs.run == 'true'
+        run: ./scripts/validate-feeds.sh --fixture
+
+      - name: Save validator jars and the Maven repository
+        if: always() && steps.paths.outputs.run == 'true' && steps.cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            .validator-cache
+            ~/.m2/repository
+          key: validators-${{ steps.pins.outputs.key }}
+
+      - name: Upload validation reports
+        if: always() && steps.paths.outputs.run == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: offline-validation-reports-${{ github.run_attempt }}
+          path: validation-reports/
+          if-no-files-found: warn
+          retention-days: 14
+
   packaging:
     name: Compose and bake config
     runs-on: ubuntu-24.04
