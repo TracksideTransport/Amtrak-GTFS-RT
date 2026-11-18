@@ -907,6 +907,43 @@ mod tests {
         std::fs::remove_dir_all(output).unwrap();
     }
 
+    /// Counts `fetch` calls, so a cycle that polls twice is visible.
+    struct CountingSource(Arc<std::sync::atomic::AtomicUsize>);
+
+    #[async_trait]
+    impl RtSource for CountingSource {
+        fn name(&self) -> &'static str {
+            "counting"
+        }
+        async fn fetch(&self, _gtfs: &gtfs_structures::Gtfs) -> Result<RtBatch, SourceError> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(crate::sources::mock::batch_with(1))
+        }
+    }
+
+    /// One generation is one upstream poll, even with the train-list writer and every other
+    /// decorator around the committer: nothing downstream of the source fetches again.
+    #[tokio::test]
+    async fn one_cycle_polls_the_source_exactly_once() {
+        let output = output_directory("one-poll");
+        let store = GenerationStore::open(&output).await.unwrap();
+        let snapshots = recover_static(static_zip(), "static".into()).unwrap();
+        let polls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let sources: Vec<Box<dyn RtSource>> = vec![Box::new(CountingSource(polls.clone()))];
+        let committer = fleet_trains::WithFleetTrainsFile::new(
+            StoreGenerationCommitter::new(output.clone(), store.clone()),
+            Some(output.join("tracks").join("fleet-trains.json")),
+        );
+        let now = SystemTime::now();
+        for cycle in 1..=3 {
+            // Whether the fixture batch validates is not the point; the poll count is.
+            let _ =
+                orchestrator::refresh_generation_once(&sources, &snapshots, &committer, now).await;
+            assert_eq!(polls.load(Ordering::SeqCst), cycle, "one poll per cycle");
+        }
+        std::fs::remove_dir_all(output).unwrap();
+    }
+
     struct RefuseToPublish;
 
     #[async_trait]
