@@ -29,6 +29,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   DNS, connect, TLS, or HTTP status cause in scheduled refresh warnings too. URLs are never
   logged. The process exits with status 1, as before: the `exit=0` in the report is what
   `docker inspect` shows for a container that a restart policy has already started again (#106).
+- **Train-status alerts have a `header_text`.** The per-train alerts in `alerts.pb` (ids such as
+  `20261117-98`) had only `description_text`, although GTFS-Realtime requires a header. The header
+  is now the description's leading label after the train number, such as `Train 98: Delay
+  Notification`, with `Train 98 service alert` or `Service alert` as the fallback. An alert whose
+  notices are all delay notifications gets `effect: SIGNIFICANT_DELAYS`; other alerts keep no
+  effect. Alerts that already had a header are unchanged (#107).
 
 ## [0.8.0] - 2026-11-18
 

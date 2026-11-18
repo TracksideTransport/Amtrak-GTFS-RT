@@ -46,6 +46,7 @@ Checked-in paths, until the split replaces them:
 | `src/static_repair.rs` | Drops stop times whose `stop_id` is missing from `stops.txt` |
 | `src/static_gtfs.rs` | Exact-byte static validation and the pending/active lifecycle |
 | `src/orchestrator.rs` | Source selection, one coherent generation, polling |
+| `src/alert_header.rs` | Gives an alert that arrives without `header_text` (Amtrak's per-train status alerts) a title from its description |
 | `src/writer.rs` | Immutable generations on disk |
 | `src/serve.rs` | axum HTTP API, peer check, and readiness |
 | `src/worker.rs` | Starts the built-in browser worker when a browser source needs it, restarts it with backoff, gives up after 5 exits in a row, and stops its process group on `SIGTERM` |

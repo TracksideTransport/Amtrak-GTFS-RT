@@ -412,6 +412,8 @@ impl GenerationBuilder {
                     && alert_has_text(&alert)
                     && alert_ids.insert(entity.id.clone())
                 {
+                    // GTFS-Realtime requires `header_text`; train-status alerts arrive without.
+                    crate::alert_header::ensure_header_text(&mut alert, &static_snapshot.parsed);
                     alerts.entity.push(FeedEntity {
                         id: entity.id,
                         is_deleted: None,
@@ -1474,6 +1476,38 @@ mod tests {
         assert!(candidate.trip_updates.entity.is_empty());
         assert!(candidate.vehicle_positions.entity.is_empty());
         assert!(candidate.alerts.entity.is_empty());
+    }
+
+    /// #107: an alert with only a description (Amtrak's train status) is published with a header.
+    #[test]
+    fn builder_gives_a_description_only_alert_a_header() {
+        let mut batch = mixed_batch();
+        let alert = batch.trip_updates.entity[0].alert.as_mut().unwrap();
+        alert.header_text = None;
+        alert.description_text = Some(TranslatedString {
+            translation: vec![translated_string::Translation {
+                text: "Delay Notification: As of 11:40 PM ET Train 98 is stopped.".into(),
+                language: Some("en".into()),
+            }],
+        });
+        let candidate = GenerationBuilder::build(
+            static_snapshot(),
+            SelectedBatch {
+                source_name: "fixture",
+                batch,
+            },
+            UNIX_EPOCH,
+        )
+        .unwrap();
+        let alert = candidate.alerts.entity[0].alert.as_ref().unwrap();
+        let header = &alert.header_text.as_ref().unwrap().translation[0];
+        assert_eq!(header.text, "Delay Notification");
+        assert_eq!(header.language.as_deref(), Some("en"));
+        assert_eq!(
+            alert.effect(),
+            gtfs_realtime::alert::Effect::SignificantDelays
+        );
+        CandidateValidator::validate(candidate).unwrap();
     }
 
     #[test]

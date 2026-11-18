@@ -706,6 +706,13 @@ notices list and each linked `/alert/...` detail page. The service GETs those pa
 origin: `header_text` is the list title, and `description_text` is the detail body (effective
 date, paragraphs, and PSN). A missing detail page keeps that alert's title and effective date.
 
+Every published alert has a `header_text`. The per-train alerts from Amtrak's train status (entity
+ids such as `20261117-98`) arrive with only a description, so the service titles each one from the
+description's leading label and the informed trip's train number: `Train 98: Delay Notification`,
+`Train 98: Service Resumption`, or `Train 98 service alert` when there is no label. When every
+notice in the description is a `Delay Notification`, `effect` is `SIGNIFICANT_DELAYS`; otherwise
+it is left unset.
+
 The worker re-renders the notices list on `NOTICES_POLL_INTERVAL_SECS` (default 15 minutes), in a
 fresh browser context in its one Chromium. It samples
 the page HTML until the size is stable and the advisory markup is present, then closes the

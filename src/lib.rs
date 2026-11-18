@@ -4,6 +4,7 @@
 //! generation of TripUpdates, VehiclePositions, and Alerts in memory, supervises the
 //! browser worker, and serves the HTTP API. Combined mode is the only mode.
 
+pub mod alert_header;
 pub mod config;
 pub mod endpoints;
 pub mod fleet_trains;
