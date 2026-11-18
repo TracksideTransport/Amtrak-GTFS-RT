@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Tracks observed while the service runs are added to `static.zip` again. A static snapshot built
+  from the configured platforms alone no longer counts as current once a track is observed, so the
+  rebuild downloads `GTFS.zip` in full instead of accepting a `304`. Before, observed platforms were
+  published only after a fresh start or a new upstream feed. A scheduled rebuild now logs
+  `new track observed; static rebuild scheduled`. (#112)
+
 ## [0.8.0] - 2026-11-18
 
 The first release of the one image: the service, its browser worker with one Chromium, and the

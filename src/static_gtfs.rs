@@ -659,7 +659,11 @@ pub async fn refresh_snapshot_once(
     };
     // A `304` answers for the old platform tables too, so a rebuild for new tables (a newly
     // observed track) must download again; only a refresh that keeps the tables is conditional.
-    let validators = if matches_platforms(&comparison.version, platforms) {
+    // Only the preferred table counts: a snapshot built from a fallback (the configured table,
+    // before any track was observed) still lacks the observed platforms, and a `304` would keep
+    // it that way until Amtrak happens to publish a new feed.
+    let preferred = &platforms[..platforms.len().min(1)];
+    let validators = if matches_platforms(&comparison.version, preferred) {
         state.validators()
     } else {
         None
@@ -790,8 +794,13 @@ async fn run_snapshot_refresh_with(
                 _ = ticker.tick() => {}
                 _ = notify.notified() => {
                     let now = tokio::time::Instant::now();
-                    tokio::time::sleep(platform_refresh_delay(timing, previous_platform_refresh, now))
-                        .await;
+                    let delay = platform_refresh_delay(timing, previous_platform_refresh, now);
+                    tracing::info!(
+                        stage = "static",
+                        delay_secs = delay.as_secs(),
+                        "new track observed; static rebuild scheduled"
+                    );
+                    tokio::time::sleep(delay).await;
                     previous_platform_refresh = Some(tokio::time::Instant::now());
                 }
             }
@@ -1843,6 +1852,55 @@ t,10:00:00,10:00:00,NWK,1\nt,10:30:00,10:30:00,OSM,2\n";
             "{outcome:?}"
         );
         assert_eq!(*requests.lock().unwrap(), vec![None, None]);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn a_snapshot_built_from_the_fallback_table_downloads_the_observed_one() {
+        // #112: the first snapshot is built from the configured table, before anything is
+        // observed. Once a track is observed the candidates are [full, configured]; the
+        // snapshot still matches the fallback, but a 304 must not stop the full table.
+        let (url, requests, server) = conditional_upstream(augmentable_zip("20260927"));
+        let validator = RecordingValidator {
+            seen: Mutex::new(Vec::new()),
+            result: Ok(()),
+        };
+        let configured = PlatformTable::parse("NWK=1").unwrap();
+        let full = PlatformTable::parse("NWK=1,9").unwrap();
+        let state = bootstrap_static(&url, &validator, std::slice::from_ref(&configured))
+            .await
+            .unwrap();
+        assert!(state.validators().is_some());
+        assert!(state
+            .active()
+            .await
+            .version
+            .ends_with(&tracks_version_suffix(&configured)));
+
+        let outcome =
+            refresh_snapshot_once(&state, &url, &validator, &[full.clone(), configured]).await;
+        let expected = format!("20260927{}", tracks_version_suffix(&full));
+        assert_eq!(outcome, StaticRefreshOutcome::Staged(expected));
+        assert!(state
+            .pending()
+            .await
+            .unwrap()
+            .parsed
+            .stops
+            .contains_key("NWK:track:9"));
+        assert_eq!(
+            *requests.lock().unwrap(),
+            vec![None, None],
+            "the rebuild must not send If-None-Match"
+        );
+
+        // Built from the preferred table, the next refresh is conditional again.
+        let outcome = refresh_snapshot_once(&state, &url, &validator, &[full]).await;
+        assert_eq!(outcome, StaticRefreshOutcome::Unchanged);
+        assert_eq!(
+            requests.lock().unwrap().last().cloned().flatten(),
+            Some("\"v1\"".to_string())
+        );
         server.abort();
     }
 
