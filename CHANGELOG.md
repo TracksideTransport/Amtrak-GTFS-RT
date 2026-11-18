@@ -47,6 +47,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   longer claims that a fallback generation keeps the notices: its `alerts.pb` is empty. The bare
   `ASM data successfully downloaded` line each cycle is a `println!` in the pinned
   `amtrak-gtfs-rt` crate and still appears (#110).
+- **Notices survive a fallback generation.** A generation built from `transitdocs-asm` published
+  no station or passenger notices, so they vanished from `alerts.pb` for that cycle. The fallback
+  now shares the Amtrak source's notices cache, so it publishes the same notices without another
+  page fetch. Train-status alerts still come only from the Amtrak source (#110).
 - **The feed set served right after a restart has `match_rate`.** Each generation now stores its
   match rate in `match-rate.txt` beside `manifest.txt`, and recovery reads it, so the manifest
   served from disk matches the live one. `manifest.txt` keeps its exact shape, so 0.8.0 can still

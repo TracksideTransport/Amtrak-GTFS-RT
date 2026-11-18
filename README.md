@@ -690,8 +690,8 @@ left out, so every trip and stop id in the batch resolves against the static fee
 map's per-stop `variance` values (seconds); positions convert mph to metres per second. On the day
 this was written, 82 of 93 live Amtrak trains resolved to a static trip. While the fallback is
 the source, `/v1/feed-set.json` names it (`source: transitdocs-asm`), trips carry no track or gate
-stamps, and `alerts.pb` is empty: the train-status alerts and the merged notices both come with
-the Amtrak source's batch.
+stamps, and `alerts.pb` carries the station and passenger notices (from the same cache the Amtrak
+source uses) but no train-status alerts, which come only with the Amtrak source's batch.
 
 Each cycle that falls back logs a `WARN` line, `primary realtime source failed; falling back`,
 with the Amtrak source's error (a timeout, connection failure, HTTP status, or decode failure,

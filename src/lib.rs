@@ -22,7 +22,7 @@ pub mod writer;
 use crate::config::Config;
 use crate::endpoints::AnnounceFirstGeneration;
 use crate::orchestrator::{GenerationCommitter, StoreGenerationCommitter};
-use crate::sources::advisories::WithAdvisories;
+use crate::sources::advisories::{Notices, WithAdvisories};
 use crate::sources::amtrak::AmtrakSource;
 use crate::sources::tracks::refresher::run_board_refresher;
 use crate::sources::tracks::{AssignmentStore, WithTracks};
@@ -437,7 +437,7 @@ struct TrackWiring {
 /// failure cannot hide an advisory merge, and the published source name stays the inner source's.
 fn realtime_source<S>(
     source: S,
-    advisories: Option<crate::config::AdvisoryConfig>,
+    advisories: Option<Notices>,
     tracks: Option<TrackWiring>,
 ) -> Box<dyn RtSource>
 where
@@ -445,15 +445,15 @@ where
 {
     match (advisories, tracks) {
         (None, None) => Box::new(source),
-        (Some(advisories), None) => Box::new(WithAdvisories::new(source, advisories)),
+        (Some(notices), None) => Box::new(WithAdvisories::sharing(source, notices)),
         (None, Some(tracks)) => Box::new(WithTracks::new(
             source,
             tracks.store,
             tracks.table,
             tracks.max_age,
         )),
-        (Some(advisories), Some(tracks)) => Box::new(WithTracks::new(
-            WithAdvisories::new(source, advisories),
+        (Some(notices), Some(tracks)) => Box::new(WithTracks::new(
+            WithAdvisories::sharing(source, notices),
             tracks.store,
             tracks.table,
             tracks.max_age,
@@ -572,8 +572,10 @@ pub async fn run_combined() -> Result<(), FatalError> {
             "the browser worker is not installed here; Amtrak track numbers and notices fail open"
         );
     }
-    let advisories = advisory_config.enabled.then_some(advisory_config);
-    let banner_advisories = advisories.clone();
+    let banner_advisories = advisory_config.enabled.then(|| advisory_config.clone());
+    // One notices handle, shared by the primary source and the fallback, so a fallback generation
+    // keeps the cached notices instead of publishing none.
+    let notices = banner_advisories.clone().map(Notices::new);
     if track_config.enabled && track_config.amtrak_enabled && track_config.amtrak_url.is_none() {
         tracing::warn!(
             source = "amtrak",
@@ -601,14 +603,15 @@ pub async fn run_combined() -> Result<(), FatalError> {
     let source: Box<dyn RtSource> = if config.filter_capital_corridor {
         realtime_source(
             CapitalCorridorFiltered(AmtrakSource::new()),
-            advisories,
+            notices.clone(),
             tracks,
         )
     } else {
-        realtime_source(AmtrakSource::new(), advisories, tracks)
+        realtime_source(AmtrakSource::new(), notices.clone(), tracks)
     };
     // The fallback runs only when the source above errors or returns an empty batch. Its trips
-    // are not track-stamped and carry no advisories, and the manifest names it as the source.
+    // are not track-stamped, it carries the same cached notices (but no train-status alerts, which
+    // come from the Amtrak source), and the manifest names it as the source.
     let mut chain = vec![source];
     let fallback = crate::config::FallbackConfig::from_env().at_stage(CONFIGURATION)?;
     if let Some(url) = fallback.asm_url {
@@ -616,7 +619,11 @@ pub async fn run_combined() -> Result<(), FatalError> {
             source = sources::asm::SOURCE_NAME,
             "fallback position source on (used only when the Amtrak source fails or is empty)"
         );
-        chain.push(Box::new(sources::asm::AsmSource::new(url)));
+        let asm = sources::asm::AsmSource::new(url);
+        chain.push(match notices {
+            Some(notices) => Box::new(WithAdvisories::sharing(asm, notices)),
+            None => Box::new(asm),
+        });
     }
     let sources: Arc<Vec<Box<dyn RtSource>>> = Arc::new(chain);
     let base_url = endpoints::base_url(config.bind_addr, config.public_url.as_deref());

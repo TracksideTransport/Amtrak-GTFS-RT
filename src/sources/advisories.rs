@@ -31,6 +31,7 @@ use gtfs_realtime::{
 use gtfs_structures::Gtfs;
 use scraper::{Html, Selector};
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 
@@ -46,9 +47,18 @@ struct Cached {
 /// serves the last-good advisories through a transient scrape failure.
 pub struct WithAdvisories<S> {
     inner: S,
+    notices: Notices,
+}
+
+/// The notices page client, its configuration, and the TTL cache.
+///
+/// Clones share one cache, so the primary source and the fallback chain publish the same notices
+/// from at most one page fetch per TTL, and a generation built from the fallback keeps them.
+#[derive(Clone)]
+pub struct Notices {
     client: reqwest::Client,
     config: AdvisoryConfig,
-    cache: Mutex<Option<Cached>>,
+    cache: Arc<Mutex<Option<Cached>>>,
 }
 
 /// Longest one notices request may take, connection to last body byte. The fetch runs inside
@@ -67,25 +77,24 @@ fn advisory_client(timeout: Duration) -> reqwest::Client {
         .unwrap_or_default()
 }
 
-impl<S> WithAdvisories<S> {
-    /// Wraps `inner`, scraping advisories from `config.url` no more than once per `config.ttl`.
-    pub fn new(inner: S, config: AdvisoryConfig) -> Self {
-        Self::with_request_timeout(inner, config, ADVISORY_REQUEST_TIMEOUT)
+impl Notices {
+    /// Scrapes advisories from `config.url` no more than once per `config.ttl`.
+    pub fn new(config: AdvisoryConfig) -> Self {
+        Self::with_request_timeout(config, ADVISORY_REQUEST_TIMEOUT)
     }
 
-    fn with_request_timeout(inner: S, config: AdvisoryConfig, timeout: Duration) -> Self {
+    fn with_request_timeout(config: AdvisoryConfig, timeout: Duration) -> Self {
         Self {
-            inner,
             client: advisory_client(timeout),
             config,
-            cache: Mutex::new(None),
+            cache: Arc::new(Mutex::new(None)),
         }
     }
 
     /// Returns the current advisory alerts, using the cache within the TTL and re-scraping
     /// otherwise. On a scrape that yields nothing (failure or genuinely empty), it serves the
     /// last-good cached set; it never errors.
-    async fn current_advisories(&self, gtfs: &Gtfs) -> Vec<FeedEntity> {
+    async fn current(&self, gtfs: &Gtfs) -> Vec<FeedEntity> {
         let mut guard = self.cache.lock().await;
         if let Some(cached) = guard.as_ref() {
             if cached.fetched_at.elapsed() < self.config.ttl {
@@ -106,6 +115,18 @@ impl<S> WithAdvisories<S> {
     }
 }
 
+impl<S> WithAdvisories<S> {
+    /// Wraps `inner`, scraping advisories from `config.url` no more than once per `config.ttl`.
+    pub fn new(inner: S, config: AdvisoryConfig) -> Self {
+        Self::sharing(inner, Notices::new(config))
+    }
+
+    /// Wraps `inner` with `notices`, whose cache other decorators may share.
+    pub fn sharing(inner: S, notices: Notices) -> Self {
+        Self { inner, notices }
+    }
+}
+
 #[async_trait]
 impl<S: RtSource> RtSource for WithAdvisories<S> {
     fn name(&self) -> &'static str {
@@ -114,7 +135,7 @@ impl<S: RtSource> RtSource for WithAdvisories<S> {
 
     async fn fetch(&self, gtfs: &Gtfs) -> Result<RtBatch, SourceError> {
         let mut batch = self.inner.fetch(gtfs).await?;
-        let mut advisories = self.current_advisories(gtfs).await;
+        let mut advisories = self.notices.current(gtfs).await;
         batch.alerts.entity.append(&mut advisories);
         Ok(batch)
     }
@@ -624,15 +645,12 @@ mod tests {
 
     impl<S> WithAdvisories<S> {
         fn with_primed_cache(inner: S, config: AdvisoryConfig, alerts: Vec<FeedEntity>) -> Self {
-            Self {
-                inner,
-                client: reqwest::Client::new(),
-                config,
-                cache: Mutex::new(Some(Cached {
-                    fetched_at: Instant::now(),
-                    alerts,
-                })),
-            }
+            let notices = Notices::new(config);
+            *notices.cache.try_lock().unwrap() = Some(Cached {
+                fetched_at: Instant::now(),
+                alerts,
+            });
+            Self::sharing(inner, notices)
         }
     }
 
@@ -657,13 +675,12 @@ mod tests {
     #[tokio::test]
     async fn a_stalled_notices_worker_times_out_instead_of_holding_generation() {
         let (url, server) = stalled_server().await;
-        let source = WithAdvisories::with_request_timeout(
+        let source = WithAdvisories::sharing(
             MockSource {
                 name: "amtrak",
                 behavior: Behavior::Ok(asm_batch()),
             },
-            cfg(&url),
-            Duration::from_millis(300),
+            Notices::with_request_timeout(cfg(&url), Duration::from_millis(300)),
         );
         let batch = tokio::time::timeout(Duration::from_secs(5), source.fetch(&gtfs()))
             .await
@@ -673,6 +690,43 @@ mod tests {
         assert_eq!(batch.alerts.entity.len(), 1);
         assert_eq!(batch.alerts.entity[0].id, "asm");
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn the_fallback_publishes_the_primary_s_cached_notices() {
+        // #110: a generation built from the fallback kept no notices, so they vanished from
+        // alerts.pb for that cycle. Both decorators share one cache and one page fetch.
+        let primary = WithAdvisories::with_primed_cache(
+            MockSource {
+                name: "amtrak",
+                behavior: Behavior::Fail,
+            },
+            cfg("http://unused"),
+            vec![entity("adv")],
+        );
+        let fallback = WithAdvisories::sharing(
+            MockSource {
+                name: "transitdocs-asm",
+                behavior: Behavior::Ok(RtBatch {
+                    trip_updates: FeedMessage::default(),
+                    vehicle_positions: FeedMessage::default(),
+                    alerts: FeedMessage::default(),
+                }),
+            },
+            primary.notices.clone(),
+        );
+        assert!(primary.fetch(&gtfs()).await.is_err());
+        let batch = fallback.fetch(&gtfs()).await.unwrap();
+        assert_eq!(fallback.name(), "transitdocs-asm");
+        assert_eq!(
+            batch
+                .alerts
+                .entity
+                .iter()
+                .map(|e| e.id.as_str())
+                .collect::<Vec<_>>(),
+            ["adv"]
+        );
     }
 
     fn cfg(url: &str) -> AdvisoryConfig {
