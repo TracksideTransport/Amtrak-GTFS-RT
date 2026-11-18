@@ -371,16 +371,6 @@ fn cached_bytes(
         .into_response()
 }
 
-fn hex_encode(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        out.push(HEX[(byte >> 4) as usize] as char);
-        out.push(HEX[(byte & 0x0f) as usize] as char);
-    }
-    out
-}
-
 fn http_date(unix: u64) -> String {
     let days = unix / 86_400;
     let seconds = unix % 86_400;
@@ -525,7 +515,7 @@ fn manifest_json(manifest: &FeedSetManifest) -> Value {
         vehicle_positions,
         alerts,
     } = &manifest.urls;
-    json!({
+    let mut value = json!({
         "generation_id": manifest.generation_id.0,
         "generated_at_unix": manifest.generated_at_unix,
         "static_version": manifest.static_version,
@@ -544,7 +534,22 @@ fn manifest_json(manifest: &FeedSetManifest) -> Value {
             "vehicle_positions": vehicle_positions,
             "alerts": alerts,
         }
-    })
+    });
+    // Added for #61: how much of what the source emitted resolved against the static feed. Absent
+    // for a generation recovered from disk, which does not persist it.
+    if let Some(rate) = manifest.match_rate {
+        value["match_rate"] = json!({
+            "trip_updates": {
+                "emitted": rate.trip_updates_emitted,
+                "matched": rate.trip_updates_matched,
+            },
+            "vehicle_positions": {
+                "emitted": rate.vehicle_positions_emitted,
+                "matched": rate.vehicle_positions_matched,
+            },
+        });
+    }
+    value
 }
 
 #[derive(Clone, Copy)]
@@ -936,10 +941,12 @@ mod tests {
             ),
             ("alerts", "alerts.pb", "application/x-protobuf"),
         ];
+        // `match_rate` (#61) is an addition, present for generations this process built.
         const FEED_SET_FIELDS: &[&str] = &[
             "entity_counts",
             "generated_at_unix",
             "generation_id",
+            "match_rate",
             "platform_addon_version",
             "source",
             "static_version",
@@ -1118,6 +1125,22 @@ mod tests {
     }
 
     /// RFC 9110 section 13.1.3: with `If-None-Match` present, `If-Modified-Since` is ignored.
+    /// #61: the manifest reports the match rate for a generation this process built.
+    #[tokio::test]
+    async fn the_manifest_reports_the_match_rate_of_a_built_generation() {
+        let (state, output) = fixture_state("match-rate", 100, Some(100)).await;
+        let app = router(state).layer(MockConnectInfo(SocketAddr::from(([127, 0, 0, 1], 43))));
+        let manifest = body_json(app.oneshot(request("/v1/feed-set.json")).await.unwrap()).await;
+        let rate = &manifest["match_rate"];
+        // The fixture's entity carries no trip update, so the counts are zero; the arithmetic is
+        // pinned by the orchestrator's builder tests.
+        assert!(rate["trip_updates"]["emitted"].is_number());
+        assert!(rate["trip_updates"]["matched"].is_number());
+        assert!(rate["vehicle_positions"]["emitted"].is_number());
+        assert!(rate["vehicle_positions"]["matched"].is_number());
+        std::fs::remove_dir_all(output).unwrap();
+    }
+
     #[tokio::test]
     async fn a_stale_etag_beats_a_newer_if_modified_since() {
         let (state, output) = fixture_state("precedence", 100, Some(100)).await;

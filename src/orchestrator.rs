@@ -101,6 +101,7 @@ pub struct RefreshTelemetry {
     pub static_version: String,
     pub duration_ms: u64,
     pub entity_counts: EntityCounts,
+    pub match_rate: MatchRate,
 }
 
 /// Immutable lookup key assigned when a validated candidate is published.
@@ -143,6 +144,35 @@ pub struct EntityCounts {
     pub alerts: usize,
 }
 
+/// How much of what the source emitted resolved against the static feed, per product.
+///
+/// A source emits a trip update or vehicle position per train it believes it matched to a
+/// scheduled trip. The generation builder keeps only the ones whose trip, route, and stops resolve
+/// against the active static snapshot, so `matched / emitted` falls when the static feed and the
+/// realtime data disagree, for example after an Amtrak schedule change. It is measured here, over
+/// what the source returned: the source crate exposes no count of the raw trains it observed, so a
+/// train it dropped before emitting is not in `emitted`.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct MatchRate {
+    /// Distinct trip-update entities the source emitted.
+    pub trip_updates_emitted: usize,
+    /// Of those, the ones kept after resolving against the static snapshot.
+    pub trip_updates_matched: usize,
+    /// Distinct vehicle-position entities the source emitted.
+    pub vehicle_positions_emitted: usize,
+    /// Of those, the ones kept after resolving against the static snapshot.
+    pub vehicle_positions_matched: usize,
+}
+
+impl MatchRate {
+    /// Whether the match rate is low enough to log a warning: at least ten emitted trip updates
+    /// and fewer than 80% of them matched. Small batches are too noisy to judge.
+    pub fn is_low(&self) -> bool {
+        self.trip_updates_emitted >= 10
+            && self.trip_updates_matched * 100 < self.trip_updates_emitted * 80
+    }
+}
+
 /// Generation-pinned artifact URLs exposed to controlled consumers.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ArtifactUrls {
@@ -166,6 +196,9 @@ pub struct FeedSetManifest {
     pub platform_addon_version: String,
     pub source: String,
     pub entity_counts: EntityCounts,
+    /// Present for a generation built by this process. A generation recovered from disk has none,
+    /// because the on-disk manifest format is unchanged so that a rollback can still read it.
+    pub match_rate: Option<MatchRate>,
     pub urls: ArtifactUrls,
 }
 
@@ -177,6 +210,7 @@ pub struct CandidateGeneration {
     pub trip_updates: FeedMessage,
     pub vehicle_positions: FeedMessage,
     pub alerts: FeedMessage,
+    pub match_rate: MatchRate,
 }
 
 /// A candidate whose three products independently decode and satisfy invariants.
@@ -188,6 +222,7 @@ pub struct ValidatedGeneration {
     pub vehicle_positions: Arc<[u8]>,
     pub alerts: Arc<[u8]>,
     pub entity_counts: EntityCounts,
+    pub match_rate: MatchRate,
 }
 
 impl ValidatedGeneration {
@@ -204,6 +239,7 @@ impl ValidatedGeneration {
             platform_addon_version: self.static_snapshot.addon_version.clone(),
             source: self.source_name.to_string(),
             entity_counts: self.entity_counts,
+            match_rate: Some(self.match_rate),
             urls,
         }
     }
@@ -303,6 +339,9 @@ impl GenerationBuilder {
         let mut trip_ids = HashSet::new();
         let mut vehicle_ids = HashSet::new();
         let mut alert_ids = HashSet::new();
+        // Every distinct trip update or vehicle the source emitted, kept or not.
+        let mut emitted_trip_ids = HashSet::new();
+        let mut emitted_vehicle_ids = HashSet::new();
 
         for entity in selected
             .batch
@@ -312,6 +351,12 @@ impl GenerationBuilder {
             .chain(selected.batch.vehicle_positions.entity)
             .chain(selected.batch.alerts.entity)
         {
+            if entity.trip_update.is_some() {
+                emitted_trip_ids.insert(entity.id.clone());
+            }
+            if entity.vehicle.is_some() {
+                emitted_vehicle_ids.insert(entity.id.clone());
+            }
             if let Some(mut update) = entity.trip_update.clone() {
                 if valid_trip_descriptor(&update.trip, &static_snapshot.parsed) {
                     update.stop_time_update.retain(|stop| {
@@ -377,6 +422,12 @@ impl GenerationBuilder {
             }
         }
 
+        let match_rate = MatchRate {
+            trip_updates_emitted: emitted_trip_ids.len(),
+            trip_updates_matched: trip_updates.entity.len(),
+            vehicle_positions_emitted: emitted_vehicle_ids.len(),
+            vehicle_positions_matched: vehicle_positions.entity.len(),
+        };
         Ok(CandidateGeneration {
             static_snapshot,
             generated_at_unix,
@@ -384,6 +435,7 @@ impl GenerationBuilder {
             trip_updates,
             vehicle_positions,
             alerts,
+            match_rate,
         })
     }
 }
@@ -436,6 +488,7 @@ impl CandidateValidator {
             vehicle_positions: vehicle_positions.0,
             alerts: alerts.0,
             entity_counts,
+            match_rate: candidate.match_rate,
         })
     }
 }
@@ -552,6 +605,7 @@ async fn refresh_generation_once_with(
                 None,
                 &snapshot.version,
                 EntityCounts::default(),
+                MatchRate::default(),
                 started,
             );
         }
@@ -567,11 +621,13 @@ async fn refresh_generation_once_with(
                 None,
                 &snapshot.version,
                 EntityCounts::default(),
+                MatchRate::default(),
                 started,
             );
         }
     };
     let counts = validated.entity_counts;
+    let match_rate = validated.match_rate;
     if counts == EntityCounts::default() {
         return finish_refresh(
             "failure",
@@ -580,6 +636,7 @@ async fn refresh_generation_once_with(
             None,
             &snapshot.version,
             counts,
+            match_rate,
             started,
         );
     }
@@ -593,6 +650,7 @@ async fn refresh_generation_once_with(
                 None,
                 &snapshot.version,
                 counts,
+                match_rate,
                 started,
             );
         }
@@ -607,10 +665,15 @@ async fn refresh_generation_once_with(
         Some(published.id.clone()),
         &snapshot.version,
         counts,
+        match_rate,
         started,
     )
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "each failure stage reports the same telemetry fields; a wrapper struct would only move the list"
+)]
 fn finish_refresh(
     outcome: &'static str,
     stage: RefreshStage,
@@ -618,6 +681,7 @@ fn finish_refresh(
     generation_id: Option<GenerationId>,
     static_version: &str,
     entity_counts: EntityCounts,
+    match_rate: MatchRate,
     started: Instant,
 ) -> RefreshTelemetry {
     let telemetry = RefreshTelemetry {
@@ -628,6 +692,7 @@ fn finish_refresh(
         static_version: static_version.to_owned(),
         duration_ms: started.elapsed().as_millis().min(u64::MAX as u128) as u64,
         entity_counts,
+        match_rate,
     };
     if outcome == "success" {
         tracing::info!(
@@ -643,8 +708,22 @@ fn finish_refresh(
             trip_updates = telemetry.entity_counts.trip_updates,
             vehicle_positions = telemetry.entity_counts.vehicle_positions,
             alerts = telemetry.entity_counts.alerts,
+            trip_updates_matched = telemetry.match_rate.trip_updates_matched,
+            trip_updates_emitted = telemetry.match_rate.trip_updates_emitted,
+            vehicle_positions_matched = telemetry.match_rate.vehicle_positions_matched,
+            vehicle_positions_emitted = telemetry.match_rate.vehicle_positions_emitted,
             "realtime refresh"
         );
+        if telemetry.match_rate.is_low() {
+            tracing::warn!(
+                source = telemetry.source.unwrap_or("none"),
+                static_version = telemetry.static_version,
+                trip_updates_matched = telemetry.match_rate.trip_updates_matched,
+                trip_updates_emitted = telemetry.match_rate.trip_updates_emitted,
+                "low match rate: fewer than 80% of the source's trip updates resolve against the \
+                 static feed; the static and realtime data may disagree (a schedule change?)"
+            );
+        }
     } else {
         tracing::warn!(
             outcome = telemetry.outcome,
@@ -1301,6 +1380,74 @@ mod tests {
         CandidateValidator::validate(candidate).unwrap();
     }
 
+    /// #61: the builder reports how many of the source's entities resolved against the static feed.
+    #[test]
+    fn builder_reports_emitted_versus_matched() {
+        let all_match = GenerationBuilder::build(
+            static_snapshot(),
+            SelectedBatch {
+                source_name: "fixture",
+                batch: mixed_batch(),
+            },
+            UNIX_EPOCH,
+        )
+        .unwrap();
+        let rate = all_match.match_rate;
+        assert!(rate.trip_updates_emitted >= 1);
+        assert_eq!(rate.trip_updates_matched, rate.trip_updates_emitted);
+        assert_eq!(
+            rate.vehicle_positions_matched,
+            rate.vehicle_positions_emitted
+        );
+        assert!(!rate.is_low());
+
+        // A schedule change: the source still emits the train, but its trip is gone from static.
+        let mut batch = mixed_batch();
+        let entity = &mut batch.trip_updates.entity[0];
+        entity.trip_update.as_mut().unwrap().trip.trip_id = Some("gone".into());
+        if let Some(vehicle) = entity.vehicle.as_mut() {
+            vehicle.trip.as_mut().unwrap().trip_id = Some("gone".into());
+        }
+        let candidate = GenerationBuilder::build(
+            static_snapshot(),
+            SelectedBatch {
+                source_name: "fixture",
+                batch,
+            },
+            UNIX_EPOCH,
+        )
+        .unwrap();
+        let rate = candidate.match_rate;
+        assert_eq!(
+            rate.trip_updates_emitted,
+            all_match.match_rate.trip_updates_emitted
+        );
+        assert_eq!(rate.trip_updates_matched, 0);
+        assert_eq!(rate.vehicle_positions_matched, 0);
+    }
+
+    #[test]
+    fn a_low_match_rate_needs_enough_trains_to_judge() {
+        let few = MatchRate {
+            trip_updates_emitted: 5,
+            trip_updates_matched: 0,
+            ..MatchRate::default()
+        };
+        assert!(!few.is_low(), "five trains are too few to judge");
+        let drop = MatchRate {
+            trip_updates_emitted: 100,
+            trip_updates_matched: 79,
+            ..MatchRate::default()
+        };
+        assert!(drop.is_low());
+        let fine = MatchRate {
+            trip_updates_emitted: 100,
+            trip_updates_matched: 80,
+            ..MatchRate::default()
+        };
+        assert!(!fine.is_low());
+    }
+
     #[test]
     fn builder_omits_unmatched_invalid_geometry_and_empty_alerts() {
         let mut batch = mixed_batch();
@@ -1741,6 +1888,7 @@ mod tests {
             static_version: "STATIC-V1".into(),
             duration_ms: 12,
             entity_counts: EntityCounts::default(),
+            match_rate: MatchRate::default(),
         };
         let debug = format!("{telemetry:?}");
         for field in [
