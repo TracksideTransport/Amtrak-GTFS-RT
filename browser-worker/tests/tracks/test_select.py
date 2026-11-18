@@ -3,6 +3,7 @@
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
+from worker.tracks.lead_time import LeadProfile, StationWindow
 from worker.tracks.select import choose_fetches, due_trains, is_hot
 
 EASTERN = ZoneInfo("America/New_York")
@@ -188,7 +189,7 @@ def test_arizona_stops_keep_standard_time_through_summer():
 
 
 def test_the_fleet_train_list_is_read_like_the_map_feed():
-    # VehiclePositions writes amtrak-fleet-trains/v1 so TripUpdates never polls getTrainsData.
+    # The service writes amtrak-fleet-trains/v1 so the worker never polls getTrainsData.
     soon = int((NOW + timedelta(minutes=12)).timestamp())
     far = int((NOW + timedelta(hours=3)).timestamp())
     document = {
@@ -204,3 +205,58 @@ def test_the_fleet_train_list_is_read_like_the_map_feed():
     assert [(train.train_number, train.service_date) for train in due] == [("163", "2026-10-17")]
     assert due[0].upcoming == frozenset({"NHV"})
     assert due[0].next_secs == 12 * 60
+
+
+def _fleet(*stops):
+    return {
+        "schema": "amtrak-fleet-trains/v1",
+        "trains": [
+            {
+                "train_number": "167",
+                "service_date": "2026-10-17",
+                "stops": [
+                    {"code": code, "times_unix": [int((NOW + timedelta(seconds=secs)).timestamp())]}
+                    for code, secs in stops
+                ],
+            }
+        ],
+    }
+
+
+def _due_with_profile(document):
+    # PVD has a tighter 3-minute hot window; NHV and NLC keep the global 12 minutes.
+    lead = LeadProfile({"PVD": StationWindow(window_before_secs=1800, hot_window_secs=180)})
+    return due_trains(document, NOW, before=BEFORE, after=AFTER, lead=lead, hot=timedelta(minutes=12))
+
+
+def test_a_global_station_inside_its_window_is_hot_beside_a_tighter_profile_station():
+    # NHV is 400 s out (inside the global 720 s); PVD is 500 s out (outside its own 180 s).
+    (train,) = _due_with_profile(_fleet(("NHV", 400), ("PVD", 500)))
+    assert is_hot(train, {}, 12 * 60)
+
+
+def test_a_profile_station_inside_its_own_window_is_hot_beside_a_later_global_station():
+    (train,) = _due_with_profile(_fleet(("PVD", 120), ("NLC", 1500)))
+    assert is_hot(train, {}, 12 * 60)
+
+
+def test_a_profile_station_outside_its_own_window_is_not_hot():
+    # Without the profile, PVD 300 s out would be inside the global 12-minute window.
+    (train,) = _due_with_profile(_fleet(("PVD", 300), ("NLC", 1500)))
+    assert not is_hot(train, {}, 12 * 60)
+
+
+def test_a_hinted_train_skips_the_cooldown_and_goes_first():
+    # The service already spaced train hints by AMTRAK_TRACKS_MIN_GAP_SECS, so a hint that lands
+    # 60 s after the last fetch is acted on instead of being consumed and lost.
+    left = _feature("66", "10/17/2026 3:00:00 PM", [_station("PVD", schdep="10/17/2026 16:58:00")])
+    other = _feature("67", "10/17/2026 3:00:00 PM", [_station("PVD", schdep="10/17/2026 16:57:00")])
+    due = _due([left, other])
+    hinted_key = next(train.key for train in due if train.train_number == "66")
+    fetched = {hinted_key: NOW.timestamp() - 60}
+    picks = choose_fetches(
+        due, fetched, NOW, hot_secs=720, cooldown_secs=90, max_fetches=1, hinted={hinted_key}
+    )
+    assert [train.train_number for train in picks] == ["66"]
+    unhinted = choose_fetches(due, fetched, NOW, hot_secs=720, cooldown_secs=90, max_fetches=24)
+    assert [train.train_number for train in unhinted] == ["67"]

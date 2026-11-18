@@ -119,7 +119,7 @@ Only `amtrak-gtfs-rt` remains as a published package. Everything else that dupli
 | `trip-updates.Dockerfile`, `alerts.Dockerfile`, `track-fetcher/Dockerfile`, `advisory-fetcher/Dockerfile`, their `docker-bake.hcl` targets | Deleted. The root `Dockerfile` builds the one image. | Split removal and release PRs |
 | `src/roles.rs`, `src/cohort.rs`, `AMTRAK_ROLE`, fleet and contribution snapshots | Deleted. Combined mode is the only mode. | Split removal |
 | `track-fetcher/` and `advisory-fetcher/` as separate packages, and the vendored harness copies | Merged into one worker package, `browser-worker/`. One package needs no vendored harness (#59) | Worker PR (#73) |
-| Rust `lead_time.rs`/`schedule.rs` vs Python `schedule.py` | Python stays, Rust copy deleted (#66) | Scheduler PR |
+| Rust `lead_time.rs`/`schedule.rs` vs Python `schedule.py` | One owner per concern (#66): the worker's poller keeps the base and hot schedule and the lead-time profile, and Rust's `lead_time.rs` and `base_due` are deleted; the service keeps request debouncing, the minimum gap, and the per-flush cap, and Python's `schedule.py` is deleted | Scheduler PR |
 | `scripts/test-compose-stack.sh`, `scripts/test-fetcher-image.sh`, CI's fetcher-image matrix | Replaced by one image smoke test on amd64 and arm64 | Split removal |
 | Compose services `vehicle-positions`, `trip-updates`, `alerts` | One service, `amtrak-gtfs-rt`, the same name v0.7.1 used | Image PR |
 | Optional Caddy proxy (`--profile proxy`) | Kept as an optional profile. It adds TLS, gzip, and a rate limit, and nothing else covers that. It stays a local build. | No change |

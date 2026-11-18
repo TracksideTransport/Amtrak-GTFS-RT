@@ -336,7 +336,7 @@ A directory of hourly snapshots, merged each morning. `merge` on a directory rea
 
 `suggested_window_before_secs` is the longest measured lead, plus 10 percent (at least a minute), rounded up to a minute, and clamped between 10 minutes and 12 hours. It is null when that lead is zero or negative: the stamp is not before the event, which is common for a train that has already arrived, and `compared_to_default` is then `unknown`. It is `wider` when the suggestion is longer than the global 1800 seconds and `covered` when the tracks already show up inside that global window. `suggested_hot_window_secs` widens past 720 only when the median chosen lead is 15 minutes or less.
 
-`AMTRAK_TRACKS_LEAD_TIME_FILE` points at this file. The Rust loader and `worker/tracks/lead_time.py` apply it the same way:
+`AMTRAK_TRACKS_LEAD_TIME_FILE` points at this file. `worker/tracks/lead_time.py` applies it, and a file that is missing, unreadable, or has another `schema` logs a warning and leaves every station on the global windows:
 
 1. Adopt a station only when `confidence` is `observed` and `compared_to_default` is `wider`. That station's lookahead becomes `suggested_window_before_secs`, and its hot window becomes `suggested_hot_window_secs` when that value is a positive integer.
 2. Leave `sparse` stations on the global windows even when their suggestion is `wider`. Three measurable leads are required before a station changes the poll.
