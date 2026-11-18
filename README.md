@@ -766,10 +766,12 @@ flowchart TD
   stop -.->|"trip update assigned_stop_id"| t1
 ```
 
-Nothing else in Amtrak's feed changes, and the other files are copied byte-for-byte (after the
-[stop-reference repair](#validation-gate), when one applies). The published
-static version becomes `{feed_version}+tracks.{digest}`, where the digest changes only when the
-platform list changes. The augmented bytes go through the same MobilityData validator gate; if
+The published static version becomes `{feed_version}+tracks.{digest}`, where the digest changes
+only when the platform list changes. `feed_info.txt`'s `feed_version` carries the same value, so it
+matches the `feed_version` in every GTFS-Realtime header, as the reference requires;
+`official-static.zip` keeps Amtrak's own version. Nothing else in Amtrak's feed changes, and the
+other files are copied byte-for-byte (after the [stop-reference repair](#validation-gate), when one
+applies). The augmented bytes go through the same MobilityData validator gate; if
 augmentation fails or is rejected, Amtrak's feed is published unchanged and no tracks are stamped.
 The only new validator notice is a `stop_without_stop_time` warning per platform stop, because no
 scheduled trip calls at a platform directly.

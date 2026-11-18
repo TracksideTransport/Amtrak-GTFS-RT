@@ -1,5 +1,7 @@
 use crate::orchestrator::StaticSnapshot;
-use crate::static_augment::{augment_static, PlatformTable, SharedPlatforms};
+use crate::static_augment::{
+    augment_static, tracks_version_suffix, PlatformTable, SharedPlatforms, TRACKS_VERSION_MARKER,
+};
 use crate::static_repair::repair_static;
 use async_trait::async_trait;
 use gtfs_structures::Gtfs;
@@ -378,12 +380,6 @@ async fn augmented_snapshot(
     Some(snapshot)
 }
 
-const TRACKS_VERSION_MARKER: &str = "+tracks.";
-
-fn tracks_version_suffix(table: &PlatformTable) -> String {
-    format!("{TRACKS_VERSION_MARKER}{}", table.digest())
-}
-
 /// Whether a snapshot `version` was built for the current track configuration: augmented with
 /// one of the candidate `tables` when tracks are on, and not augmented when there are none.
 pub fn matches_platforms(version: &str, tables: &[PlatformTable]) -> bool {
@@ -397,8 +393,9 @@ pub fn matches_platforms(version: &str, tables: &[PlatformTable]) -> bool {
 
 /// Parses retained bytes into a snapshot whose version is `feed_version` plus `suffix`.
 ///
-/// Augmentation leaves `feed_info.txt` untouched, so the `+tracks.{digest}` suffix is applied here
-/// rather than read from the feed; versionless feeds get a generated identifier first.
+/// Augmentation already appends the `+tracks.{digest}` suffix to a non-empty
+/// `feed_info.feed_version`, so it is added here only when the feed's version lacks it; versionless
+/// feeds get a generated identifier first.
 fn snapshot_from_bytes(
     zip: Arc<[u8]>,
     now: SystemTime,
@@ -413,11 +410,11 @@ fn snapshot_from_bytes(
         .find(|version| !version.trim().is_empty())
         .map(str::to_owned)
         .unwrap_or_else(|| fallback_snapshot_version(now));
-    Ok(StaticSnapshot::identical(
-        format!("{version}{}", suffix.unwrap_or_default()),
-        Arc::new(parsed),
-        zip,
-    ))
+    let version = match suffix {
+        Some(suffix) if !version.ends_with(suffix) => format!("{version}{suffix}"),
+        _ => version,
+    };
+    Ok(StaticSnapshot::identical(version, Arc::new(parsed), zip))
 }
 
 /// Records the untouched download and the overlay that rebuilds `snapshot.zip`.
@@ -1425,6 +1422,15 @@ t,10:00:00,10:00:00,NWK,1\nt,10:30:00,10:30:00,OSM,2\n";
             format!("20260927+tracks.{}", table.digest())
         );
         assert!(snapshot.parsed.stops.contains_key("NWK:track:2"));
+        // The published static.zip names the same version the realtime headers carry (#108),
+        // while official-static.zip keeps Amtrak's.
+        assert_eq!(
+            snapshot.parsed.feed_info[0].version.as_deref(),
+            Some(snapshot.version.as_str())
+        );
+        let official = Gtfs::from_reader(Cursor::new(snapshot.official_zip.clone())).unwrap();
+        assert_eq!(official.feed_info[0].version.as_deref(), Some("20260927"));
+        assert_eq!(snapshot.official_zip.as_ref(), upstream.as_slice());
         assert_ne!(snapshot.zip.as_ref(), upstream.as_slice());
         {
             let seen = validator.seen.lock().unwrap();
