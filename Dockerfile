@@ -232,6 +232,8 @@ RUN ! LD_LIBRARY_PATH=/opt/java/lib/server ldd /opt/java/bin/java /opt/java/lib/
         /opt/java/lib/server/*.so 2>/dev/null | grep 'not found' \
     && /opt/java/bin/java -version
 
+# COPY --chmod would create /licenses itself as 0444, which an unprivileged user cannot traverse.
+RUN install -d -m 0755 /licenses
 COPY --from=builder --chmod=0555 /out/amtrak-gtfs-rt-service /usr/local/bin/amtrak-gtfs-rt-service
 RUN ldd /usr/local/bin/amtrak-gtfs-rt-service 2>&1 | grep -Eq 'statically linked|not a dynamic executable'
 COPY --from=validator --chmod=0444 \
@@ -239,6 +241,9 @@ COPY --from=validator --chmod=0444 \
     /opt/amtrak/gtfs-validator-v8.0.1-amtrak-hardened.1-cli.jar
 COPY --chmod=0444 container/licenses/AGPL-3.0-only.txt /licenses/AGPL-3.0-only.txt
 COPY --chmod=0444 THIRD_PARTY_LICENSES.html /licenses/THIRD_PARTY_LICENSES.html
+COPY --chmod=0444 container/licenses/NOTICES.md /licenses/NOTICES.md
+# The validator's own license, from the exact source the JAR is built from.
+COPY --from=validator --chmod=0444 /build/validator/LICENSE /licenses/gtfs-validator-LICENSE
 COPY --chmod=u=rwX,go=rX browser-worker/worker/ /app/worker/
 
 LABEL org.opencontainers.image.title="Amtrak GTFS-RT" \

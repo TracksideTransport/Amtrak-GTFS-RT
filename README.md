@@ -53,18 +53,17 @@ flowchart LR
 
 ## Release and deployment status
 
-- **Source:** `main` contains the Rust service, the Playwright `advisory-fetcher` (with advisory
-  detail text in `alerts.pb`), the `track-fetcher` sidecar for Amtrak's own track numbers, the
-  `amtrak-status` station and train CLI, root-level Compose and Bake packaging, and live track and
-  platform assignments, with Amtrak's boarding gates (on by default; `AMTRAK_TRACKS=off` turns
-  them off). Changes merged after a release are
+- **Source:** `main` contains the Rust service, the one browser worker (Amtrak's track numbers
+  and boarding gates, and advisory detail text in `alerts.pb`), the `amtrak-status` station and
+  train CLI, root-level Compose and Bake packaging for the one image, and live track and platform
+  assignments (on by default; `AMTRAK_TRACKS=off` turns them off). Changes merged after a release are
   listed under **Unreleased** in [CHANGELOG.md](CHANGELOG.md).
 - **Releases:** `v0.7.1` (2026-10-21) is the current release. A release is complete when its
   GitHub Release carries `image-release.txt` with the tag, revisions, manifest digest, and both
-  platform digests; until then, `v0.6.2` stays the stable image. Through `v0.6.2` the release
-  workflow publishes the service image only. From `v0.7.0` a release publishes all three images:
-  the service, track-fetcher, and advisory-fetcher. `image-release.txt` records the sidecar
-  digests after the service's. Pull the version tag, and pin the manifest digest from that
+  platform digests; until then, `v0.7.1` stays the stable image. `v0.7.0` and `v0.7.1` also
+  published `amtrak-gtfs-rt-track-fetcher` and `amtrak-gtfs-rt-advisory-fetcher`. Those two are
+  deprecated and get no further releases: the next release publishes only `amtrak-gtfs-rt`, which
+  contains the browser worker. Pull the version tag, and pin the manifest digest from that
   release's `image-release.txt`:
 
   ```bash
@@ -211,32 +210,20 @@ without a registry login:
 docker pull ghcr.io/sohampatwardhan/amtrak-gtfs-rt:0.7.1
 ```
 
-From `v0.7.0` the two browser sidecars are released beside it, for the same platforms and with the
-same tags (`0.7.1`, `0.7`, and `latest`) and OCI labels:
+`amtrak-gtfs-rt` is the only package this repository publishes. The next release (the one image,
+built from the root `Dockerfile`) contains the service, the browser worker, and the validator, so
+there is nothing else to pull. `docker compose pull` fetches it, and `image-release.txt` records
+its manifest digest and both platform digests.
 
-| Image | Built from |
-|-------|------------|
-| `ghcr.io/sohampatwardhan/amtrak-gtfs-rt` | root `Dockerfile`, `runtime` stage (scratch) |
-| `ghcr.io/sohampatwardhan/amtrak-gtfs-rt-track-fetcher` | [`browser-worker/`](browser-worker/README.md), target `track-fetcher` |
-| `ghcr.io/sohampatwardhan/amtrak-gtfs-rt-advisory-fetcher` | [`browser-worker/`](browser-worker/README.md), target `advisory-fetcher` |
-
-Pull all three, on a Raspberry Pi or any other host; Docker picks the native architecture:
-
-```bash
-for image in amtrak-gtfs-rt amtrak-gtfs-rt-track-fetcher amtrak-gtfs-rt-advisory-fetcher; do
-  docker pull "ghcr.io/sohampatwardhan/${image}:0.7.1"
-done
-```
-
-The [Compose stack](#compose-stack) names these images, so `docker compose pull` fetches them.
-Each sidecar's digests are in `image-release.txt`, after the service's.
-
-> [!NOTE]
-> GHCR creates a new package as private. After the first release that publishes the sidecars,
-> a maintainer sets `amtrak-gtfs-rt-track-fetcher` and `amtrak-gtfs-rt-advisory-fetcher` to
-> public once (the package's **Package settings**, then **Change visibility**). Until then,
-> pulling them needs `docker login ghcr.io`. Each package links to this repository through its
-> `org.opencontainers.image.source` label.
+> [!WARNING]
+> **Deprecated:** `ghcr.io/sohampatwardhan/amtrak-gtfs-rt-track-fetcher` and
+> `ghcr.io/sohampatwardhan/amtrak-gtfs-rt-advisory-fetcher` (published with `v0.7.0` and
+> `v0.7.1`) are replaced by the browser worker inside `amtrak-gtfs-rt`. They receive no new
+> versions. Remove the `track-fetcher` and `advisory-fetcher` services and any
+> `AMTRAK_TRACKS_AMTRAK_URL` or `AMTRAK_ADVISORIES_URL` that points at them; see
+> [Upgrading from the three-container layout](#upgrading-from-the-three-container-layout). A
+> maintainer unlinks and deletes the two packages after the first one-image release, once the owner
+> confirms; deleting a package cannot be undone.
 
 > [!TIP]
 > `latest` is a convenience pointer that can move. For reproducible production deployment, pin the
@@ -312,8 +299,7 @@ The [Compose stack](#compose-stack) adds the hardening defaults: read-only root 
 `docker build --build-arg BROWSER_BUNDLE=full` adds full Chromium and Xvfb for
 `BROWSER_MODE=xvfb-headful`, the fallback if Amtrak blocks the headless shell.
 
-[`docker-bake.hcl`](docker-bake.hcl) still builds the two standalone fetcher images until they
-are retired (#74). The `service` target is this image.
+[`docker-bake.hcl`](docker-bake.hcl) builds this one image (`docker buildx bake`).
 
 ### Health, readiness, manifest, and artifacts
 
@@ -431,17 +417,17 @@ only then assembles the public version tags. The final multi-platform digest rec
 attestation. The GitHub Release records that digest and attaches per-platform SPDX SBOMs,
 vulnerability reports, and license evidence. No release workflow deploys a running service.
 
-The two sidecar images go through the same flow, built natively on amd64 and arm64 runners. Each
-platform digest must pass an offline smoke test (OCI labels and architecture, Chromium rendering a
-page under the Compose confinement, `/healthz`, and a prompt exit on `SIGTERM`) and the fixable
-Critical and High policy above. No image's version tags are created until every gate on every
-image and platform has passed. Recovering a release tagged before `v0.7.0` publishes the service
-image alone, as before.
+The one image is built natively on amd64 and arm64 runners and must pass the container smoke test
+and the fixable Critical and High policy above on both platforms before any version tag is
+created. The release workflow no longer builds or publishes the two fetcher images. Recovering a
+tag that published them (`v0.7.0`, `v0.7.1`) is not supported, because their images and release
+evidence are already complete.
 
-The project is licensed `AGPL-3.0-only`. The complete project license and generated Rust
-third-party notices are available inside every released image at `/licenses/`, in the repository,
-and as GitHub Release assets. The minimized Java runtime and validator JAR retain their own legal
-notices. OCI labels identify the exact source repository, revision, version, and project license.
+The project is licensed `AGPL-3.0-only`. The complete project license, generated Rust
+third-party notices, and `/licenses/NOTICES.md` (which says where the license text of every other
+component lives: the validator, the Java runtime, Debian packages, Python and its packages, and
+Chromium) are available inside every released image, in the repository, and as GitHub Release
+assets. `scripts/verify-release-image.sh` fails a release whose image is missing any of them. OCI labels identify the exact source repository, revision, version, and project license.
 
 > [!NOTE]
 > Still out of scope: anonymous public exposure of a running feed service, reverse-proxy or
@@ -458,7 +444,7 @@ Compose plugin installed, from a checkout of the release tag:
 ```bash
 git clone --branch v0.7.1 https://github.com/sohampatwardhan/Amtrak-GTFS-RT.git
 cd Amtrak-GTFS-RT
-docker compose pull   # amtrak-gtfs-rt, -track-fetcher, and -advisory-fetcher at 0.7.1
+docker compose pull   # amtrak-gtfs-rt at 0.7.1
 docker compose up -d
 ```
 
