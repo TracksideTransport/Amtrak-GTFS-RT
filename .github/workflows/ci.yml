@@ -117,6 +117,13 @@ jobs:
       - name: Offline smoke test
         run: scripts/test-image-offline.sh amtrak-gtfs-rt:ci amtrak-gtfs-rt:ci-full
 
+      # The release's contract check: OCI labels, runtime config, and the license notices for
+      # everything in the image. Unreleased builds carry the Dockerfile's dev/unknown labels.
+      - name: Release contract and license notices
+        run: |
+          scripts/verify-release-image.sh amtrak-gtfs-rt:ci dev unknown ${{ matrix.arch }}
+          scripts/verify-release-image.sh amtrak-gtfs-rt:ci-full dev unknown ${{ matrix.arch }}
+
   workflow-lint:
     name: Workflow lint (actionlint)
     runs-on: ubuntu-24.04
