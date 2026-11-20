@@ -361,6 +361,7 @@ pub struct GenerationBuilder;
 
 impl GenerationBuilder {
     /// Partitions payloads, filters unresolved references, and stamps one header.
+    /// It also fills each unset `schedule_relationship` (see [`crate::schedule_relationship`]).
     ///
     /// `is_deleted` is removed because deletion semantics are invalid for the
     /// selected `FULL_DATASET` incrementality. Unmatched references are omitted
@@ -484,6 +485,11 @@ impl GenerationBuilder {
                     });
                 }
             }
+        }
+
+        // #101: after every source and rewrite, an unset relationship is written as SCHEDULED.
+        for message in [&mut trip_updates, &mut vehicle_positions, &mut alerts] {
+            crate::schedule_relationship::make_explicit(message);
         }
 
         let match_rate = MatchRate {
@@ -2004,6 +2010,237 @@ mod tests {
             &trip,
             &snapshot.parsed
         ));
+    }
+
+    /// #101: whatever reaches the builder, every published trip and stop says what it is. Unset
+    /// values become `SCHEDULED`; `SKIPPED`, `NO_DATA` and a `CANCELED` trip are kept; a route-only
+    /// alert selector gets no trip.
+    #[test]
+    fn builder_makes_every_schedule_relationship_explicit() {
+        use gtfs_realtime::trip_descriptor::ScheduleRelationship as Trip;
+        use gtfs_realtime::trip_update::stop_time_update::{
+            ScheduleRelationship as Stop, StopTimeProperties,
+        };
+
+        let mut batch = mixed_batch();
+        let alert = batch.trip_updates.entity[0].alert.as_mut().unwrap();
+        alert.informed_entity.push(EntitySelector {
+            route_id: Some("route".into()),
+            trip: Some(descriptor()),
+            ..Default::default()
+        });
+        let only_stop = |stop: trip_update::StopTimeUpdate| FeedEntity {
+            trip_update: Some(TripUpdate {
+                trip: descriptor(),
+                stop_time_update: vec![stop],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        batch.trip_updates.entity.push(FeedEntity {
+            id: "skipped".into(),
+            ..only_stop(trip_update::StopTimeUpdate {
+                stop_sequence: Some(1),
+                schedule_relationship: Some(Stop::Skipped as i32),
+                ..Default::default()
+            })
+        });
+        batch.trip_updates.entity.push(FeedEntity {
+            id: "no-data".into(),
+            ..only_stop(trip_update::StopTimeUpdate {
+                stop_sequence: Some(1),
+                schedule_relationship: Some(Stop::NoData as i32),
+                stop_time_properties: Some(StopTimeProperties {
+                    assigned_stop_id: Some("platform".into()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            })
+        });
+        batch.trip_updates.entity.push(FeedEntity {
+            id: "canceled".into(),
+            trip_update: Some(TripUpdate {
+                trip: TripDescriptor {
+                    schedule_relationship: Some(Trip::Canceled as i32),
+                    ..descriptor()
+                },
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+
+        let candidate = GenerationBuilder::build(
+            static_snapshot(),
+            SelectedBatch {
+                source_name: "fixture",
+                batch,
+            },
+            UNIX_EPOCH,
+        )
+        .unwrap();
+        let validated = CandidateValidator::validate(candidate).unwrap();
+        let decode = |bytes: &[u8]| FeedMessage::decode(bytes).unwrap();
+
+        let trip_updates = decode(&validated.trip_updates);
+        let relationships: Vec<_> = trip_updates
+            .entity
+            .iter()
+            .map(|entity| {
+                let update = entity.trip_update.as_ref().unwrap();
+                (
+                    entity.id.as_str(),
+                    update.trip.schedule_relationship,
+                    update
+                        .stop_time_update
+                        .iter()
+                        .map(|stop| stop.schedule_relationship)
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .collect();
+        let scheduled = Some(Trip::Scheduled as i32);
+        assert_eq!(
+            relationships,
+            vec![
+                ("mixed", scheduled, vec![Some(Stop::Scheduled as i32)]),
+                ("skipped", scheduled, vec![Some(Stop::Skipped as i32)]),
+                ("no-data", scheduled, vec![Some(Stop::NoData as i32)]),
+                ("canceled", Some(Trip::Canceled as i32), vec![]),
+            ]
+        );
+
+        let positions = decode(&validated.vehicle_positions);
+        let trip = positions.entity[0].vehicle.as_ref().unwrap().trip.as_ref();
+        assert_eq!(trip.unwrap().schedule_relationship, scheduled);
+
+        let alerts = decode(&validated.alerts);
+        let selectors = &alerts.entity[0].alert.as_ref().unwrap().informed_entity;
+        assert_eq!(selectors.len(), 2);
+        assert_eq!(
+            selectors[0].trip, None,
+            "a route-only selector gets no trip"
+        );
+        assert_eq!(
+            selectors[1].trip.as_ref().unwrap().schedule_relationship,
+            scheduled
+        );
+    }
+
+    /// #101: semantic validation reads an unset stop relationship as `SCHEDULED`, so writing
+    /// `SCHEDULED` out changes no verdict, on the stop or on whether an update may be empty.
+    #[test]
+    fn explicit_scheduled_gives_the_same_verdicts_as_unset() {
+        use gtfs_realtime::trip_descriptor::ScheduleRelationship as Trip;
+        use gtfs_realtime::trip_update::stop_time_update::{
+            ScheduleRelationship as Stop, StopTimeProperties,
+        };
+
+        let snapshot = static_snapshot();
+        let event = Some(gtfs_realtime::trip_update::StopTimeEvent {
+            delay: Some(60),
+            ..Default::default()
+        });
+        let empty_event = Some(gtfs_realtime::trip_update::StopTimeEvent::default());
+        let assigned = |id: &str| {
+            Some(StopTimeProperties {
+                assigned_stop_id: Some(id.into()),
+                ..Default::default()
+            })
+        };
+        let base = trip_update::StopTimeUpdate::default;
+        let stops = [
+            trip_update::StopTimeUpdate {
+                stop_id: Some("stop".into()),
+                arrival: event,
+                ..base()
+            },
+            trip_update::StopTimeUpdate {
+                stop_sequence: Some(1),
+                departure: event,
+                ..base()
+            },
+            trip_update::StopTimeUpdate {
+                stop_sequence: Some(2),
+                stop_id: Some("stop".into()),
+                arrival: event,
+                ..base()
+            },
+            trip_update::StopTimeUpdate {
+                stop_sequence: Some(1),
+                ..base()
+            },
+            trip_update::StopTimeUpdate {
+                stop_sequence: Some(1),
+                arrival: empty_event,
+                ..base()
+            },
+            trip_update::StopTimeUpdate {
+                stop_sequence: Some(1),
+                arrival: event,
+                stop_time_properties: assigned("platform"),
+                ..base()
+            },
+            trip_update::StopTimeUpdate {
+                stop_sequence: Some(1),
+                stop_time_properties: assigned("platform"),
+                ..base()
+            },
+            trip_update::StopTimeUpdate {
+                stop_sequence: Some(1),
+                arrival: event,
+                stop_time_properties: assigned("elsewhere"),
+                ..base()
+            },
+        ];
+        // The explicit form is what the builder writes: each update goes through the real fill,
+        // which gives an unset stop SCHEDULED, or UNSCHEDULED under an UNSCHEDULED trip.
+        let trips = [
+            (None, Stop::Scheduled),
+            (Some(Trip::Unscheduled as i32), Stop::Unscheduled),
+        ];
+        let mut verdicts = HashSet::new();
+        for (trip_relationship, filled_stop) in trips {
+            let unset_descriptor = TripDescriptor {
+                schedule_relationship: trip_relationship,
+                ..descriptor()
+            };
+            let unset_update = TripUpdate {
+                trip: unset_descriptor.clone(),
+                stop_time_update: stops.to_vec(),
+                ..Default::default()
+            };
+            let mut message = FeedMessage {
+                entity: vec![FeedEntity {
+                    id: "update".into(),
+                    trip_update: Some(unset_update.clone()),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            };
+            crate::schedule_relationship::make_explicit(&mut message);
+            let explicit_update = message.entity[0].trip_update.take().unwrap();
+            assert!(explicit_update.trip.schedule_relationship.is_some());
+            for (stop, explicit) in stops.iter().zip(&explicit_update.stop_time_update) {
+                assert_eq!(explicit.schedule_relationship, Some(filled_stop as i32));
+                let unset_verdict =
+                    valid_stop_time_update(stop, &unset_descriptor, &snapshot.parsed);
+                assert_eq!(
+                    valid_stop_time_update(explicit, &explicit_update.trip, &snapshot.parsed),
+                    unset_verdict,
+                    "{stop:?}"
+                );
+                verdicts.insert(unset_verdict);
+            }
+            let empty = |update: &TripUpdate| TripUpdate {
+                stop_time_update: Vec::new(),
+                ..update.clone()
+            };
+            assert_eq!(
+                trip_update_allows_empty(&empty(&explicit_update)),
+                trip_update_allows_empty(&empty(&unset_update))
+            );
+        }
+        assert_eq!(verdicts.len(), 2, "the cases cover both verdicts");
     }
 
     struct RejectCommitter;

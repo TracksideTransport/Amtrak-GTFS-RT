@@ -104,19 +104,10 @@ mod tests {
         assert_eq!(batch.alerts.entity.len(), 2);
     }
 
-    /// #100: one train, as the crate encodes it (one unified entity copied into each product, no
-    /// descriptor), carries the same `vehicle.id` on its trip update and its vehicle position, and
-    /// the builder keeps both.
-    #[test]
-    fn both_products_carry_the_same_vehicle_id_for_one_train() {
-        use crate::orchestrator::{GenerationBuilder, SelectedBatch, StaticSnapshot};
-        use gtfs_realtime::trip_update::{StopTimeEvent, StopTimeUpdate};
-        use gtfs_realtime::{
-            FeedEntity, FeedMessage, Position, TripDescriptor, TripUpdate, VehiclePosition,
-        };
+    /// The static feed for the one train these tests build: 172, trip 320135, on 2026-11-19.
+    fn train_snapshot() -> std::sync::Arc<crate::orchestrator::StaticSnapshot> {
         use std::io::{Cursor, Write};
         use std::sync::Arc;
-        use std::time::{Duration, UNIX_EPOCH};
 
         let mut archive = zip::ZipWriter::new(Cursor::new(Vec::new()));
         for (name, contents) in [
@@ -134,6 +125,22 @@ mod tests {
         }
         let zip = archive.finish().unwrap().into_inner();
         let gtfs = Gtfs::from_reader(Cursor::new(zip.clone())).unwrap();
+        Arc::new(crate::orchestrator::StaticSnapshot::identical(
+            "STATIC-V1",
+            Arc::new(gtfs),
+            Arc::from(zip),
+        ))
+    }
+
+    /// Train 172 as the crate encodes it: one unified entity, no vehicle descriptor and no
+    /// `schedule_relationship` anywhere. With `alert`, it also carries a train-status alert as the
+    /// crate builds one: a description only, informed by the train's route and trip.
+    fn unified_train(alert: bool) -> gtfs_realtime::FeedEntity {
+        use gtfs_realtime::trip_update::{StopTimeEvent, StopTimeUpdate};
+        use gtfs_realtime::{
+            translated_string, Alert, EntitySelector, FeedEntity, Position, TranslatedString,
+            TripDescriptor, TripUpdate, VehiclePosition,
+        };
 
         let trip = TripDescriptor {
             trip_id: Some("320135".into()),
@@ -141,7 +148,7 @@ mod tests {
             start_date: Some("20261119".into()),
             ..Default::default()
         };
-        let unified = FeedEntity {
+        FeedEntity {
             id: "20261119-172".into(),
             trip_update: Some(TripUpdate {
                 trip: trip.clone(),
@@ -157,7 +164,7 @@ mod tests {
                 ..Default::default()
             }),
             vehicle: Some(VehiclePosition {
-                trip: Some(trip),
+                trip: Some(trip.clone()),
                 position: Some(Position {
                     latitude: 40.75,
                     longitude: -73.99,
@@ -165,30 +172,60 @@ mod tests {
                 }),
                 ..Default::default()
             }),
+            alert: alert.then(|| Alert {
+                description_text: Some(TranslatedString {
+                    translation: vec![translated_string::Translation {
+                        text: "Delay Notification: Train 172 is stopped.".into(),
+                        language: Some("en".into()),
+                    }],
+                }),
+                informed_entity: vec![EntitySelector {
+                    route_id: trip.route_id.clone(),
+                    trip: Some(trip),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }),
             ..Default::default()
-        };
-        let message = FeedMessage {
-            entity: vec![unified],
-            ..Default::default()
-        };
+        }
+    }
+
+    /// Builds one generation from the crate's `trip_updates`, `vehicle_positions` and `alerts`
+    /// through the primary source's conversion and the real builder.
+    fn build_from_crate(
+        trip_updates: FeedMessage,
+        vehicle_positions: FeedMessage,
+        alerts: FeedMessage,
+    ) -> crate::orchestrator::CandidateGeneration {
+        use crate::orchestrator::{GenerationBuilder, SelectedBatch};
+        use std::time::{Duration, UNIX_EPOCH};
+
         let batch = batch_from_results(amtrak_gtfs_rt::GtfsAmtrakResults {
-            trip_updates: message.clone(),
-            vehicle_positions: message,
-            alerts: FeedMessage::default(),
+            trip_updates,
+            vehicle_positions,
+            alerts,
         });
-        let candidate = GenerationBuilder::build(
-            Arc::new(StaticSnapshot::identical(
-                "STATIC-V1",
-                Arc::new(gtfs),
-                Arc::from(zip),
-            )),
+        GenerationBuilder::build(
+            train_snapshot(),
             SelectedBatch {
                 source_name: "amtrak",
                 batch,
             },
             UNIX_EPOCH + Duration::from_secs(1_800_000_000),
         )
-        .unwrap();
+        .unwrap()
+    }
+
+    /// #100: one train, as the crate encodes it (one unified entity copied into each product, no
+    /// descriptor), carries the same `vehicle.id` on its trip update and its vehicle position, and
+    /// the builder keeps both.
+    #[test]
+    fn both_products_carry_the_same_vehicle_id_for_one_train() {
+        let message = FeedMessage {
+            entity: vec![unified_train(false)],
+            ..Default::default()
+        };
+        let candidate = build_from_crate(message.clone(), message, FeedMessage::default());
         let update = candidate.trip_updates.entity[0]
             .trip_update
             .as_ref()
@@ -202,6 +239,49 @@ mod tests {
             assert_eq!(vehicle.id.as_deref(), Some("20261119-172"));
             assert_eq!(vehicle.label.as_deref(), Some("172"));
         }
+    }
+
+    /// #101: the crate sets no `schedule_relationship` on a scheduled train. The published trip
+    /// update, its stops, the vehicle position and the train-status alert's trip all say
+    /// `SCHEDULED`, and the generation still validates.
+    #[test]
+    fn a_primary_train_is_explicitly_scheduled_in_every_product() {
+        use crate::orchestrator::CandidateValidator;
+        use gtfs_realtime::trip_descriptor::ScheduleRelationship as Trip;
+        use gtfs_realtime::trip_update::stop_time_update::ScheduleRelationship as Stop;
+        use prost::Message;
+
+        let message = FeedMessage {
+            entity: vec![unified_train(true)],
+            ..Default::default()
+        };
+        let candidate = build_from_crate(message.clone(), message.clone(), message);
+        let validated = CandidateValidator::validate(candidate).unwrap();
+        let decode = |bytes: &[u8]| FeedMessage::decode(bytes).unwrap();
+
+        let trip_updates = decode(&validated.trip_updates);
+        let update = trip_updates.entity[0].trip_update.as_ref().unwrap();
+        assert_eq!(
+            update.trip.schedule_relationship,
+            Some(Trip::Scheduled as i32)
+        );
+        assert_eq!(
+            update.stop_time_update[0].schedule_relationship,
+            Some(Stop::Scheduled as i32)
+        );
+        let positions = decode(&validated.vehicle_positions);
+        let position = positions.entity[0].vehicle.as_ref().unwrap();
+        assert_eq!(
+            position.trip.as_ref().unwrap().schedule_relationship,
+            Some(Trip::Scheduled as i32)
+        );
+        let alerts = decode(&validated.alerts);
+        assert_eq!(alerts.entity.len(), 1);
+        let selector = &alerts.entity[0].alert.as_ref().unwrap().informed_entity[0];
+        assert_eq!(
+            selector.trip.as_ref().unwrap().schedule_relationship,
+            Some(Trip::Scheduled as i32)
+        );
     }
 
     #[test]

@@ -16,6 +16,11 @@
 //! code, not from the fixture. The example checks that both products carry the same `vehicle.id`,
 //! and the script fails if the realtime validator reports W002 (`vehicle_id` not populated).
 //!
+//! Like the crate, the fixture sets no `schedule_relationship`, and its train carries a train-status
+//! alert informed by its trip (a description only, as the crate builds one). The service writes
+//! `SCHEDULED` where the value is unset (#101), so the example checks it on every product, and the
+//! script fails if the realtime validator reports W009 (`schedule_relationship` not populated).
+//!
 //! The batch stamps `assigned_stop_id` the way the track source does (`stop_sequence` set, `stop_id`
 //! cleared), so platform and gate stops are exercised. The fixture has none of the live-data
 //! mismatches behind the entries in `validation/baseline.json`, so the validators must report zero
@@ -30,7 +35,10 @@ use amtrak_gtfs_rt_service::orchestrator::{
 };
 use amtrak_gtfs_rt_service::sources::amtrak::batch_from_results;
 use amtrak_gtfs_rt_service::static_augment::{augment_static, PlatformTable};
-use gtfs_realtime::trip_update::stop_time_update::StopTimeProperties;
+use gtfs_realtime::trip_descriptor::ScheduleRelationship as TripRelationship;
+use gtfs_realtime::trip_update::stop_time_update::{
+    ScheduleRelationship as StopRelationship, StopTimeProperties,
+};
 use gtfs_realtime::trip_update::{StopTimeEvent, StopTimeUpdate};
 use gtfs_realtime::{
     alert, translated_string, Alert, EntitySelector, FeedEntity, FeedMessage, Position, TimeRange,
@@ -111,8 +119,9 @@ fn text(value: &str) -> TranslatedString {
     }
 }
 
-/// The unified entity the primary crate emits: one train, with its update and its position, under
-/// its per-train-day id and with no vehicle descriptor.
+/// The unified entity the primary crate emits: one train, with its update, its position and its
+/// train-status alert, under its per-train-day id, with no vehicle descriptor and no
+/// `schedule_relationship`.
 fn train(now: u64, start_date: &str) -> FeedEntity {
     let trip = TripDescriptor {
         trip_id: Some("fixture-123".into()),
@@ -158,7 +167,7 @@ fn train(now: u64, start_date: &str) -> FeedEntity {
             ..Default::default()
         }),
         vehicle: Some(VehiclePosition {
-            trip: Some(trip),
+            trip: Some(trip.clone()),
             position: Some(Position {
                 latitude: 40.75,
                 longitude: -73.99,
@@ -167,6 +176,18 @@ fn train(now: u64, start_date: &str) -> FeedEntity {
                 ..Default::default()
             }),
             timestamp: Some(now),
+            ..Default::default()
+        }),
+        // The crate's train-status alert: no header, informed by the train's route and trip.
+        alert: Some(Alert {
+            informed_entity: vec![EntitySelector {
+                route_id: trip.route_id.clone(),
+                trip: Some(trip),
+                ..Default::default()
+            }],
+            description_text: Some(text(
+                "Delay Notification: As of 8:05 AM ET Train 123 is operating 2 minutes late.",
+            )),
             ..Default::default()
         }),
         ..Default::default()
@@ -251,7 +272,9 @@ fn main() {
     let mut alerts = FeedMessage::default();
     let entity = train(now, &start_date);
     trip_updates.entity.push(entity.clone());
-    vehicle_positions.entity.push(entity);
+    vehicle_positions.entity.push(entity.clone());
+    // The crate puts each train's alert entity, the same unified entity, in its alerts product.
+    alerts.entity.push(entity);
     alerts.entity.push(advisory(now));
     // The primary source's conversion sets each train's vehicle descriptor.
     let batch = batch_from_results(amtrak_gtfs_rt::GtfsAmtrakResults {
@@ -280,7 +303,7 @@ fn main() {
         1,
         "vehicle was dropped"
     );
-    assert_eq!(candidate.alerts.entity.len(), 1, "alert was dropped");
+    assert_eq!(candidate.alerts.entity.len(), 2, "an alert was dropped");
     // #100: the train's trip update and its position carry the same vehicle id, its per-train-day
     // id, and the train number as the label.
     let train_day = format!("{start_date}-123");
@@ -307,6 +330,45 @@ fn main() {
             Some("123"),
             "{product} vehicle.label"
         );
+    }
+    // #101: the crate sets no schedule_relationship; the service writes SCHEDULED on the train's
+    // trip in each product and on each of its stops.
+    let scheduled = Some(TripRelationship::Scheduled as i32);
+    let update = candidate.trip_updates.entity[0]
+        .trip_update
+        .as_ref()
+        .expect("trip update");
+    assert_eq!(
+        update.trip.schedule_relationship, scheduled,
+        "trip update trip"
+    );
+    for stop in &update.stop_time_update {
+        assert_eq!(
+            stop.schedule_relationship,
+            Some(StopRelationship::Scheduled as i32),
+            "stop {:?}",
+            stop.stop_sequence
+        );
+    }
+    let position_trip = candidate.vehicle_positions.entity[0]
+        .vehicle
+        .as_ref()
+        .and_then(|position| position.trip.as_ref())
+        .expect("vehicle position trip");
+    assert_eq!(
+        position_trip.schedule_relationship, scheduled,
+        "vehicle position trip"
+    );
+    let alert_trips: Vec<_> = candidate
+        .alerts
+        .entity
+        .iter()
+        .flat_map(|entity| &entity.alert.as_ref().expect("alert").informed_entity)
+        .filter_map(|selector| selector.trip.as_ref())
+        .collect();
+    assert_eq!(alert_trips.len(), 1, "the train-status alert's trip");
+    for trip in alert_trips {
+        assert_eq!(trip.schedule_relationship, scheduled, "alert trip");
     }
     // Neither validator checks this: every stamped platform is a stop in the augmented feed, under
     // the same parent station as the stop it replaces.

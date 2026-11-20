@@ -10,6 +10,7 @@ pub mod endpoints;
 pub mod fleet_trains;
 pub mod orchestrator;
 pub mod schedule;
+pub mod schedule_relationship;
 pub mod serve;
 pub mod sources;
 pub mod static_addon;
