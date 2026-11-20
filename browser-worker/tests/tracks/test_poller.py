@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import logging
 import threading
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -17,7 +18,9 @@ from worker.tracks.poller import (
     BrowserUnavailable,
     ResidentBrowser,
     StatusMiss,
+    TrainListNotReady,
     document_from_eval,
+    load_train_list_file,
     load_trains,
     poll_once,
     run_forever,
@@ -423,6 +426,65 @@ def test_missing_train_list_file_fails_the_cycle_without_polling(tmp_path, monke
     monkeypatch.setattr("urllib.request.urlopen", no_network)
     with pytest.raises(OSError):
         asyncio.run(_default_trains(Config()))
+
+
+def _run_with_train_list(path, monkeypatch, caplog):
+    monkeypatch.setenv("AMTRAK_OUTPUT_DIR", str(path.parent))
+    monkeypatch.setenv("AMTRAK_FLEET_TRAINS_FILE", str(path))
+
+    def no_network(*_args, **_kwargs):
+        raise AssertionError("the embedded poller must not GET getTrainsData")
+
+    monkeypatch.setattr("urllib.request.urlopen", no_network)
+    store = TrackStore(started_at=0)
+    with caplog.at_level(logging.INFO, logger="worker.tracks.poller"):
+        asyncio.run(
+            run_forever(
+                store,
+                Config(),
+                status_fetcher=_status_for([]),
+                sleep=_no_sleep,
+                clock=lambda: NOW,
+                iterations=1,
+            )
+        )
+    return store, [r for r in caplog.records if r.name == "worker.tracks.poller"]
+
+
+def test_a_cold_start_without_a_train_list_logs_one_info_line_and_no_traceback(
+    tmp_path, monkeypatch, caplog
+):
+    store, records = _run_with_train_list(tmp_path / "fleet-trains.json", monkeypatch, caplog)
+    assert [(r.levelno, r.getMessage()) for r in records] == [
+        (logging.INFO, "waiting for the service's first train list")
+    ]
+    assert records[0].exc_info is None
+    assert store.consecutive_failures() == 1  # not a success; the next tick retries
+
+
+@pytest.mark.parametrize(
+    "body",
+    ["{not json", "[]", json.dumps({"schema": "amtrak-fleet-trains/v0", "trains": []})],
+    ids=["not-json", "not-an-object", "wrong-schema"],
+)
+def test_an_existing_but_unusable_train_list_is_still_an_error(
+    tmp_path, monkeypatch, caplog, body
+):
+    path = tmp_path / "fleet-trains.json"
+    path.write_text(body, encoding="utf-8")
+    _store, records = _run_with_train_list(path, monkeypatch, caplog)
+    assert [r.levelno for r in records] == [logging.ERROR]
+    assert records[0].getMessage() == "track poll failed; keeping the last snapshot"
+    with pytest.raises(ValueError):
+        load_train_list_file(str(path))
+
+
+def test_an_unreadable_train_list_is_an_error_not_a_cold_start(tmp_path):
+    with pytest.raises(TrainListNotReady):
+        load_train_list_file(str(tmp_path / "absent.json"))
+    with pytest.raises(OSError) as raised:
+        load_train_list_file(str(tmp_path))  # a directory: exists, cannot be read as a file
+    assert not isinstance(raised.value, TrainListNotReady)
 
 
 def test_a_cycle_without_a_train_list_retries_the_full_poll_on_the_next_tick(monkeypatch):

@@ -24,11 +24,11 @@ from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlsplit
 
-from ..browser import LAUNCH_ARGS, Lease, SharedBrowser
+from ..browser import LAUNCH_ARGS, Lease, SharedBrowser, describe_error
 from .config import Config
 from .decrypt import DecryptError, decrypt_payload
 from .lead_time import LeadProfile
-from .select import DueTrain, choose_fetches, due_trains, is_hot
+from .select import FLEET_TRAINS_SCHEMA, DueTrain, choose_fetches, due_trains, is_hot
 from .store import TrackStore
 
 logger = logging.getLogger(__name__)
@@ -63,6 +63,14 @@ class BrowserUnavailable(Exception):
 
 class StatusMiss(Exception):
     """Amtrak answered, but not with a usable status document. The message is the reason."""
+
+
+class _FirstLoadFailed(Exception):
+    """The browser and its page are up, but the first navigation to the status page failed."""
+
+    def __init__(self, error: Exception) -> None:
+        super().__init__(type(error).__name__)
+        self.error = error
 
 
 TrainsFetcher = Callable[[Config], Awaitable[dict]]
@@ -114,15 +122,27 @@ def load_trains(cfg: Config) -> dict:
     return parsed
 
 
+class TrainListNotReady(FileNotFoundError):
+    """The service has not written its first train list yet. Expected on a cold start."""
+
+
 def load_train_list_file(path: str) -> dict:
     """The ``amtrak-fleet-trains/v1`` list the one-container service writes after each generation.
 
-    Raises ``OSError`` until the service has published its first generation; the cycle is retried.
+    Raises :class:`TrainListNotReady` until the service has published its first generation; the
+    cycle is retried on the next tick. A file that exists but cannot be read raises ``OSError``,
+    one that is not JSON or not an ``amtrak-fleet-trains/v1`` object raises ``ValueError``.
     """
-    with open(path, encoding="utf-8") as handle:
-        parsed = json.loads(handle.read())
+    try:
+        with open(path, encoding="utf-8") as handle:
+            text = handle.read()
+    except FileNotFoundError:
+        raise TrainListNotReady("the service has not written its first train list yet") from None
+    parsed = json.loads(text)
     if not isinstance(parsed, dict):
         raise ValueError("fleet train list is not an object")
+    if parsed.get("schema") != FLEET_TRAINS_SCHEMA:
+        raise ValueError(f"fleet train list schema is not {FLEET_TRAINS_SCHEMA}")
     return parsed
 
 
@@ -185,7 +205,7 @@ class ResidentBrowser:
                 page.evaluate(_FETCH_JS, [url, timeout * 1000]), timeout + 5
             )
         except Exception as error:  # noqa: BLE001 — a dead renderer or hung request
-            await self._failed(f"status fetch failed: {type(error).__name__}")
+            await self._failed(f"status fetch failed: {describe_error(error)}")
             raise BrowserUnavailable(type(error).__name__) from None
         self._backoff = 0.0
         return document_from_eval(raw)
@@ -224,8 +244,12 @@ class ResidentBrowser:
             raise BrowserUnavailable("relaunch backoff")
         try:
             page = await self._launch()
-        except Exception as error:  # noqa: BLE001 — launch or first page load failed
-            await self._failed(f"browser launch failed: {type(error).__name__}")
+        except _FirstLoadFailed as failure:
+            # The browser launched; the status page did not load (blocked, offline, timed out).
+            await self._failed(f"first status page load failed: {describe_error(failure.error)}")
+            raise BrowserUnavailable(type(failure.error).__name__) from None
+        except Exception as error:  # noqa: BLE001 — the browser, its context, or its page
+            await self._failed(f"browser launch failed: {describe_error(error)}")
             raise BrowserUnavailable(type(error).__name__) from None
         self._launched_at = now
         self._page = page
@@ -249,11 +273,14 @@ class ResidentBrowser:
         page = await context.new_page()
         # domcontentloaded lets the site's first-party scripts set their cookies before the
         # first status call; "commit" returned before they ran.
-        await page.goto(
-            cfg.page_url,
-            wait_until="domcontentloaded",
-            timeout=cfg.nav_timeout_secs * 1000,
-        )
+        try:
+            await page.goto(
+                cfg.page_url,
+                wait_until="domcontentloaded",
+                timeout=cfg.nav_timeout_secs * 1000,
+            )
+        except Exception as error:  # noqa: BLE001 — reported apart from a launch failure
+            raise _FirstLoadFailed(error) from error
         return page
 
 
@@ -436,6 +463,11 @@ async def run_forever(
                     status_fetcher=status,
                     full=full,
                 )
+            except TrainListNotReady:
+                # A cold start: the service publishes its first generation shortly. Not a failure.
+                logger.info("waiting for the service's first train list")
+                succeeded = False
+                raised = True
             except Exception:  # noqa: BLE001 — a failed cycle must not crash the worker
                 logger.exception("track poll failed; keeping the last snapshot")
                 succeeded = False

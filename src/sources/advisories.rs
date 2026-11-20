@@ -31,7 +31,8 @@ use gtfs_realtime::{
 use gtfs_structures::Gtfs;
 use scraper::{Html, Selector};
 use std::collections::HashMap;
-use std::time::Instant;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 
 /// Cached advisory alerts plus the instant they were fetched, for TTL reuse.
@@ -42,30 +43,60 @@ struct Cached {
 
 /// An [`RtSource`] decorator that appends best-effort scoped advisory alerts to the inner source's
 /// batch. It is strictly **additive and fail-open**: the inner batch (and its errors) pass through
-/// unchanged, and advisory scraping never fails the `fetch`. A TTL cache bounds page fetches and
-/// serves the last-good advisories through a transient scrape failure.
+/// unchanged, and advisory scraping never fails the `fetch`. An empty inner batch is returned empty,
+/// so notices never stand in for a source that returned nothing and the chain still falls back. A
+/// TTL cache bounds page fetches and serves the last-good advisories through a transient scrape
+/// failure.
 pub struct WithAdvisories<S> {
     inner: S,
-    client: reqwest::Client,
-    config: AdvisoryConfig,
-    cache: Mutex<Option<Cached>>,
+    notices: Notices,
 }
 
-impl<S> WithAdvisories<S> {
-    /// Wraps `inner`, scraping advisories from `config.url` no more than once per `config.ttl`.
-    pub fn new(inner: S, config: AdvisoryConfig) -> Self {
+/// The notices page client, its configuration, and the TTL cache.
+///
+/// Clones share one cache, so the primary source and the fallback chain publish the same notices
+/// from at most one page fetch per TTL, and a generation built from the fallback keeps them.
+#[derive(Clone)]
+pub struct Notices {
+    client: reqwest::Client,
+    config: AdvisoryConfig,
+    cache: Arc<Mutex<Option<Cached>>>,
+}
+
+/// Longest one notices request may take, connection to last body byte. The fetch runs inside
+/// generation assembly and holds the cache lock, so a worker that accepted a connection and then
+/// stalled would otherwise hold up every feed, and notices must fail open.
+const ADVISORY_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Longest wait for the notices connection itself.
+const ADVISORY_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+
+fn advisory_client(timeout: Duration) -> reqwest::Client {
+    reqwest::Client::builder()
+        .connect_timeout(ADVISORY_CONNECT_TIMEOUT.min(timeout))
+        .timeout(timeout)
+        .build()
+        .unwrap_or_default()
+}
+
+impl Notices {
+    /// Scrapes advisories from `config.url` no more than once per `config.ttl`.
+    pub fn new(config: AdvisoryConfig) -> Self {
+        Self::with_request_timeout(config, ADVISORY_REQUEST_TIMEOUT)
+    }
+
+    fn with_request_timeout(config: AdvisoryConfig, timeout: Duration) -> Self {
         Self {
-            inner,
-            client: reqwest::Client::new(),
+            client: advisory_client(timeout),
             config,
-            cache: Mutex::new(None),
+            cache: Arc::new(Mutex::new(None)),
         }
     }
 
     /// Returns the current advisory alerts, using the cache within the TTL and re-scraping
     /// otherwise. On a scrape that yields nothing (failure or genuinely empty), it serves the
     /// last-good cached set; it never errors.
-    async fn current_advisories(&self, gtfs: &Gtfs) -> Vec<FeedEntity> {
+    async fn current(&self, gtfs: &Gtfs) -> Vec<FeedEntity> {
         let mut guard = self.cache.lock().await;
         if let Some(cached) = guard.as_ref() {
             if cached.fetched_at.elapsed() < self.config.ttl {
@@ -86,6 +117,18 @@ impl<S> WithAdvisories<S> {
     }
 }
 
+impl<S> WithAdvisories<S> {
+    /// Wraps `inner`, scraping advisories from `config.url` no more than once per `config.ttl`.
+    pub fn new(inner: S, config: AdvisoryConfig) -> Self {
+        Self::sharing(inner, Notices::new(config))
+    }
+
+    /// Wraps `inner` with `notices`, whose cache other decorators may share.
+    pub fn sharing(inner: S, notices: Notices) -> Self {
+        Self { inner, notices }
+    }
+}
+
 #[async_trait]
 impl<S: RtSource> RtSource for WithAdvisories<S> {
     fn name(&self) -> &'static str {
@@ -94,7 +137,12 @@ impl<S: RtSource> RtSource for WithAdvisories<S> {
 
     async fn fetch(&self, gtfs: &Gtfs) -> Result<RtBatch, SourceError> {
         let mut batch = self.inner.fetch(gtfs).await?;
-        let mut advisories = self.current_advisories(gtfs).await;
+        // Notices ride on a batch; they do not stand in for one. An inner source that returned
+        // nothing stays empty so the chain falls back to the next source.
+        if batch.is_empty() {
+            return Ok(batch);
+        }
+        let mut advisories = self.notices.current(gtfs).await;
         batch.alerts.entity.append(&mut advisories);
         Ok(batch)
     }
@@ -604,16 +652,114 @@ mod tests {
 
     impl<S> WithAdvisories<S> {
         fn with_primed_cache(inner: S, config: AdvisoryConfig, alerts: Vec<FeedEntity>) -> Self {
-            Self {
-                inner,
-                client: reqwest::Client::new(),
-                config,
-                cache: Mutex::new(Some(Cached {
-                    fetched_at: Instant::now(),
-                    alerts,
-                })),
-            }
+            let notices = Notices::new(config);
+            *notices.cache.try_lock().unwrap() = Some(Cached {
+                fetched_at: Instant::now(),
+                alerts,
+            });
+            Self::sharing(inner, notices)
         }
+    }
+
+    /// A loopback server that accepts each connection, reads the request, and never answers.
+    async fn stalled_server() -> (String, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let mut buffer = [0_u8; 1024];
+                let _ = tokio::io::AsyncReadExt::read(&mut stream, &mut buffer).await;
+                held.push(stream);
+            }
+        });
+        (
+            format!("http://{address}/service-alerts-and-notices"),
+            server,
+        )
+    }
+
+    #[tokio::test]
+    async fn a_stalled_notices_worker_times_out_instead_of_holding_generation() {
+        let (url, server) = stalled_server().await;
+        let source = WithAdvisories::sharing(
+            MockSource {
+                name: "amtrak",
+                behavior: Behavior::Ok(asm_batch()),
+            },
+            Notices::with_request_timeout(cfg(&url), Duration::from_millis(300)),
+        );
+        let batch = tokio::time::timeout(Duration::from_secs(5), source.fetch(&gtfs()))
+            .await
+            .expect("a stalled notices request must not hold the fetch")
+            .unwrap();
+        // Fail open: the inner batch passes through without notices.
+        assert_eq!(batch.alerts.entity.len(), 1);
+        assert_eq!(batch.alerts.entity[0].id, "asm");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn the_fallback_publishes_the_primary_s_cached_notices() {
+        // #110: a generation built from the fallback kept no notices, so they vanished from
+        // alerts.pb for that cycle. Both decorators share one cache and one page fetch.
+        let primary = WithAdvisories::with_primed_cache(
+            MockSource {
+                name: "amtrak",
+                behavior: Behavior::Fail,
+            },
+            cfg("http://unused"),
+            vec![entity("adv")],
+        );
+        let fallback = WithAdvisories::sharing(
+            MockSource {
+                name: "transitdocs-asm",
+                behavior: Behavior::Ok(crate::sources::mock::batch_with(1)),
+            },
+            primary.notices.clone(),
+        );
+        assert!(primary.fetch(&gtfs()).await.is_err());
+        let batch = fallback.fetch(&gtfs()).await.unwrap();
+        assert_eq!(fallback.name(), "transitdocs-asm");
+        assert_eq!(
+            batch
+                .alerts
+                .entity
+                .iter()
+                .map(|e| e.id.as_str())
+                .collect::<Vec<_>>(),
+            ["adv"]
+        );
+    }
+
+    /// Cached notices do not turn a source that returned nothing into a non-empty batch, so an
+    /// empty Amtrak answer still falls back (and is warned) instead of publishing a generation
+    /// with notices and no trains.
+    #[tokio::test]
+    async fn notices_do_not_make_an_empty_source_non_empty() {
+        let primary = WithAdvisories::with_primed_cache(
+            MockSource {
+                name: "amtrak",
+                behavior: Behavior::Empty,
+            },
+            cfg("http://unused"),
+            vec![entity("adv")],
+        );
+        assert!(primary.fetch(&gtfs()).await.unwrap().is_empty());
+
+        let fallback = WithAdvisories::sharing(
+            MockSource {
+                name: "transitdocs-asm",
+                behavior: Behavior::Ok(crate::sources::mock::batch_with(1)),
+            },
+            primary.notices.clone(),
+        );
+        let chain: Vec<Box<dyn RtSource>> = vec![Box::new(primary), Box::new(fallback)];
+        let selected = crate::orchestrator::select_batch(&chain, &gtfs())
+            .await
+            .unwrap();
+        assert_eq!(selected.source_name, "transitdocs-asm");
+        assert_eq!(selected.batch.alerts.entity.len(), 1, "notices kept");
     }
 
     fn cfg(url: &str) -> AdvisoryConfig {

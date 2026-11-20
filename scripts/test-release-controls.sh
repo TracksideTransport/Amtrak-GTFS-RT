@@ -317,4 +317,18 @@ if [ -n "$REAL_DOCKER" ] && "$REAL_DOCKER" compose version >/dev/null 2>&1; then
     || fail 'docker-compose.yml alone must run only the amtrak-gtfs-rt service by default'
 fi
 
+# validation-reports/ is run output that CI uploads as an artifact (#102). A tracked file there
+# is overwritten by every scripts/validate-feeds.sh run and ships beside that run's reports, so
+# nothing under it may be tracked, and the files the script writes must stay ignored.
+git -C "$ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1 \
+  || fail 'the release-control tests need a git checkout of the repository'
+tracked_reports="$(git -C "$ROOT" ls-files -- validation-reports)"
+[ -z "$tracked_reports" ] \
+  || fail "validation-reports/ is run output, but git tracks: $(printf '%s' "$tracked_reports" | tr '\n' ' ')"
+for report in validation-reports/release-evidence.json validation-reports/release-decision.json \
+  validation-reports/container/sbom.spdx.json; do
+  git -C "$ROOT" check-ignore -q --no-index -- "$report" \
+    || fail "$report is not ignored, so a validation run would leave the checkout dirty"
+done
+
 printf 'release-control tests passed\n'

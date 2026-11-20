@@ -192,9 +192,10 @@ source returned) and `matched` (the ones that resolved against the generation's 
 fall in `matched / emitted` is the earliest sign that the static and realtime data disagree, for
 example after an Amtrak schedule change; the service also logs both numbers every cycle and warns
 when fewer than 80% of at least ten trip updates match. It is measured over what the source
-returned, because the source crate exposes no count of the raw trains it observed. A generation
-recovered from disk after a restart has no `match_rate` until the next one is built, since it is
-not stored in the on-disk manifest. Consumers that ignore unknown keys are unaffected.
+returned, because the source crate exposes no count of the raw trains it observed. It is stored
+with each generation (`match-rate.txt`, beside the unchanged manifest), so the feed set served
+from disk right after a restart carries it too. Only a generation written by 0.8.0 or earlier,
+before that file existed, has no `match_rate`. Consumers that ignore unknown keys are unaffected.
 
 `static.zip` is still the feed to load if you want one file. It is the official zip plus the
 platform add-on. `assigned_stop_id` values such as `NYP:track:21` exist only in that combined
@@ -743,7 +744,12 @@ left out, so every trip and stop id in the batch resolves against the static fee
 map's per-stop `variance` values (seconds); positions convert mph to metres per second. On the day
 this was written, 82 of 93 live Amtrak trains resolved to a static trip. While the fallback is
 the source, `/v1/feed-set.json` names it (`source: transitdocs-asm`), trips carry no track or gate
-stamps, and `alerts.pb` has only what the notices source supplies.
+stamps, and `alerts.pb` carries the station and passenger notices (from the same cache the Amtrak
+source uses) but no train-status alerts, which come only with the Amtrak source's batch.
+
+Each cycle that falls back logs a `WARN` line, `primary realtime source failed; falling back`,
+with the Amtrak source's error (a timeout, connection failure, HTTP status, or decode failure,
+with any URL removed). When the Amtrak source answers again, one `INFO` line says it recovered.
 
 The client is original code written against the endpoint's public JSON, not a copy of anyone's
 code. Credit for the data goes to TransitDocs. I could not find published terms of use for that
@@ -759,6 +765,13 @@ notices source of the [browser worker](browser-worker/README.md). The worker sna
 notices list and each linked `/alert/...` detail page. The service GETs those pages on the worker
 origin: `header_text` is the list title, and `description_text` is the detail body (effective
 date, paragraphs, and PSN). A missing detail page keeps that alert's title and effective date.
+
+Every published alert has a `header_text`. The per-train alerts from Amtrak's train status (entity
+ids such as `20261117-98`) arrive with only a description, so the service titles each one from the
+description's leading label and the informed trip's train number: `Train 98: Delay Notification`,
+`Train 98: Service Resumption`, or `Train 98 service alert` when there is no label. When every
+notice in the description is a `Delay Notification`, `effect` is `SIGNIFICANT_DELAYS`; otherwise
+it is left unset.
 
 The worker re-renders the notices list on `NOTICES_POLL_INTERVAL_SECS` (default 15 minutes), in a
 fresh browser context in its one Chromium. It samples
@@ -820,10 +833,12 @@ flowchart TD
   stop -.->|"trip update assigned_stop_id"| t1
 ```
 
-Nothing else in Amtrak's feed changes, and the other files are copied byte-for-byte (after the
-[stop-reference repair](#validation-gate), when one applies). The published
-static version becomes `{feed_version}+tracks.{digest}`, where the digest changes only when the
-platform list changes. The augmented bytes go through the same MobilityData validator gate; if
+The published static version becomes `{feed_version}+tracks.{digest}`, where the digest changes
+only when the platform list changes. `feed_info.txt`'s `feed_version` carries the same value, so it
+matches the `feed_version` in every GTFS-Realtime header, as the reference requires;
+`official-static.zip` keeps Amtrak's own version. Nothing else in Amtrak's feed changes, and the
+other files are copied byte-for-byte (after the [stop-reference repair](#validation-gate), when one
+applies). The augmented bytes go through the same MobilityData validator gate; if
 augmentation fails or is rejected, Amtrak's feed is published unchanged and no tracks are stamped.
 The only new validator notice is a `stop_without_stop_time` warning per platform stop, because no
 scheduled trip calls at a platform directly.
@@ -1161,7 +1176,8 @@ feeds generated from live data:
 
 The script generates feeds (or reuses `out/`), fetches and pins both validators, validates each RT
 feed type in its own directory, and prints every notice by severity. Reports land in
-`validation-reports/`. It needs Java 17 and Maven, and falls back to Docker automatically if they
+`validation-reports/`, which is ignored run output: nothing there is tracked, so a run never
+changes a checked-in file. It needs Java 17 and Maven, and falls back to Docker automatically if they
 aren't installed.
 
 **How the gate decides.** It fails when a validator reports an ERROR code that is not listed in

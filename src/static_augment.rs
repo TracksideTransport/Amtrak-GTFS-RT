@@ -11,9 +11,13 @@
 //! siblings of one station, which is the relationship the reference describes for platform
 //! assignments. Nothing else in the upstream feed changes.
 //!
-//! The transform is deterministic: every non-`stops.txt` entry is copied byte-for-byte, and the
-//! rewritten `stops.txt` has a fixed timestamp, so the same upstream bytes and table always
-//! produce the same output. Any failure returns [`AugmentError`] and the caller publishes the
+//! `feed_info.feed_version` gains the same `+tracks.{digest}` suffix as the published static
+//! version, because GTFS-Realtime's `FeedHeader.feed_version` must match the `feed_info` of the
+//! static feed it is based on, and that is this combined feed rather than Amtrak's download.
+//!
+//! The transform is deterministic: every entry other than `stops.txt` and `feed_info.txt` is copied
+//! byte-for-byte, and the rewritten entries have a fixed timestamp, so the same upstream bytes and
+//! table always produce the same output. Any failure returns [`AugmentError`] and the caller publishes the
 //! upstream bytes instead.
 
 use crate::sources::tracks::{is_platform_label, split_platform_label};
@@ -27,6 +31,9 @@ use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, DateTime, ZipArchive, ZipWriter};
 
 const STOPS_FILE: &str = "stops.txt";
+const FEED_INFO_FILE: &str = "feed_info.txt";
+/// Marks a static version augmented with platform stops: `{feed_version}+tracks.{digest}`.
+pub(crate) const TRACKS_VERSION_MARKER: &str = "+tracks.";
 pub(crate) const UTF8_BOM: &[u8] = b"\xEF\xBB\xBF";
 
 /// Covered stations and their real platform tracks, in configured order.
@@ -477,19 +484,86 @@ impl std::fmt::Display for AugmentError {
 
 impl std::error::Error for AugmentError {}
 
+/// The `+tracks.{digest}` suffix that names `table` in a published static version.
+pub fn tracks_version_suffix(table: &PlatformTable) -> String {
+    format!("{TRACKS_VERSION_MARKER}{}", table.digest())
+}
+
 /// Returns `upstream` with platform structure added for every covered station it contains.
 ///
 /// A covered stop that is absent, not a plain stop, or already parented is skipped with a
-/// warning. Every other archive entry is copied without recompression.
+/// warning. A non-empty `feed_info.feed_version` gains [`tracks_version_suffix`]. Every other
+/// archive entry is copied without recompression.
 ///
 /// # Errors
 ///
-/// Returns [`AugmentError`] for an unreadable archive or `stops.txt`, a missing `stop_id`
-/// column, or a generated id that collides with an existing stop.
+/// Returns [`AugmentError`] for an unreadable archive, `stops.txt` or `feed_info.txt`, a missing
+/// `stop_id` column, or a generated id that collides with an existing stop.
 pub fn augment_static(upstream: &[u8], table: &PlatformTable) -> Result<Vec<u8>, AugmentError> {
     let stops = read_entry(upstream, STOPS_FILE)?;
     let rewritten = augment_stops(&stops, table)?;
-    replace_entry(upstream, STOPS_FILE, &rewritten)
+    let augmented = replace_entry(upstream, STOPS_FILE, &rewritten)?;
+    let Some(feed_info) = read_optional_entry(&augmented, FEED_INFO_FILE)? else {
+        return Ok(augmented);
+    };
+    match suffix_feed_version(&feed_info, &tracks_version_suffix(table))? {
+        Some(versioned) => replace_entry(&augmented, FEED_INFO_FILE, &versioned),
+        None => Ok(augmented),
+    }
+}
+
+/// Contents of archive entry `name`, or `None` when the archive has no such entry.
+fn read_optional_entry(upstream: &[u8], name: &str) -> Result<Option<Vec<u8>>, AugmentError> {
+    let archive = ZipArchive::new(Cursor::new(upstream)).map_err(|error| fail("archive", error))?;
+    if archive.index_for_name(name).is_none() {
+        return Ok(None);
+    }
+    read_entry(upstream, name).map(Some)
+}
+
+/// `feed_info.txt` with `suffix` appended to every non-empty `feed_version`, or `None` when there
+/// is nothing to change (no `feed_version` column, only empty values, or already suffixed).
+fn suffix_feed_version(raw: &[u8], suffix: &str) -> Result<Option<Vec<u8>>, AugmentError> {
+    let body = raw.strip_prefix(UTF8_BOM).unwrap_or(raw);
+    let mut reader = csv::ReaderBuilder::new().flexible(true).from_reader(body);
+    let headers: Vec<String> = reader
+        .headers()
+        .map_err(|error| fail("feed_info.txt header", error))?
+        .iter()
+        .map(|header| header.trim().to_string())
+        .collect();
+    let Some(column) = headers.iter().position(|header| header == "feed_version") else {
+        return Ok(None);
+    };
+    let mut rows: Vec<Vec<String>> = Vec::new();
+    let mut changed = false;
+    for record in reader.records() {
+        let record = record.map_err(|error| fail("feed_info.txt row", error))?;
+        let mut row: Vec<String> = record.iter().map(str::to_string).collect();
+        if let Some(version) = row.get_mut(column) {
+            if !version.trim().is_empty() && !version.ends_with(suffix) {
+                version.push_str(suffix);
+                changed = true;
+            }
+        }
+        rows.push(row);
+    }
+    if !changed {
+        return Ok(None);
+    }
+    let mut writer = csv::WriterBuilder::new()
+        .flexible(true)
+        .terminator(csv::Terminator::Any(b'\n'))
+        .from_writer(Vec::new());
+    for row in std::iter::once(&headers).chain(rows.iter()) {
+        writer
+            .write_record(row)
+            .map_err(|error| fail("feed_info.txt write", error))?;
+    }
+    writer
+        .into_inner()
+        .map(Some)
+        .map_err(|error| fail("feed_info.txt write", error))
 }
 
 /// Contents of archive entry `name`.
@@ -889,6 +963,69 @@ NYP,NYP,\"Ny Moynihan Train Hall At Penn Station\",https://www.amtrak.com/statio
         assert_eq!(
             augment_static(&upstream, &table()).unwrap(),
             augment_static(&upstream, &table()).unwrap()
+        );
+    }
+
+    /// `upstream` with `feed_info.txt` appended.
+    fn with_feed_info(upstream: &[u8], feed_info: &[u8]) -> Vec<u8> {
+        let mut archive = ZipArchive::new(Cursor::new(upstream)).unwrap();
+        let mut writer = ZipWriter::new(Cursor::new(Vec::new()));
+        for index in 0..archive.len() {
+            writer
+                .raw_copy_file(archive.by_index_raw(index).unwrap())
+                .unwrap();
+        }
+        writer
+            .start_file(FEED_INFO_FILE, SimpleFileOptions::default())
+            .unwrap();
+        writer.write_all(feed_info).unwrap();
+        writer.finish().unwrap().into_inner()
+    }
+
+    #[test]
+    fn feed_info_version_carries_the_tracks_suffix() {
+        // #108: realtime headers carry `{feed_version}+tracks.{digest}`, and the reference says
+        // that must match `feed_info.feed_version` of the static feed they are based on.
+        let mut feed_info = UTF8_BOM.to_vec();
+        feed_info.extend_from_slice(b"feed_publisher_name,feed_publisher_url,feed_lang,default_lang,feed_start_date,feed_end_date,feed_version,feed_contact_email,feed_contact_url\nAmtrak,http://www.amtrak.com,en,en,20261118,20271115,20261117,DL_DTGTFSsupport@Amtrak.com,http://www.amtrak.com\n");
+        let upstream = with_feed_info(&fixture_zip(STOPS.as_bytes()), &feed_info);
+        let augmented = augment_static(&upstream, &table()).unwrap();
+
+        let gtfs = Gtfs::from_reader(Cursor::new(augmented.clone())).unwrap();
+        let expected = format!("20261117{}", tracks_version_suffix(&table()));
+        assert_eq!(
+            gtfs.feed_info[0].version.as_deref(),
+            Some(expected.as_str())
+        );
+        assert_eq!(
+            gtfs.feed_info[0].contact_email.as_deref(),
+            Some("DL_DTGTFSsupport@Amtrak.com")
+        );
+        assert_eq!(augmented, augment_static(&upstream, &table()).unwrap());
+        for (old, new) in entries(&upstream).iter().zip(&entries(&augmented)) {
+            if old.0 != STOPS_FILE && old.0 != FEED_INFO_FILE {
+                assert_eq!(old.1, new.1, "{} changed", old.0);
+            }
+        }
+    }
+
+    #[test]
+    fn feed_info_without_a_version_is_copied() {
+        let feed_info = b"feed_publisher_name,feed_publisher_url,feed_lang,feed_version\nAmtrak,https://amtrak.com,en,\n";
+        let upstream = with_feed_info(&fixture_zip(STOPS.as_bytes()), feed_info);
+        let augmented = augment_static(&upstream, &table()).unwrap();
+        assert_eq!(read_entry(&augmented, FEED_INFO_FILE).unwrap(), feed_info);
+        let raw = |zip: &[u8]| {
+            entries(zip)
+                .into_iter()
+                .find(|entry| entry.0 == FEED_INFO_FILE)
+                .unwrap()
+                .1
+        };
+        assert_eq!(
+            raw(&augmented),
+            raw(&upstream),
+            "copied without recompression"
         );
     }
 

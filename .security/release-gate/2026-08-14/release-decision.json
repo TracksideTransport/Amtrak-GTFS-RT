@@ -31,8 +31,8 @@
       "four GitHub advisory CVSS records were partial",
       "the complete inventory includes critical RUSTSEC-2022-0011 in rust-crypto 0.2.36 through the upstream amtrak-gtfs-rt dependency"
     ],
-    "json_report": "../.security/dependency-audit/release.json",
-    "markdown_report": "../.security/dependency-audit/release.md"
+    "json_report": "../../dependency-audit/release.json",
+    "markdown_report": "../../dependency-audit/release.md"
   },
   "controlled_consumer_migration": {
     "status": "not_started",

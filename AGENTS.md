@@ -46,6 +46,7 @@ Checked-in paths, until the split replaces them:
 | `src/static_repair.rs` | Drops stop times whose `stop_id` is missing from `stops.txt` |
 | `src/static_gtfs.rs` | Exact-byte static validation and the pending/active lifecycle |
 | `src/orchestrator.rs` | Source selection, one coherent generation, polling |
+| `src/alert_header.rs` | Gives an alert that arrives without `header_text` (Amtrak's per-train status alerts) a title from its description |
 | `src/writer.rs` | Immutable generations on disk |
 | `src/serve.rs` | axum HTTP API, peer check, and readiness |
 | `src/worker.rs` | Starts the built-in browser worker when a browser source needs it, restarts it with backoff, gives up after 5 exits in a row, and stops its process group on `SIGTERM` |
@@ -181,7 +182,7 @@ Published feed shape. Consumers already depend on this.
 
 - One generation is one static ZIP plus three protobuf products. Each realtime header carries that generation's static version and timestamp. Do not mix artifacts across generations, and do not build generation URLs by hand when a manifest is available.
 - Publication is atomic. Readers see a complete old generation or a complete new one. A source, conversion, validation, or disk failure leaves the current generation in place. Do not rewrite a published generation directory.
-- Tracks on (the default) changes the published static feed. For each covered station the service adds a parent `{stop}:station`, re-parents the original stop under it, and adds `{stop}:track:{label}` with `platform_code`. A boarding gate is its own stop, `{stop}:track:{track}:gate:{gate}`, with `platform_code` like `24 (Gate H)`. GTFS-Realtime has no gate field, so the gate travels only through `assigned_stop_id`. `stop_sequence` is set whenever `assigned_stop_id` is. The static version gains a `+tracks.{digest}` suffix, where `digest` is the first 8 hex digits of the platform table. Every ZIP entry other than `stops.txt` is copied byte-for-byte. `AMTRAK_TRACKS=off` publishes the upstream static feed with no platform stops and no suffix.
+- Tracks on (the default) changes the published static feed. For each covered station the service adds a parent `{stop}:station`, re-parents the original stop under it, and adds `{stop}:track:{label}` with `platform_code`. A boarding gate is its own stop, `{stop}:track:{track}:gate:{gate}`, with `platform_code` like `24 (Gate H)`. GTFS-Realtime has no gate field, so the gate travels only through `assigned_stop_id`. `stop_sequence` is set whenever `assigned_stop_id` is. The static version gains a `+tracks.{digest}` suffix, where `digest` is the first 8 hex digits of the platform table. `feed_info.txt`'s non-empty `feed_version` gains the same suffix, so it matches the realtime headers' `feed_version`. Every other ZIP entry is copied byte-for-byte. `AMTRAK_TRACKS=off` publishes the upstream static feed with no platform stops and no suffix.
 - Before validation, stop times that name a stop missing from `stops.txt` are dropped and a warning is logged (`stop times name a stop missing from stops.txt; dropped`). Amtrak's 20261018 feed calls at Ocean Springs (`OSM`) without defining it. A feed with no such rows is unchanged.
 - The mutable routes `/trip-updates.pb`, `/vehicle-positions.pb`, `/alerts.pb`, `/static.zip`, and `/health` are removed. Do not add them back.
 
@@ -197,7 +198,7 @@ Release workflow:
 ## What agents must not do
 
 - Do not commit secrets, `.env` files, RailData tokens, or `raildata-token.json`. Pass `NJT_RAILDATA_USERNAME` and `NJT_RAILDATA_PASSWORD` only through the environment or Cursor's Secrets tab.
-- Do not commit `tools/*.jar`, `/out`, `/target`, or `validation-reports/` other than the two release evidence files already tracked.
+- Do not commit `tools/*.jar`, `/out`, `/target`, or anything under `validation-reports/`. That directory is run output only and is ignored; `scripts/test-release-controls.sh` fails if a file there is tracked. The August 2026 release decision and feed evidence are kept as history in `.security/release-gate/2026-08-14/`.
 - Do not change the generation API, platform-stop ids, `platform_code` text (`24 (Gate H)`), or the `+tracks.{digest}` suffix without an explicit consumer-migration note in the README.
 - Do not serve the generation directory with a generic file server. That bypasses peer checks, readiness, and manifest-first discovery.
 - Do not treat `X-Forwarded-For` or `Forwarded` as the client.

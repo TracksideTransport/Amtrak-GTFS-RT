@@ -7,6 +7,105 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Observed tracks reach `static.zip` while the service runs.** A static snapshot built
+  from the configured platforms alone no longer counts as current once a track is observed, so the
+  rebuild downloads `GTFS.zip` in full instead of accepting a `304`. Before, observed platforms were
+  published only after a fresh start or a new upstream feed. A scheduled rebuild now logs
+  `new track observed; static rebuild scheduled` (#112).
+- **`static.zip`'s `feed_info.feed_version` matches the realtime headers.** It now carries the
+  published static version, `{feed_version}+tracks.{digest}`, as the GTFS-Realtime reference
+  requires. Before, it kept Amtrak's version, and two `static.zip` files with
+  different platform stops shared one `feed_version`. `official-static.zip` is unchanged, and
+  `platform-addon.zip` now lists `feed_info.txt` among its files. Consumers that read
+  `feed_info.feed_version` to compare with Amtrak's own version should strip the `+tracks.` suffix
+  or read `official-static.zip` (#108).
+- **A stalled `GTFS.zip` download times out.** The download had no timeout, so a connection that
+  stalled could hang startup or the daily refresh until the operating system gave up. It now
+  allows 30 seconds to connect and 5 minutes in all, and a timeout is reported like any other
+  download failure (#106).
+- **A fatal startup error says what failed.** It is logged at `ERROR` through tracing with its
+  stage (`configuration`, `static GTFS bootstrap`, `HTTP listener bind`, ...) and the full cause
+  chain, for example `static GTFS download failed: error sending request: client error
+  (Connect): tcp connect error: Connection refused`, in place of a bare
+  `Error: StaticError("static fetch failed")`. A failed static download now names the timeout,
+  DNS, connect, TLS, or HTTP status cause in scheduled refresh warnings too. URLs are never
+  logged. The process exits with status 1, as before: the `exit=0` in the report is what
+  `docker inspect` shows for a container that a restart policy has already started again (#106).
+- **Train-status alerts have a `header_text`.** The per-train alerts in `alerts.pb` (ids such as
+  `20261117-98`) had only `description_text`, although GTFS-Realtime requires a header. The header
+  is now the description's leading label after the train number, such as `Train 98: Delay
+  Notification`, with `Train 98 service alert` or `Service alert` as the fallback. An alert whose
+  notices are all delay notifications gets `effect: SIGNIFICANT_DELAYS`; other alerts keep no
+  effect. Alerts that already had a header are unchanged (#107).
+- **Falling back to `transitdocs-asm` says why.** Each cycle in which the Amtrak source errors or
+  returns nothing logs `WARN primary realtime source failed; falling back` with the source, the
+  fallback, and the error (timeout, connect, HTTP status, decode), with URLs removed. A fallback
+  that also fails, or a chain with no fallback, is warned too. When the Amtrak source succeeds
+  again, one `INFO` line says it recovered; a healthy source logs nothing extra. The bare
+  `ASM data successfully downloaded` line each cycle is a `println!` in the pinned
+  `amtrak-gtfs-rt` crate and still appears (#110).
+- **An Amtrak answer with no trains falls back.** An answer with no trip updates and no vehicle
+  positions still counted as a batch when it carried alerts: the Amtrak crate adds its Pacific
+  Surfliner advisories even when it returns no trains, and with notices on the cached station and
+  passenger notices were added too. The chain did not fall back to `transitdocs-asm`, nothing was
+  warned, and the generation published alerts and no trains. Such an answer now counts as empty,
+  and notices are added only to a batch that has something in it, so the fallback takes over and
+  publishes the notices. When the fallback is also empty or switched off, no new generation is
+  published: the last one keeps serving, and `/readyz` returns `503` once it is 300 s old (#110).
+- **Notices survive a fallback generation.** A generation built from `transitdocs-asm` published
+  no station or passenger notices, so they vanished from `alerts.pb` for that cycle. The fallback
+  now shares the Amtrak source's notices cache, so it publishes the same notices without another
+  page fetch. Train-status alerts still come only from the Amtrak source (#110).
+- **The feed set served right after a restart has `match_rate`.** Each generation now stores its
+  match rate in `match-rate.txt` beside `manifest.txt`, and recovery reads it, so the manifest
+  served from disk matches the live one. `manifest.txt` keeps its exact shape, so 0.8.0 can still
+  recover these generations after a rollback, and a generation written by 0.8.0 still loads, with
+  no `match_rate` (#116).
+- **Generation ids count up by one.** The `-<sequence>` suffix advanced by 2 per published
+  generation because the `current` marker's temp file name took a number from the same counter.
+  The marker has its own counter now, so the suffix reads `-0`, `-1`, `-2`, and a failed publish
+  does not use a number up. It still starts at 0 after a restart; the timestamp prefix keeps ids
+  unique, and an id already on disk is skipped. Ids remain opaque: fetch `/v1/feed-set.json`
+  rather than predicting them (#117).
+- **A stalled notices request no longer holds up the feeds.** The service's request to the
+  notices page had no timeout, and it runs while the generation is assembled, so a worker that
+  accepted the connection and then stopped answering held up every feed. It now gives up after 5
+  seconds to connect or 30 seconds in all, and the generation publishes with the last good notices
+  (#109).
+- **A cold start no longer logs a traceback.** Until the service writes its first train list
+  (`{AMTRAK_OUTPUT_DIR}/tracks/fleet-trains.json`), the worker's track poll logs one INFO line,
+  `waiting for the service's first train list`, and retries on the next tick. A train list that
+  exists but cannot be read, is not JSON, or is not `amtrak-fleet-trains/v1` still logs at ERROR
+  (#103).
+- **A client that hangs up no longer prints a traceback.** The container healthcheck reads only
+  the status line of the worker's `/healthz` and closes, so the worker's body write could fail
+  with `ConnectionResetError` or `BrokenPipeError`, and `socketserver` printed the traceback to
+  stderr. The worker now logs one line with the peer and path (no query string): DEBUG for
+  `/healthz`, WARNING for any other path. Any other handler error is logged at ERROR, with its
+  traceback, through the worker's logger. No feed data was lost: the service's track and notices
+  requests read whole bodies (#109).
+- **Browser failures in the worker's log name their cause.** The track poller logged
+  `browser launch failed: Error` when the browser had launched and only the first load of the
+  status page had failed. It now logs `first status page load failed:` or `browser launch failed:`
+  followed by the error's type and the first line of its message, for example
+  `Error: Page.goto: net::ERR_TUNNEL_CONNECTION_FAILED at https://www.amtrak.com/tickets/train-status.html`.
+  A failed status fetch carries the same detail. The notices poller's
+  `advisories markup not obtained this cycle` line now gives the reason: the navigation error, a
+  gate that never appeared, or a page still changing at the timeout. A failed detail page also
+  logs its reason. A notices cycle in which the browser itself fails (for example, it closed
+  mid-cycle) logs one `WARNING`, `poll cycle failed (...)`, instead of a traceback whose Playwright
+  message carried the browser's recent output, page URLs and query strings included; any other
+  error still logs its traceback. Any URL in these lines keeps only its scheme, host, port, and
+  path (#115).
+- **Validation reports carry only their own run.** `validation-reports/` held two tracked
+  records from August 2026, so every `scripts/validate-feeds.sh` run overwrote the tracked
+  `release-evidence.json` and the `validation-reports` and `offline-validation-reports`
+  artifacts paired fresh evidence with a stale "block" `release-decision.json`. The two records
+  now live in `.security/release-gate/2026-08-14/`, `validation-reports/` is fully ignored, and
+  `scripts/test-release-controls.sh` fails if a file under it is tracked (#102).
+
 ### Security
 
 - **Playwright 1.65.2 with Node 26.13.1.** The Node.js runtime that Playwright 1.64.1 bundled,

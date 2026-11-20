@@ -1,5 +1,7 @@
 use crate::orchestrator::StaticSnapshot;
-use crate::static_augment::{augment_static, PlatformTable, SharedPlatforms};
+use crate::static_augment::{
+    augment_static, tracks_version_suffix, PlatformTable, SharedPlatforms, TRACKS_VERSION_MARKER,
+};
 use crate::static_repair::repair_static;
 use async_trait::async_trait;
 use gtfs_structures::Gtfs;
@@ -277,11 +279,32 @@ enum Download {
     Body(Arc<[u8]>, Option<StaticValidators>),
 }
 
+/// Longest one `GTFS.zip` download may take, connection to last byte. The file is about 18 MB, so
+/// this leaves room for a slow link on a Raspberry Pi while keeping a stalled connection from
+/// hanging startup or the refresh loop.
+const STATIC_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// Longest wait for the download's connection itself.
+const STATIC_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+
 async fn download_static(
     url: &str,
     validators: Option<&StaticValidators>,
 ) -> Result<Download, StaticError> {
-    let mut request = reqwest::Client::new().get(url);
+    download_static_within(url, validators, STATIC_DOWNLOAD_TIMEOUT).await
+}
+
+async fn download_static_within(
+    url: &str,
+    validators: Option<&StaticValidators>,
+    timeout: Duration,
+) -> Result<Download, StaticError> {
+    let client = reqwest::Client::builder()
+        .connect_timeout(STATIC_CONNECT_TIMEOUT.min(timeout))
+        .timeout(timeout)
+        .build()
+        .map_err(download_error)?;
+    let mut request = client.get(url);
     if let Some(validators) = validators {
         if let Some(etag) = &validators.etag {
             request = request.header(reqwest::header::IF_NONE_MATCH, etag);
@@ -290,22 +313,23 @@ async fn download_static(
             request = request.header(reqwest::header::IF_MODIFIED_SINCE, modified);
         }
     }
-    let response = request
-        .send()
-        .await
-        .map_err(|_| StaticError("static fetch failed".into()))?;
+    let response = request.send().await.map_err(download_error)?;
     if validators.is_some() && response.status() == reqwest::StatusCode::NOT_MODIFIED {
         return Ok(Download::NotModified);
     }
-    let response = response
-        .error_for_status()
-        .map_err(|_| StaticError("static fetch status failed".into()))?;
+    let response = response.error_for_status().map_err(download_error)?;
     let received = StaticValidators::from_headers(response.headers());
-    let bytes = response
-        .bytes()
-        .await
-        .map_err(|_| StaticError("static body failed".into()))?;
+    let bytes = response.bytes().await.map_err(download_error)?;
     Ok(Download::Body(Arc::from(bytes.to_vec()), received))
+}
+
+/// Names the download stage and keeps the whole cause chain (timeout, DNS, connect, TLS, or the
+/// HTTP status), with the request URL removed so a configured URL never reaches a log line.
+fn download_error(error: reqwest::Error) -> StaticError {
+    StaticError(format!(
+        "static GTFS download failed: {}",
+        error_chain(&error.without_url())
+    ))
 }
 
 async fn fetch_static_at(
@@ -378,12 +402,6 @@ async fn augmented_snapshot(
     Some(snapshot)
 }
 
-const TRACKS_VERSION_MARKER: &str = "+tracks.";
-
-fn tracks_version_suffix(table: &PlatformTable) -> String {
-    format!("{TRACKS_VERSION_MARKER}{}", table.digest())
-}
-
 /// Whether a snapshot `version` was built for the current track configuration: augmented with
 /// one of the candidate `tables` when tracks are on, and not augmented when there are none.
 pub fn matches_platforms(version: &str, tables: &[PlatformTable]) -> bool {
@@ -397,8 +415,9 @@ pub fn matches_platforms(version: &str, tables: &[PlatformTable]) -> bool {
 
 /// Parses retained bytes into a snapshot whose version is `feed_version` plus `suffix`.
 ///
-/// Augmentation leaves `feed_info.txt` untouched, so the `+tracks.{digest}` suffix is applied here
-/// rather than read from the feed; versionless feeds get a generated identifier first.
+/// Augmentation already appends the `+tracks.{digest}` suffix to a non-empty
+/// `feed_info.feed_version`, so it is added here only when the feed's version lacks it; versionless
+/// feeds get a generated identifier first.
 fn snapshot_from_bytes(
     zip: Arc<[u8]>,
     now: SystemTime,
@@ -413,11 +432,11 @@ fn snapshot_from_bytes(
         .find(|version| !version.trim().is_empty())
         .map(str::to_owned)
         .unwrap_or_else(|| fallback_snapshot_version(now));
-    Ok(StaticSnapshot::identical(
-        format!("{version}{}", suffix.unwrap_or_default()),
-        Arc::new(parsed),
-        zip,
-    ))
+    let version = match suffix {
+        Some(suffix) if !version.ends_with(suffix) => format!("{version}{suffix}"),
+        _ => version,
+    };
+    Ok(StaticSnapshot::identical(version, Arc::new(parsed), zip))
 }
 
 /// Records the untouched download and the overlay that rebuilds `snapshot.zip`.
@@ -431,7 +450,7 @@ fn stamp_official(snapshot: &mut StaticSnapshot, official: Arc<[u8]>) {
 
 /// An error and its sources, joined with `: `. GTFS parse errors name the file, id, or value that
 /// failed; they never carry a URL or credential, because the bytes are parsed from memory.
-fn error_chain(error: &dyn std::error::Error) -> String {
+pub(crate) fn error_chain(error: &dyn std::error::Error) -> String {
     let mut text = error.to_string();
     let mut source = error.source();
     while let Some(cause) = source {
@@ -645,8 +664,9 @@ async fn stage_conditional(
 /// Once a download has supplied `ETag` or `Last-Modified`, later refreshes send them back and a
 /// `304` keeps the current snapshot without downloading or validating again.
 ///
-/// Failures are intentionally summarized rather than returning or logging raw
-/// request/tool errors, which could contain configured URLs or credentials.
+/// Failures are summarized rather than returning or logging raw request/tool errors, which could
+/// contain configured URLs or credentials. A download failure keeps its cause chain with the URL
+/// removed.
 pub async fn refresh_snapshot_once(
     state: &StaticSnapshotState,
     static_url: &str,
@@ -659,7 +679,11 @@ pub async fn refresh_snapshot_once(
     };
     // A `304` answers for the old platform tables too, so a rebuild for new tables (a newly
     // observed track) must download again; only a refresh that keeps the tables is conditional.
-    let validators = if matches_platforms(&comparison.version, platforms) {
+    // Only the preferred table counts: a snapshot built from a fallback (the configured table,
+    // before any track was observed) still lacks the observed platforms, and a `304` would keep
+    // it that way until Amtrak happens to publish a new feed.
+    let preferred = &platforms[..platforms.len().min(1)];
+    let validators = if matches_platforms(&comparison.version, preferred) {
         state.validators()
     } else {
         None
@@ -691,7 +715,8 @@ pub async fn refresh_snapshot_once(
             StaticRefreshOutcome::Staged(version)
         }
         Err(error) => {
-            // StaticError messages are fixed summaries plus parse detail; none carries a URL.
+            // StaticError messages are fixed summaries plus parse or transport detail with the
+            // request URL removed; none carries a URL.
             tracing::warn!(%error, stage = "static", "static refresh failed");
             StaticRefreshOutcome::Rejected
         }
@@ -790,8 +815,13 @@ async fn run_snapshot_refresh_with(
                 _ = ticker.tick() => {}
                 _ = notify.notified() => {
                     let now = tokio::time::Instant::now();
-                    tokio::time::sleep(platform_refresh_delay(timing, previous_platform_refresh, now))
-                        .await;
+                    let delay = platform_refresh_delay(timing, previous_platform_refresh, now);
+                    tracing::info!(
+                        stage = "static",
+                        delay_secs = delay.as_secs(),
+                        "new track observed; static rebuild scheduled"
+                    );
+                    tokio::time::sleep(delay).await;
                     previous_platform_refresh = Some(tokio::time::Instant::now());
                 }
             }
@@ -1416,6 +1446,15 @@ t,10:00:00,10:00:00,NWK,1\nt,10:30:00,10:30:00,OSM,2\n";
             format!("20260927+tracks.{}", table.digest())
         );
         assert!(snapshot.parsed.stops.contains_key("NWK:track:2"));
+        // The published static.zip names the same version the realtime headers carry (#108),
+        // while official-static.zip keeps Amtrak's.
+        assert_eq!(
+            snapshot.parsed.feed_info[0].version.as_deref(),
+            Some(snapshot.version.as_str())
+        );
+        let official = Gtfs::from_reader(Cursor::new(snapshot.official_zip.clone())).unwrap();
+        assert_eq!(official.feed_info[0].version.as_deref(), Some("20260927"));
+        assert_eq!(snapshot.official_zip.as_ref(), upstream.as_slice());
         assert_ne!(snapshot.zip.as_ref(), upstream.as_slice());
         {
             let seen = validator.seen.lock().unwrap();
@@ -1843,6 +1882,83 @@ t,10:00:00,10:00:00,NWK,1\nt,10:30:00,10:30:00,OSM,2\n";
             "{outcome:?}"
         );
         assert_eq!(*requests.lock().unwrap(), vec![None, None]);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn a_stalled_static_download_times_out_and_names_the_cause() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/GTFS.zip", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((stream, _)) = listener.accept().await {
+                held.push(stream);
+            }
+        });
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            download_static_within(&url, None, Duration::from_millis(300)),
+        )
+        .await
+        .expect("a stalled download must not hang");
+        let Err(StaticError(message)) = result else {
+            panic!("a stalled download must fail");
+        };
+        assert!(
+            message.starts_with("static GTFS download failed: "),
+            "{message}"
+        );
+        assert!(message.contains("timed out"), "{message}");
+        assert!(!message.contains("127.0.0.1"), "{message}");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn a_snapshot_built_from_the_fallback_table_downloads_the_observed_one() {
+        // #112: the first snapshot is built from the configured table, before anything is
+        // observed. Once a track is observed the candidates are [full, configured]; the
+        // snapshot still matches the fallback, but a 304 must not stop the full table.
+        let (url, requests, server) = conditional_upstream(augmentable_zip("20260927"));
+        let validator = RecordingValidator {
+            seen: Mutex::new(Vec::new()),
+            result: Ok(()),
+        };
+        let configured = PlatformTable::parse("NWK=1").unwrap();
+        let full = PlatformTable::parse("NWK=1,9").unwrap();
+        let state = bootstrap_static(&url, &validator, std::slice::from_ref(&configured))
+            .await
+            .unwrap();
+        assert!(state.validators().is_some());
+        assert!(state
+            .active()
+            .await
+            .version
+            .ends_with(&tracks_version_suffix(&configured)));
+
+        let outcome =
+            refresh_snapshot_once(&state, &url, &validator, &[full.clone(), configured]).await;
+        let expected = format!("20260927{}", tracks_version_suffix(&full));
+        assert_eq!(outcome, StaticRefreshOutcome::Staged(expected));
+        assert!(state
+            .pending()
+            .await
+            .unwrap()
+            .parsed
+            .stops
+            .contains_key("NWK:track:9"));
+        assert_eq!(
+            *requests.lock().unwrap(),
+            vec![None, None],
+            "the rebuild must not send If-None-Match"
+        );
+
+        // Built from the preferred table, the next refresh is conditional again.
+        let outcome = refresh_snapshot_once(&state, &url, &validator, &[full]).await;
+        assert_eq!(outcome, StaticRefreshOutcome::Unchanged);
+        assert_eq!(
+            requests.lock().unwrap().last().cloned().flatten(),
+            Some("\"v1\"".to_string())
+        );
         server.abort();
     }
 

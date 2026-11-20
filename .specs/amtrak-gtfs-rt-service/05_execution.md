@@ -86,7 +86,7 @@ kanban
 - Feed evidence: PASS for manifest-pinned generation `1786670322000000000-0` (static plus three realtime artifacts, independent Java decoding, and exception ratchet).
 - Dependency evidence: BLOCK (`UNAVAILABLE`, exit 2) despite complete 375-package inventory; rollout is prohibited.
 - Deployment and controlled-consumer migration: not started. Rollback retains the prior binary and persisted last-good generation.
-- Decision record: [release-decision.json](../../validation-reports/release-decision.json).
+- Decision record: [release-decision.json](../../.security/release-gate/2026-08-14/release-decision.json).
 
 ## Integration Decision
 

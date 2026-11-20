@@ -9,8 +9,8 @@ Design decisions embodied here (Requirements 1.1–1.3, 4.1/4.2, 8.1/8.3):
   notices polls.
 * **Subresource-blocking** — when enabled, image/font/media/CSS requests are aborted while
   script/xhr/fetch are allowed, so Akamai's sensor JS still runs but the fetch is lean.
-* **Fail-open** — a cycle that times out, is blocked, or errors returns ``None`` and never
-  overwrites a good snapshot; the loop never raises.
+* **Fail-open** — a cycle that times out, is blocked, or errors never overwrites a good snapshot;
+  the loop logs the reason on one line and never raises.
 
 The Playwright work lives in the injectable :func:`_default_launcher` so the loop's control flow is
 unit-testable offline; the real browser path is exercised on-device (task 5.1).
@@ -26,7 +26,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from urllib.parse import urljoin
 
-from ..browser import SharedBrowser
+from ..browser import SharedBrowser, describe_error, is_browser_error
 from .config import Config
 from .store import SnapshotStore, safe_detail_name
 
@@ -51,7 +51,12 @@ class FetchedAdvisories:
     details: dict[str, str]
 
 
-# A launcher returns the notices list and detail pages, or ``None`` when the list gate is missing.
+class RenderFailed(Exception):
+    """A page's markup was not obtained. The message is the log-safe reason."""
+
+
+# A launcher returns the notices list and detail pages. It returns ``None`` or raises
+# :class:`RenderFailed` (with the reason) when the list markup was not obtained.
 Launcher = Callable[[Config], Awaitable[FetchedAdvisories | None]]
 
 
@@ -110,16 +115,19 @@ def should_block(resource_type: str) -> bool:
     return resource_type in _BLOCKED_RESOURCE_TYPES
 
 
-async def _render_until_stable(page, url: str, selector: str, cfg: Config) -> str | None:
+async def _render_until_stable(page, url: str, selector: str, cfg: Config) -> str:
     """Load ``url`` and return its HTML once the size is stable and ``selector`` is present.
 
     Navigation waits only until the response is committed. Later timer-driven requests do not
-    extend the wait. ``None`` means the gate never became stable before the navigation timeout.
+    extend the wait.
+
+    Raises :class:`RenderFailed` when the navigation fails or the gate never becomes stable
+    before the navigation timeout.
     """
     try:
         await page.goto(url, wait_until="commit", timeout=cfg.nav_timeout_secs * 1000)
-    except Exception:  # noqa: BLE001 — a navigation failure is one missed page
-        return None
+    except Exception as error:  # noqa: BLE001 — a navigation failure is one missed page
+        raise RenderFailed(f"navigation failed: {describe_error(error)}") from None
     stability = RenderStability()
     deadline = time.monotonic() + cfg.nav_timeout_secs
     poll = cfg.render_poll_ms / 1000
@@ -135,7 +143,9 @@ async def _render_until_stable(page, url: str, selector: str, cfg: Config) -> st
         if stability.observe(len(html), gate, poll, required):
             return html
         await asyncio.sleep(poll)
-    return None
+    if stability.last_size is None:
+        raise RenderFailed(f"gate {selector!r} not present after {cfg.nav_timeout_secs}s")
+    raise RenderFailed(f"page still changing after {cfg.nav_timeout_secs}s")
 
 
 async def _close_context(context, cfg: Config, shared: SharedBrowser) -> None:
@@ -161,6 +171,8 @@ async def _default_launcher(
     requests cannot hold the cycle open. Detail pages already stored within ``detail_ttl_secs``
     are not rendered again. A detail that fails is skipped; the list is still returned. The
     context is closed and the lease returned in ``finally``.
+
+    Raises :class:`RenderFailed` with the reason when the list markup is not obtained.
     """
     if shared is None:
         shared = SharedBrowser(cfg.browser_mode, cfg.browser_close_secs)
@@ -183,10 +195,12 @@ async def _default_launcher(
 
                 await context.route("**/*", _route)
             page = await context.new_page()
-            list_html = await _render_until_stable(page, cfg.source_url, cfg.gate_selector, cfg)
-            await page.close()
-            if list_html is None:
-                return None
+            try:
+                list_html = await _render_until_stable(
+                    page, cfg.source_url, cfg.gate_selector, cfg
+                )
+            finally:
+                await page.close()
             now = time.time()
             paths = extract_detail_paths(list_html)
             fresh = {
@@ -198,15 +212,13 @@ async def _default_launcher(
             for path in detail_paths_due(paths, fresh):
                 detail_page = await context.new_page()
                 try:
-                    html = await _render_until_stable(
+                    details[path] = await _render_until_stable(
                         detail_page, urljoin(cfg.source_url, path), _DETAIL_SELECTOR, cfg
                     )
+                except RenderFailed as miss:
+                    logger.warning("advisory detail page not obtained: %s (%s)", path, miss)
                 finally:
                     await detail_page.close()
-                if html is None:
-                    logger.warning("advisory detail page not obtained: %s", path)
-                else:
-                    details[path] = html
             if fresh:
                 logger.info("advisory details served from cache: %s", len(fresh))
             return FetchedAdvisories(list_html, details)
@@ -217,7 +229,11 @@ async def _default_launcher(
 
 
 async def poll_once(cfg: Config, *, launcher: Launcher = _default_launcher) -> FetchedAdvisories | None:
-    """Run one fetch cycle; return the list and detail pages, or ``None`` if the list was blocked."""
+    """Run one fetch cycle; return the list and detail pages, or ``None`` if the list was blocked.
+
+    The default launcher raises :class:`RenderFailed` instead of returning ``None``, so the reason
+    reaches the log.
+    """
     return await launcher(cfg)
 
 
@@ -266,8 +282,19 @@ async def run_forever(
                 )
             else:
                 logger.warning("advisories markup not obtained this cycle; keeping last snapshot")
-        except Exception:  # noqa: BLE001 — fail-open: never let a cycle crash the loop
-            logger.exception("poll cycle failed; keeping last snapshot")
+        except RenderFailed as miss:
+            logger.warning(
+                "advisories markup not obtained this cycle (%s); keeping last snapshot", miss
+            )
+        except Exception as error:  # noqa: BLE001 — fail-open: never let a cycle crash the loop
+            if is_browser_error(error):
+                # A browser that went away mid-cycle: its message carries the browser's recent
+                # output, which can name page URLs with query strings. One log-safe line.
+                logger.warning(
+                    "poll cycle failed (%s); keeping last snapshot", describe_error(error)
+                )
+            else:
+                logger.exception("poll cycle failed; keeping last snapshot")
         count += 1
         if iterations is not None and count >= iterations:
             break
