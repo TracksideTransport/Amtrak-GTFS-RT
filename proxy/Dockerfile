@@ -3,7 +3,7 @@
 # Caddy's standard build has no per-IP rate limit, so this image adds
 # github.com/mholt/caddy-ratelimit. Both upstream images are digest-pinned. The release
 # gate builds this Dockerfile and scans the result.
-FROM caddy:2.11.7-builder-alpine@sha256:95a5e7e2692b5eb9545aadc5b90a39f6f509bee59c9508a493f83ee902eaef63 AS builder
+FROM caddy:2.11.9-builder-alpine@sha256:646fee578e680989ca5c7fd1ce6f1de574d19fd71ef2221810cc0510a9f40c86 AS builder
 
 WORKDIR /src
 # Caddy 2.11.7 still vendors older golang.org/x/net, go-jose, and klauspost/compress.
@@ -16,7 +16,7 @@ RUN xcaddy build v2.11.7 \
       --replace github.com/klauspost/compress=github.com/klauspost/compress@v1.20.2 \
     && ./caddy list-modules | grep -q '^http.handlers.rate_limit$'
 
-FROM caddy:2.11.7-alpine@sha256:e70b164da81ef698b3ad19af799ea6086ce6d9e48ed4079eb9fe26f6fbf14ee5
+FROM caddy:2.11.8-alpine@sha256:f6228111e5fafa1a5238258d0858e103f10599b8d1659a146e7726681a002bb9
 
 USER root
 # Alpine packages in the pinned tag can lag security updates. The release gate fails a
