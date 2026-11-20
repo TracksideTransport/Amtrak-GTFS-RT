@@ -7,6 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-11-20
+
+One vehicle identity for a train across both realtime sources, explicit schedule relationships,
+and the fixes found while testing v0.8.0, including the browser worker's memory growth.
+
+### Upgrading from 0.8.0
+
+- **Every trip update and vehicle position carries `vehicle.id` and `vehicle.label`.**
+  `vehicle.id` is the per-train-day id `{YYYYMMDD}-{train}`, the same string as the entity id
+  (`20261119-172`), and `vehicle.label` is the train number (`172`). Join a trip update to its
+  vehicle position by `vehicle.id` (#100).
+- **The fallback's `asm-` entity ids are gone.** A generation built from `transitdocs-asm` uses the
+  Amtrak source's ids (`20261119-172`, not `asm-172-20261119`), and its `vehicle.label` is the
+  train number, not the route name (`Northeast Regional`). Take the route from `trip.route_id` and
+  the static `routes.txt`; see "Consumer migration" in the README (#122).
+- **`static.zip`'s `feed_info.feed_version` carries the `+tracks.{digest}` suffix,** so it matches
+  the realtime headers. To compare with Amtrak's own version, strip the suffix or read
+  `official-static.zip` (#108).
+- **`schedule_relationship` is explicit.** Trip updates, stop time updates, vehicle positions, and
+  alert trips carry `SCHEDULED` where they carried none. The meaning is unchanged: GTFS-Realtime
+  already read an absent value as `SCHEDULED` (#101).
+- **`BROWSER_MAX_AGE_SECS` defaults to `1800`, not `21600`.** If you set it, raise it toward the old
+  value only with memory to spare: the renderer then grows larger than in 0.8.0 (#118).
+- **An Amtrak answer with no trains falls back.** It now counts as empty, so `transitdocs-asm`
+  takes over. When the fallback is also empty or off, no new generation is published: the last one
+  keeps serving, and `/readyz` returns `503` once it is 300 s old. 0.8.0 published a generation
+  with alerts and no trains instead (#110).
+- **`fleet-trains.json` gains optional fields.** A stop can carry `"boarding": false`, and the list
+  carries `track_stations`. The schema stays `amtrak-fleet-trains/v1`; a reader of the file must
+  accept the new fields (#120).
+- **On a Raspberry Pi, turn on the memory cgroup.** Pi kernels usually boot with
+  `cgroup_disable=memory`, and Docker then ignores the Compose `mem_limit` without failing. Add
+  `cgroup_enable=memory` to `/boot/firmware/cmdline.txt`, reboot, and recreate the container; see
+  "Raspberry Pi" in the README (#139).
+
 ### Added
 
 - **Trip updates and vehicle positions carry a vehicle id.** A train's trip update and its
@@ -28,6 +63,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   marked `UNSCHEDULED` becomes `UNSCHEDULED`, as the reference requires for every stop of such a
   trip. The offline fixture now carries a train-status alert informed by
   its trip, as the crate builds one, and fails on W009 (#101).
+- **System requirements in the README.** CPU, memory, disk, OS, and network, with the memory
+  figures measured on v0.8.0, and how to check and enable the Raspberry Pi memory cgroup so the
+  Compose `mem_limit` applies (#136, #139).
 
 ### Changed
 
