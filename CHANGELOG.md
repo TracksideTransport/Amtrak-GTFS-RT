@@ -70,8 +70,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `transitdocs-asm` gave every vehicle its route name as `vehicle.label` (`Northeast Regional`),
   put the bare train number in `vehicle.id`, and used entity ids such as `asm-172-20261119`, so
   a train's identity changed whenever the source did. The fallback now uses the Amtrak source's
-  scheme: entity id and `vehicle.id` `20261119-172` (origin date and train number) and
-  `vehicle.label` `172`, on the trip update as well as the vehicle position. Consumers that keyed
+  scheme: entity id and `vehicle.id` `20261119-172` (service date and train number) and
+  `vehicle.label` `172`, on the trip update as well as the vehicle position. The fallback's
+  service date now follows the schedule, as the Amtrak source's does: a train that leaves the
+  Central, Mountain or Pacific zone in the evening after midnight Eastern, such as 595 out of San
+  Diego at 21:01 Pacific, runs on the next day's service. Before, it got the origin's local date,
+  so its `start_date` was a day early and it was matched against the wrong day's calendar; a
+  train whose local origin date matches no service day is now left out. Consumers that keyed
   on `asm-` entity ids or read `vehicle.label` as a route name must change; see "Consumer
   migration" in the README. Consumers that read the train number from `trip_short_name` are not
   affected (#122).
