@@ -52,6 +52,60 @@ flowchart LR
   http --> apps["Transit apps and consumers"]
 ```
 
+## System requirements
+
+The image runs the service, one headless Chromium for the browser sources, and a Java validator
+in one container. Memory is what decides the size of the host.
+
+| | Minimum | Recommended |
+| --- | --- | --- |
+| CPU | 2 cores, 64-bit (`x86-64` or `ARMv8`) | 4 cores |
+| Memory for the container | 1.5 GiB (the Compose `mem_limit`) | 2 GiB (set `mem_limit: 2g`) |
+| Host RAM | 2 GiB | 4 GiB |
+| Free disk | 2 GiB | 5 GiB |
+| OS | 64-bit Linux, macOS, or Windows with Docker Engine and the Compose v2 plugin, or Docker Desktop | The same |
+| Network | Outbound HTTPS to the hosts listed below | The same |
+
+**Memory.** These figures were measured on `v0.8.0` with every source on and the Compose
+defaults, sampled from `docker stats` and per-process RSS:
+
+| Process | Typical | Notes |
+| --- | --- | --- |
+| Service (Rust) | 55–85 MiB | Flat over 24 hours |
+| Java validator | about 265 MiB | Only while it checks a new static ZIP: at startup, when Amtrak publishes a new `GTFS.zip`, and when newly observed tracks rebuild `static.zip` |
+| Browser worker (Python) | 60–250 MiB | Grew with uptime in `v0.8.0` (#118) |
+| Playwright driver (Node.js) | about 160 MiB | |
+| Chromium headless shell | 350–700 MiB | Grows with the status page's age; the page is recycled every `BROWSER_MAX_AGE_SECS` |
+
+The container uses about 400–550 MiB right after it starts. On `v0.8.0` it climbs to about
+1 GiB over several hours, with short peaks near the 1.5 GiB limit. Issue #118 tracks that growth
+and its fix. The Compose `tmpfs` mounts (`/tmp` and `/home/amtrak`, 256 MiB each) and
+`shm_size: 64mb` count toward the same limit, so do not lower `mem_limit` below 1.5 GiB with
+the browser sources on. With both browser sources off (`AMTRAK_TRACKS_AMTRAK=off` and
+`AMTRAK_ADVISORIES=off`), no Python or Chromium process runs. From the figures above, the service and the
+validator together should peak at about 350 MiB (not measured in that mode), so a 1 GiB limit
+leaves room.
+
+**CPU.** CPU use has not been measured yet, so the CPU row is sizing guidance. Chromium page
+loads and validator runs are the busy moments; between them the service mostly waits
+on its next poll. A 64-bit OS is required: there is no `linux/arm/v7` image, so a Raspberry Pi
+needs a 64-bit OS (see [Raspberry Pi](#raspberry-pi-linuxarm64)).
+
+**Disk.** The image is about 1.1 GB. The `amtrak-data` volume holds the immutable generations,
+capped at 256 MiB of unique bytes by `AMTRAK_GENERATION_BUDGET_BYTES` (see
+[Volume retention and rollback](#volume-retention-and-rollback)); it held about 42 MB after a
+few hours. Leave room to pull the next image beside the current one.
+
+**Network.** The service needs outbound HTTPS to `content.amtrak.com` (`GTFS.zip`, about 18.5 MB,
+downloaded only when Amtrak publishes a new one), `maps.amtrak.com` (the train poll each cycle), and
+`asm-backend.transitdocs.com` (the fallback). The browser worker needs `www.amtrak.com` for
+notices and track documents. Track sources also call `hartfordline.com` and, with credentials,
+`raildata.njtransit.com`. Nothing needs to reach the host from outside: the feed is published on
+`127.0.0.1:8090`.
+
+**Tested on** Docker Engine 29.10 with Compose v5.8 (Debian 13, amd64), Docker Desktop on macOS
+(Apple silicon), and Podman 4.9 (Ubuntu 24.04, `--network=host`).
+
 ## Install with Docker
 
 Everything (the service, its browser worker with one headless Chromium, and the GTFS validator)
