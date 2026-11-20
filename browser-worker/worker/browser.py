@@ -56,6 +56,16 @@ def describe_error(error: BaseException) -> str:
     return f"{name}: {message}"
 
 
+def is_browser_error(error: BaseException) -> bool:
+    """Whether ``error`` is one of Playwright's own errors rather than a fault in this code.
+
+    Playwright's message can run on into a call log and the browser's recent output, which may
+    name a page URL with its query string, so such an error is logged through
+    :func:`describe_error`, not as a traceback. Checked by package, so Playwright is not imported.
+    """
+    return any(cls.__module__.split(".", 1)[0] == "playwright" for cls in type(error).__mro__)
+
+
 def _url_without_secrets(match: re.Match[str]) -> str:
     try:
         parts = urlsplit(match.group(0))

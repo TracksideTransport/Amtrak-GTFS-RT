@@ -26,7 +26,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from urllib.parse import urljoin
 
-from ..browser import SharedBrowser, describe_error
+from ..browser import SharedBrowser, describe_error, is_browser_error
 from .config import Config
 from .store import SnapshotStore, safe_detail_name
 
@@ -286,8 +286,15 @@ async def run_forever(
             logger.warning(
                 "advisories markup not obtained this cycle (%s); keeping last snapshot", miss
             )
-        except Exception:  # noqa: BLE001 — fail-open: never let a cycle crash the loop
-            logger.exception("poll cycle failed; keeping last snapshot")
+        except Exception as error:  # noqa: BLE001 — fail-open: never let a cycle crash the loop
+            if is_browser_error(error):
+                # A browser that went away mid-cycle: its message carries the browser's recent
+                # output, which can name page URLs with query strings. One log-safe line.
+                logger.warning(
+                    "poll cycle failed (%s); keeping last snapshot", describe_error(error)
+                )
+            else:
+                logger.exception("poll cycle failed; keeping last snapshot")
         count += 1
         if iterations is not None and count >= iterations:
             break

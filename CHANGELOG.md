@@ -91,7 +91,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   A failed status fetch carries the same detail. The notices poller's
   `advisories markup not obtained this cycle` line now gives the reason: the navigation error, a
   gate that never appeared, or a page still changing at the timeout. A failed detail page also
-  logs its reason. Any URL in these lines keeps only its scheme, host, port, and path (#115).
+  logs its reason. A notices cycle in which the browser itself fails (for example, it closed
+  mid-cycle) logs one `WARNING`, `poll cycle failed (...)`, instead of a traceback whose Playwright
+  message carried the browser's recent output, page URLs and query strings included; any other
+  error still logs its traceback. Any URL in these lines keeps only its scheme, host, port, and
+  path (#115).
 - **Validation reports carry only their own run.** `validation-reports/` held two tracked
   records from August 2026, so every `scripts/validate-feeds.sh` run overwrote the tracked
   `release-evidence.json` and the `validation-reports` and `offline-validation-reports`

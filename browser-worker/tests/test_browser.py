@@ -6,7 +6,7 @@ import logging
 
 import pytest
 
-from worker.browser import MAX_ERROR_CHARS, SharedBrowser, describe_error
+from worker.browser import MAX_ERROR_CHARS, SharedBrowser, describe_error, is_browser_error
 from worker.notices import poller as notices_poller
 from worker.notices.config import Config as NoticesConfig
 from worker.notices.store import SnapshotStore
@@ -319,3 +319,59 @@ def test_notices_log_a_gate_that_never_appeared(tmp_path, monkeypatch, caplog):
         f"advisories markup not obtained this cycle (gate {cfg.gate_selector!r} not present "
         "after 1s); keeping last snapshot"
     ]
+
+
+class PlaywrightError(Exception):
+    """Stands in for Playwright's error classes, which all live in the ``playwright`` package."""
+
+    __module__ = "playwright._impl._errors"
+
+
+# What Playwright raises from a call on a browser that has gone away: the first line, then the
+# browser's recent output, which can carry a page URL with its query string.
+CLOSED_WITH_LOGS = (
+    "BrowserContext.new_page: Target page, context or browser has been closed\n"
+    "Browser logs:\n"
+    '[pid=7][err] [INFO:CONSOLE(1)] "fetch failed", source: '
+    "https://www.amtrak.com/dotcom/travel-service/statuses/98?service-date=2026-11-18 (1)\n"
+)
+
+
+def test_browser_errors_are_told_apart_from_programming_errors():
+    assert is_browser_error(PlaywrightError("closed"))
+    assert not is_browser_error(RuntimeError("bug"))
+    assert not is_browser_error(Error("a stand-in defined outside playwright"))
+    playwright_api = pytest.importorskip("playwright.async_api")
+    assert is_browser_error(playwright_api.Error("closed"))
+    assert is_browser_error(playwright_api.TimeoutError("timed out"))
+
+
+def test_a_browser_failure_in_a_notices_cycle_is_one_line_without_the_browser_logs(
+    tmp_path, monkeypatch, caplog
+):
+    async def closed(self, **_kwargs):
+        raise PlaywrightError(CLOSED_WITH_LOGS)
+
+    monkeypatch.setattr(FakeBrowser, "new_context", closed)
+    assert _one_notices_cycle(tmp_path, _notices_cfg(tmp_path), caplog) == [
+        "poll cycle failed (PlaywrightError: BrowserContext.new_page: Target page, context or "
+        "browser has been closed); keeping last snapshot"
+    ]
+    notices = [r for r in caplog.records if r.name == "worker.notices.poller"]
+    assert all(record.exc_info is None for record in notices)
+    assert "service-date" not in caplog.text
+
+
+def test_a_programming_error_in_a_notices_cycle_keeps_its_traceback(tmp_path, monkeypatch, caplog):
+    async def broken(self, **_kwargs):
+        raise TypeError("unexpected keyword")
+
+    monkeypatch.setattr(FakeBrowser, "new_context", broken)
+    _one_notices_cycle(tmp_path, _notices_cfg(tmp_path), caplog)
+    errors = [
+        r
+        for r in caplog.records
+        if r.name == "worker.notices.poller" and r.levelno == logging.ERROR
+    ]
+    assert [r.getMessage() for r in errors] == ["poll cycle failed; keeping last snapshot"]
+    assert errors[0].exc_info is not None
