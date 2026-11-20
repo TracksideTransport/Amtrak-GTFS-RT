@@ -333,9 +333,9 @@ def test_browser_relaunch_backs_off_and_resets_after_a_success():
         outcome = pages.pop(0) if pages else _FakePage({"status": 200, "body": '{"data": []}'})
         if isinstance(outcome, Exception):
             raise outcome
-        return outcome
+        return None, None, outcome
 
-    browser._launch = launch
+    browser._open = launch
     train = DueTrain("167", "2026-10-17", 60.0)
 
     async def attempt():
@@ -378,14 +378,22 @@ def test_the_browser_is_recycled_after_its_maximum_age():
 
     async def launch():
         launches.append(clock[0])
-        return _FakePage({"status": 200, "body": '{"data": []}'})
+        return None, None, _FakePage({"status": 200, "body": '{"data": []}'})
 
-    browser._launch = launch
+    browser._open = launch
     train = DueTrain("167", "2026-10-17", 60.0)
-    asyncio.run(browser.fetch(cfg, train))
+
+    async def cycle():
+        await browser.recycle_if_due()
+        return await browser.fetch(cfg, train)
+
+    asyncio.run(cycle())
     clock[0] = 50
-    asyncio.run(browser.fetch(cfg, train))
+    asyncio.run(cycle())
     clock[0] = 100
+    asyncio.run(cycle())
+    # Only between cycles: a fetch alone never recycles, whatever the page's age.
+    clock[0] = 500
     asyncio.run(browser.fetch(cfg, train))
     assert launches == [0.0, 100]
 
@@ -778,3 +786,144 @@ def test_a_fresh_install_still_checks_a_boarding_stop_at_an_unobserved_station()
     assert check(NOW) == ["172"]
     assert check(NOW + timedelta(seconds=60)) == []
     assert check(NOW + timedelta(seconds=90)) == ["172"]
+
+
+def _three_trains():
+    trains = _two_trains()
+    third = json.loads(json.dumps(trains["features"][0]))
+    third["properties"]["TrainNum"] = "175"
+    trains["features"].append(third)
+    return trains
+
+
+class _RecyclePage:
+    def __init__(self, number, log, clock, fail_goto):
+        self.number = number
+        self.log = log
+        self.clock = clock
+        self.fail_goto = fail_goto
+
+    async def goto(self, _url, **_kwargs):
+        self.log.append(("load", self.number))
+        if self.fail_goto:
+            raise TimeoutError("Timeout 45000ms exceeded.")
+
+    async def evaluate(self, _script, _args):
+        self.log.append(("fetch", self.number))
+        self.clock[0] += 40  # a slow fetch: the maximum age can pass mid-cycle
+        return {"status": 200, "body": '{"data": []}'}
+
+
+class _RecycleContext:
+    def __init__(self, owner):
+        self.owner = owner
+        self.closed = False
+
+    async def route(self, _pattern, _handler):
+        return None
+
+    async def new_page(self):
+        owner = self.owner
+        number = len(owner.pages) + 1
+        fail = number in owner.failing_loads
+        page = _RecyclePage(number, owner.log, owner.clock, fail)
+        owner.pages.append(page)
+        return page
+
+    async def close(self):
+        self.closed = True
+
+
+class _RecycleBrowser:
+    def __init__(self, log, clock, failing_loads):
+        self.log = log
+        self.clock = clock
+        self.failing_loads = failing_loads
+        self.pages: list[_RecyclePage] = []
+        self.contexts: list[_RecycleContext] = []
+
+    def is_connected(self):
+        return True
+
+    async def new_context(self, **_kwargs):
+        context = _RecycleContext(self)
+        self.contexts.append(context)
+        return context
+
+    async def close(self):
+        return None
+
+
+def _recycle_run(failing_loads, cycles):
+    from worker.browser import SharedBrowser
+
+    class _Playwright:
+        async def stop(self):
+            return None
+
+    log: list[tuple] = []
+    clock = [0.0]
+    fake = _RecycleBrowser(log, clock, failing_loads)
+
+    async def start(_mode):
+        return _Playwright(), fake
+
+    cfg = Config(browser_max_age_secs=70, cooldown_secs=0)
+    shared = SharedBrowser(start=start)
+    resident = ResidentBrowser(cfg, shared, monotonic=lambda: clock[0])
+
+    async def trains(_cfg):
+        return _three_trains()
+
+    async def tick(_secs):
+        log.append(("cycle",))
+        clock[0] += 60
+
+    store = TrackStore()
+    asyncio.run(
+        run_forever(
+            store,
+            cfg,
+            shared=shared,
+            browser=resident,
+            trains_fetcher=trains,
+            sleep=tick,
+            clock=lambda: NOW,
+            iterations=cycles,
+        )
+    )
+    per_cycle: list[list[tuple]] = [[]]
+    for event in log:
+        if event == ("cycle",):
+            per_cycle.append([])
+        else:
+            per_cycle[-1].append(event)
+    return per_cycle, resident, shared, fake, store
+
+
+def test_a_due_recycle_happens_between_cycles_not_mid_cycle():
+    per_cycle, _resident, shared, fake, _store = _recycle_run(failing_loads=set(), cycles=2)
+    # The maximum age passes during the first cycle's fetches; the page is not swapped there.
+    assert per_cycle[0] == [("load", 1), ("fetch", 1), ("fetch", 1), ("fetch", 1)]
+    # The next cycle loads the new page before its first fetch, then fetches every pick on it.
+    assert per_cycle[1] == [("load", 2), ("fetch", 2), ("fetch", 2), ("fetch", 2)]
+    assert fake.contexts[0].closed and shared.holders == 0
+
+
+def test_a_failed_recycle_keeps_the_old_page_fetches_every_pick_and_starts_no_backoff(caplog):
+    with caplog.at_level(logging.WARNING, logger="worker.tracks.poller"):
+        per_cycle, resident, _shared, fake, store = _recycle_run(failing_loads={2}, cycles=3)
+    assert per_cycle[0] == [("load", 1), ("fetch", 1), ("fetch", 1), ("fetch", 1)]
+    # The reload failed: the old page served every pick of the cycle.
+    assert per_cycle[1] == [("load", 2), ("fetch", 1), ("fetch", 1), ("fetch", 1)]
+    assert fake.contexts[1].closed, "the failed reload's context is closed"
+    assert resident._backoff == 0 and resident._next_launch == 0
+    assert store.consecutive_failures() == 0
+    # A later cycle tries again, and the swap succeeds.
+    assert per_cycle[2] == [("load", 3), ("fetch", 3), ("fetch", 3), ("fetch", 3)]
+    assert fake.contexts[0].closed
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert warnings == [
+        "status page recycle failed (TimeoutError: Timeout 45000ms exceeded.); "
+        "keeping the current page"
+    ]

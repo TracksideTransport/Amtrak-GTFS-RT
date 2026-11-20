@@ -234,12 +234,14 @@ def test_a_status_context_that_will_not_close_takes_the_browser_down_while_notic
     async def scenario():
         assert await resident.fetch(cfg, TRAIN) == {"data": []}
         notices = await shared.acquire()  # a notices cycle is mid-flight
-        clock[0] = 5  # past the maximum age: the status page is recycled
-        assert await resident.fetch(cfg, TRAIN) == {"data": []}
+        clock[0] = 5  # past the maximum age: the status page is recycled between cycles
+        await resident.recycle_if_due()
         # The context that would not close does not stay open inside a browser the notices lease
-        # keeps running: that browser is closed, and the status page now lives in a new one.
+        # keeps running: that browser is closed, the replacement page with it.
         first = browsers[0]
         assert first.closed and first.open_contexts() == []
+        # The next fetch opens the status page in a new browser, with no relaunch backoff.
+        assert await resident.fetch(cfg, TRAIN) == {"data": []}
         assert len(browsers) == 2 and len(browsers[1].open_contexts()) == 1
         await shared.release(notices)  # stale now: returning it does nothing
         assert shared.running and shared.holders == 1
