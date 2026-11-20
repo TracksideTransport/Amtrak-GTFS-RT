@@ -52,8 +52,9 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         if: steps.scope.outputs.logic == 'true'
 
-      # rust-cache restores dependencies only, but #142 saw a fixture built from stale code after a
-      # restore. Delete this crate's own artifacts so it always compiles from the checkout.
+      # #142: a fixture was once built from stale code after a cache restore, and the restored
+      # target/ does hold this crate's old artifacts (the first run of this step removed 5 GiB).
+      # Delete them so this crate and its examples always compile from the checkout.
       - name: Rebuild this crate from the checkout
         if: steps.scope.outputs.logic == 'true'
         run: cargo clean --locked --package amtrak-gtfs-rt-service
@@ -284,8 +285,9 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         if: steps.paths.outputs.run == 'true'
 
-      # rust-cache restores dependencies only, but #142 saw a fixture built from stale code after a
-      # restore. Delete this crate's own artifacts so it always compiles from the checkout.
+      # #142: a fixture was once built from stale code after a cache restore, and the restored
+      # target/ does hold this crate's old artifacts (the first run of this step removed 5 GiB).
+      # Delete them so this crate and its examples always compile from the checkout.
       - name: Rebuild this crate from the checkout
         if: steps.paths.outputs.run == 'true'
         run: cargo clean --locked --package amtrak-gtfs-rt-service
