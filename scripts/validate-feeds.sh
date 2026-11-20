@@ -147,7 +147,11 @@ ratchet() {
 }
 
 offline_fixtures() {
-  local fixture_dir observed fixture_baseline fixture_output rc failures=0
+  local fixture_dir observed fixture_baseline fixture_output rc failures=0 known_code
+  # The fixtures use the first code in the baseline, so renewing or retiring baseline entries
+  # never breaks them. They need at least one realtime exception to exercise the ratchet.
+  known_code=$(jq -r '.realtime.allowed_errors[0].code // empty' "$BASELINE")
+  [ -n "$known_code" ] || fail "offline fixtures need at least one realtime exception in $BASELINE"
   fixture_dir=$(mktemp -d "${TMPDIR:-/tmp}/amtrak-ratchet.XXXXXX")
   trap 'rm -rf "$fixture_dir"' RETURN
 
@@ -157,15 +161,15 @@ offline_fixtures() {
     cp "$BASELINE" "$fixture_baseline"
     case "$fixture" in
       accepted)
-        jq -n '{static_error_codes:[], realtime_error_codes:["E003"]}' >"$observed"
+        jq -n --arg code "$known_code" '{static_error_codes:[], realtime_error_codes:[$code]}' >"$observed"
         expected=0 ;;
       missing-field)
         jq 'del(.realtime.allowed_errors[0].owner)' "$BASELINE" >"$fixture_baseline"
-        jq -n '{static_error_codes:[], realtime_error_codes:["E003"]}' >"$observed"
+        jq -n --arg code "$known_code" '{static_error_codes:[], realtime_error_codes:[$code]}' >"$observed"
         expected=2 ;;
       expired)
         jq '.realtime.allowed_errors[0].review_on="2020-01-01"' "$BASELINE" >"$fixture_baseline"
-        jq -n '{static_error_codes:[], realtime_error_codes:["E003"]}' >"$observed"
+        jq -n --arg code "$known_code" '{static_error_codes:[], realtime_error_codes:[$code]}' >"$observed"
         expected=2 ;;
       new-error)
         jq -n '{static_error_codes:[], realtime_error_codes:["E999"]}' >"$observed"
@@ -179,8 +183,8 @@ offline_fixtures() {
     esac
     if fixture_output=$(ratchet "$fixture_baseline" "$observed" "$AS_OF"); then rc=0; else rc=$?; fi
     if [ "$fixture" = "resolved-error" ] \
-      && ! jq -e '.stale_realtime | index("E003") != null' <<<"$fixture_output" >/dev/null; then
-      printf 'offline fixture resolved-error: did not surface stale E003\n' >&2
+      && ! jq -e '.stale_realtime | index($code) != null' --arg code "$known_code" <<<"$fixture_output" >/dev/null; then
+      printf 'offline fixture resolved-error: did not surface stale %s\n' "$known_code" >&2
       failures=1
       continue
     fi
