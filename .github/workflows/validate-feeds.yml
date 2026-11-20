@@ -95,7 +95,7 @@ jobs:
 
       - name: Set up Java 17
         # Both validators require Java 17 (the RT validator's README saying 11 is stale).
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "17"
