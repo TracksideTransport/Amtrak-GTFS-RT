@@ -276,8 +276,8 @@ def choose_fetches(
 
     ``tracked`` maps a train-day with a stored document to the station codes that already show a
     track in it. ``hinted`` train-days were named by an early-refresh hint. The service already
-    spaced those by ``AMTRAK_TRACKS_MIN_GAP_SECS``, so they skip the cooldown and go first within
-    their group.
+    spaced those by ``AMTRAK_TRACKS_MIN_GAP_SECS``, so they skip the cooldown. They go first in
+    groups 2 and 3; group 1 ignores the hint and stays soonest first.
     """
     if max_fetches <= 0:
         return []

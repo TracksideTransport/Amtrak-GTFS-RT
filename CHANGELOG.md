@@ -23,11 +23,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   inside the hot window at a station not yet listed (on a fresh install, everything but the seeded
   New York, Newark, and New Haven) still keeps the train checked between full polls, under the
   cooldown. Both fields are optional and the schema stays `amtrak-fleet-trains/v1`; a list without
-  them counts every stop, as before. A browser failure mid-cycle no longer marks the trains it left unfetched as attempted,
-  so they go first on the next cycle. Each cycle also logs one INFO line naming every pick,
-  whether it was hot or ready, and its outcome, for example `track poll picks: 172 hot stored, 86
-  hot rejected (http 404), 95 hot browser unavailable (Error), 66 ready skipped (browser
-  unavailable)` (#120).
+  them counts every stop, as before. A browser failure mid-cycle no longer marks the trains it left
+  unfetched as attempted: a hot one is retried as soon as the browser is back, and a ready one
+  waits for the next full poll, up to 15 minutes, unless it is warm or hinted. The pick whose own
+  status fetch failed (timed out or refused) does count as an attempt and waits out its cooldown,
+  so one train's failing request cannot take the browser down after every relaunch. Each cycle
+  also logs one INFO line naming every pick, whether it was hot or ready, and its outcome, for
+  example `track poll picks: 172 hot stored, 86 hot rejected (http 404), 95 hot browser
+  unavailable (Error), 66 ready skipped (browser unavailable)` (#120).
 - **Observed tracks reach `static.zip` while the service runs.** A static snapshot built
   from the configured platforms alone no longer counts as current once a track is observed, so the
   rebuild downloads `GTFS.zip` in full instead of accepting a `304`. Before, observed platforms were

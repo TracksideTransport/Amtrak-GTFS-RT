@@ -7,9 +7,11 @@ blocked, and so is every host outside ``amtrak.com`` unless ``BLOCK_THIRD_PARTY`
 
 A failed status fetch keeps the last good document. A browser failure ends the cycle's fetches
 and the relaunch backs off, so a blocked or crashing browser is not relaunched once per train.
-The trains it left unfetched are not counted as attempted, so they go first on the next cycle. A
-cycle counts as a success only when it had nothing to fetch or stored a document, so a worker
-Amtrak has stopped answering lets ``/tracks.json`` go stale instead of looking current.
+The trains it left unfetched are not counted as attempted: a hot one is retried as soon as the
+browser is back, and a ready one waits for the next full poll unless it is warm or hinted. A pick
+whose own in-page fetch failed counts as an attempt and takes the cooldown. A cycle counts as a
+success only when it had nothing to fetch or stored a document, so a worker Amtrak has stopped
+answering lets ``/tracks.json`` go stale instead of looking current.
 """
 
 from __future__ import annotations
@@ -329,11 +331,11 @@ async def poll_once(
     attempt that reached Amtrak, stored or rejected, starts the train's cooldown, and so does a
     pick whose own in-page fetch ran and failed (:class:`BrowserUnavailable` with ``attempted``).
     A pick the browser could not run at all (a failed launch or first page load, or the relaunch
-    backoff) and every pick after a browser failure are not stamped. A hot one is picked again
-    first once the browser is back; a ready one is left out of the cycles between full polls
-    unless it is warm or hinted, so it waits for the next full poll. ``last_fetched`` is pruned to
-    the trains still due. One INFO line names each pick, whether it was hot or ready, and its
-    outcome; a second gives the cycle's totals.
+    backoff) and every pick after a browser failure are not stamped. A hot one is retried as soon
+    as the browser is back; a ready one is left out of the cycles between full polls unless it is
+    warm or hinted, so it waits for the next full poll. ``last_fetched`` is pruned to the trains
+    still due. One INFO line names each pick, whether it was hot or ready, and its outcome; a
+    second gives the cycle's totals.
     """
     geojson = await trains_fetcher(cfg)
     profile = LeadProfile.load(

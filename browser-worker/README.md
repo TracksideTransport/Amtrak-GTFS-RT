@@ -68,10 +68,12 @@ they never share cookies or pages.
 - Each cycle takes, in order: hot trains with no document yet, soonest first; hot trains that
   have a document, oldest attempt first; then every other due train, including a warm one or one
   that has just left a stop, oldest attempt first. Every group waits `TRACK_COOLDOWN_SECS`
-  (default 90 seconds) after an attempt. Trains named in an early-refresh hint skip the cooldown
-  and go first within their group. A fetch Amtrak answered counts as an attempt, even a rejected
-  one; a pick the browser could not run does not, so it is taken again on the next cycle. Each
-  cycle fetches at most `MAX_FETCHES_PER_CYCLE` trains (default 24).
+  (default 90 seconds) after an attempt. Trains named in an early-refresh hint skip the cooldown,
+  and they go first among hot trains that have a document and among the other due trains; hot
+  trains with no document stay soonest first. A fetch Amtrak answered counts as an attempt, even
+  a rejected one, and so does a status fetch that ran in the page and failed (timed out or was
+  refused). A pick the browser could not run at all does not. Each cycle fetches at most
+  `MAX_FETCHES_PER_CYCLE` trains (default 24).
 - Full polls run every `AMTRAK_TRACKS_BASE_INTERVAL_SECS` (default 900). Between them, each
   `POLL_INTERVAL_SECS` cycle fetches only hot and warm trains and trains named in the service's
   early refresh hints.
@@ -82,7 +84,12 @@ they never share cookies or pages.
   status page is recycled every `BROWSER_MAX_AGE_SECS`.
 - A browser failure (crash, launch failure, or a hung fetch) ends that cycle's fetches. The next
   launch waits 1 minute, doubling up to `RELAUNCH_BACKOFF_MAX_SECS`, and the wait resets after a
-  successful fetch. The trains the cycle did not fetch keep their place and go first next time.
+  successful fetch. The trains the cycle did not fetch are not counted as attempted. A hot one is
+  retried as soon as the browser is back. A ready one is left out of the cycles between full
+  polls unless it is warm or named in a hint, so it waits for the next full poll, up to
+  `AMTRAK_TRACKS_BASE_INTERVAL_SECS` (15 minutes by default). The pick whose own fetch failed
+  counts as an attempt and waits out its cooldown, so a train whose status request keeps failing
+  cannot take the browser down after every relaunch.
 - Each cycle logs `due=`, `picked=`, `stored=`, and `rejected=` with the reason per train (for
   example `{'http 403': 3}`), so an Akamai block is visible in the logs. A line before it names
   every pick, whether it was hot or ready, and its outcome, for example
