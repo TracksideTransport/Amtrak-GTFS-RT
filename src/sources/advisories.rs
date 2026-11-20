@@ -43,8 +43,10 @@ struct Cached {
 
 /// An [`RtSource`] decorator that appends best-effort scoped advisory alerts to the inner source's
 /// batch. It is strictly **additive and fail-open**: the inner batch (and its errors) pass through
-/// unchanged, and advisory scraping never fails the `fetch`. A TTL cache bounds page fetches and
-/// serves the last-good advisories through a transient scrape failure.
+/// unchanged, and advisory scraping never fails the `fetch`. An empty inner batch is returned empty,
+/// so notices never stand in for a source that returned nothing and the chain still falls back. A
+/// TTL cache bounds page fetches and serves the last-good advisories through a transient scrape
+/// failure.
 pub struct WithAdvisories<S> {
     inner: S,
     notices: Notices,
@@ -135,6 +137,11 @@ impl<S: RtSource> RtSource for WithAdvisories<S> {
 
     async fn fetch(&self, gtfs: &Gtfs) -> Result<RtBatch, SourceError> {
         let mut batch = self.inner.fetch(gtfs).await?;
+        // Notices ride on a batch; they do not stand in for one. An inner source that returned
+        // nothing stays empty so the chain falls back to the next source.
+        if batch.is_empty() {
+            return Ok(batch);
+        }
         let mut advisories = self.notices.current(gtfs).await;
         batch.alerts.entity.append(&mut advisories);
         Ok(batch)
@@ -707,11 +714,7 @@ mod tests {
         let fallback = WithAdvisories::sharing(
             MockSource {
                 name: "transitdocs-asm",
-                behavior: Behavior::Ok(RtBatch {
-                    trip_updates: FeedMessage::default(),
-                    vehicle_positions: FeedMessage::default(),
-                    alerts: FeedMessage::default(),
-                }),
+                behavior: Behavior::Ok(crate::sources::mock::batch_with(1)),
             },
             primary.notices.clone(),
         );
@@ -727,6 +730,36 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["adv"]
         );
+    }
+
+    /// Cached notices do not turn a source that returned nothing into a non-empty batch, so an
+    /// empty Amtrak answer still falls back (and is warned) instead of publishing a generation
+    /// with notices and no trains.
+    #[tokio::test]
+    async fn notices_do_not_make_an_empty_source_non_empty() {
+        let primary = WithAdvisories::with_primed_cache(
+            MockSource {
+                name: "amtrak",
+                behavior: Behavior::Empty,
+            },
+            cfg("http://unused"),
+            vec![entity("adv")],
+        );
+        assert!(primary.fetch(&gtfs()).await.unwrap().is_empty());
+
+        let fallback = WithAdvisories::sharing(
+            MockSource {
+                name: "transitdocs-asm",
+                behavior: Behavior::Ok(crate::sources::mock::batch_with(1)),
+            },
+            primary.notices.clone(),
+        );
+        let chain: Vec<Box<dyn RtSource>> = vec![Box::new(primary), Box::new(fallback)];
+        let selected = crate::orchestrator::select_batch(&chain, &gtfs())
+            .await
+            .unwrap();
+        assert_eq!(selected.source_name, "transitdocs-asm");
+        assert_eq!(selected.batch.alerts.entity.len(), 1, "notices kept");
     }
 
     fn cfg(url: &str) -> AdvisoryConfig {
