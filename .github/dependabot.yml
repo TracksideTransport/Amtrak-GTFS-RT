@@ -5,8 +5,10 @@
 #   `python`, `github_actions`, `docker`). An empty `labels` list did not stop it creating them.
 # - Cargo and pip are checked weekly; GitHub Actions and the Docker base images, which change
 #   often and rarely matter between releases, monthly.
-# - Minor and patch updates are grouped into one pull request per ecosystem; major updates arrive
-#   one pull request each, so a breaking change is reviewed on its own.
+# - Each ecosystem gets at most two version-update pull requests at a time: one for its minor and
+#   patch updates and one for its major updates, each grouped, so a breaking change is reviewed
+#   as a batch instead of one pull request per package. (Dependabot treats a 0.x minor bump, such
+#   as gtfs-structures 0.46 to 0.52, as major.) Security updates are not grouped or limited.
 # - A cooldown keeps a new release out of version updates until it has been out for a while
 #   (Cargo and pip: patch 3 days, minor 7, major 30; GitHub Actions and Docker, which Dependabot
 #   allows only a single period for: 7 days),
@@ -24,7 +26,7 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 2
     cooldown:
       default-days: 7
       semver-patch-days: 3
@@ -36,13 +38,17 @@ updates:
         update-types:
           - "minor"
           - "patch"
+      cargo-major:
+        applies-to: version-updates
+        update-types:
+          - "major"
 
   # The browser worker: browser-worker/requirements.txt (Playwright, pytest, cryptography).
   - package-ecosystem: "pip"
     directory: "/browser-worker"
     schedule:
       interval: "weekly"
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 2
     cooldown:
       default-days: 7
       semver-patch-days: 3
@@ -54,6 +60,10 @@ updates:
         update-types:
           - "minor"
           - "patch"
+      pip-major:
+        applies-to: version-updates
+        update-types:
+          - "major"
 
   # The SHA-pinned actions in .github/workflows. Dependabot keeps the SHA pins and their
   # version comments.
@@ -61,7 +71,7 @@ updates:
     directory: "/"
     schedule:
       interval: "monthly"
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 2
     cooldown:
       default-days: 7
     groups:
@@ -70,6 +80,10 @@ updates:
         update-types:
           - "minor"
           - "patch"
+      actions-major:
+        applies-to: version-updates
+        update-types:
+          - "major"
 
   # The digest-pinned base images in Dockerfile (Rust builder, Temurin, Python runtime) and
   # proxy/Dockerfile.
@@ -92,7 +106,7 @@ updates:
       - dependency-name: "eclipse-temurin"
     schedule:
       interval: "monthly"
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 2
     cooldown:
       default-days: 7
     groups:
@@ -101,3 +115,7 @@ updates:
         update-types:
           - "minor"
           - "patch"
+      docker-major:
+        applies-to: version-updates
+        update-types:
+          - "major"
