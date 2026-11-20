@@ -260,3 +260,149 @@ def test_a_hinted_train_skips_the_cooldown_and_goes_first():
     assert [train.train_number for train in picks] == ["66"]
     unhinted = choose_fetches(due, fetched, NOW, hot_secs=720, cooldown_secs=90, max_fetches=24)
     assert [train.train_number for train in unhinted] == ["67"]
+
+
+def _fleet_trains(trains, track_stations=None):
+    """An ``amtrak-fleet-trains/v1`` list. ``trains`` maps a number to ``(code, secs, boarding)``."""
+    document = {
+        "schema": "amtrak-fleet-trains/v1",
+        "trains": [
+            {
+                "train_number": number,
+                "service_date": "2026-10-17",
+                "stops": [
+                    {
+                        "code": code,
+                        "times_unix": [int((NOW + timedelta(seconds=secs)).timestamp())],
+                        **({} if boarding else {"boarding": False}),
+                    }
+                    for code, secs, boarding in stops
+                ],
+            }
+            for number, stops in trains.items()
+        ],
+    }
+    if track_stations is not None:
+        document["track_stations"] = list(track_stations)
+    return document
+
+
+def test_more_hot_trains_than_the_cap_still_fetch_one_without_a_document():
+    # #120: 30 hot trains already hold a document, and 172 (11 minutes from Providence) has none.
+    # Ordered only by next stop, 172 came 31st of 31 every cycle and never got one of 24 slots.
+    trains = {str(number): [("NYP", 60 + number * 10, True)] for number in range(1, 31)}
+    trains["172"] = [("PVD", 660, True)]
+    due = due_trains(_fleet_trains(trains), NOW, before=BEFORE, after=AFTER)
+    tracked = {train.key: frozenset() for train in due if train.train_number != "172"}
+    picks = choose_fetches(
+        due, {}, NOW, hot_secs=720, cooldown_secs=90, max_fetches=24, tracked=tracked
+    )
+    assert len(picks) == 24
+    assert picks[0].train_number == "172"
+
+
+def test_hot_trains_with_a_document_wait_out_the_cooldown_and_rotate():
+    trains = {str(number): [("NYP", 60 + number * 10, True)] for number in range(1, 31)}
+    due = due_trains(_fleet_trains(trains), NOW, before=BEFORE, after=AFTER)
+    tracked = {train.key: frozenset() for train in due}
+    # Trains 1-24 were fetched this cycle, 25-30 a cycle earlier.
+    fetched = {
+        train.key: NOW.timestamp() - (0 if int(train.train_number) <= 24 else 60) for train in due
+    }
+    soon = NOW + timedelta(seconds=30)
+    picks = choose_fetches(
+        due, fetched, soon, hot_secs=720, cooldown_secs=90, max_fetches=24, tracked=tracked
+    )
+    assert [train.train_number for train in picks] == [str(number) for number in range(25, 31)]
+    later = NOW + timedelta(seconds=120)
+    rotated = choose_fetches(
+        due, fetched, later, hot_secs=720, cooldown_secs=90, max_fetches=24, tracked=tracked
+    )
+    # Oldest attempt first, so the six that waited go ahead of the 24 fetched after them.
+    assert [train.train_number for train in rotated[:6]] == [str(n) for n in range(25, 31)]
+    assert len(rotated) == 24
+
+
+def test_a_hinted_train_goes_after_hot_trains_and_ahead_of_the_rotation():
+    trains = {
+        "1": [("PVD", 300, True)],  # hot, no document
+        "2": [("PVD", 200, True)],  # hot, document, cooled down
+        "3": [("PVD", 100, True)],  # hot, document, fetched 30 s ago, hinted
+        "66": [("NYP", 1500, True)],  # not hot, fetched 30 s ago, hinted
+        "67": [("NYP", 1400, True)],  # not hot, never fetched
+    }
+    due = due_trains(_fleet_trains(trains), NOW, before=BEFORE, after=AFTER)
+    keys = {train.train_number: train.key for train in due}
+    tracked = {keys["2"]: frozenset(), keys["3"]: frozenset()}
+    fetched = {
+        keys["2"]: NOW.timestamp() - 120,
+        keys["3"]: NOW.timestamp() - 30,
+        keys["66"]: NOW.timestamp() - 30,
+    }
+    picks = choose_fetches(
+        due,
+        fetched,
+        NOW,
+        hot_secs=720,
+        cooldown_secs=90,
+        max_fetches=24,
+        tracked=tracked,
+        hinted={keys["3"], keys["66"]},
+    )
+    assert [train.train_number for train in picks] == ["1", "3", "2", "66", "67"]
+    unhinted = choose_fetches(
+        due, fetched, NOW, hot_secs=720, cooldown_secs=90, max_fetches=24, tracked=tracked
+    )
+    assert [train.train_number for train in unhinted] == ["1", "2", "67"]
+
+
+def test_a_stop_where_riders_cannot_board_does_not_make_a_train_hot():
+    # Route 128 is deboard-only on Boston-bound trains, and Amtrak posts few tracks there.
+    deboard = _fleet_trains({"172": [("RTE", 300, False), ("BOS", 1500, True)]})
+    (train,) = due_trains(deboard, NOW, before=BEFORE, after=AFTER)
+    assert train.upcoming == frozenset({"RTE", "BOS"})
+    assert not is_hot(train, {}, 720)
+    board = _fleet_trains({"172": [("RTE", 300, True), ("BOS", 1500, True)]})
+    (train,) = due_trains(board, NOW, before=BEFORE, after=AFTER)
+    assert is_hot(train, {}, 720)
+
+
+def test_a_station_that_never_shows_a_track_does_not_make_a_train_hot():
+    stops = {"172": [("KIN", 300, True), ("PVD", 1500, True)]}
+    listed = _fleet_trains(stops, track_stations=["NYP", "PVD"])
+    (train,) = due_trains(listed, NOW, before=BEFORE, after=AFTER)
+    assert not is_hot(train, {}, 720)
+    # A list without track_stations (an older service) treats every station as one with tracks.
+    (train,) = due_trains(_fleet_trains(stops), NOW, before=BEFORE, after=AFTER)
+    assert is_hot(train, {}, 720)
+    soon = _fleet_trains({"172": [("PVD", 300, True)]}, track_stations=["NYP", "PVD"])
+    (train,) = due_trains(soon, NOW, before=BEFORE, after=AFTER)
+    assert is_hot(train, {}, 720)
+
+
+def test_a_profile_station_skips_deboard_only_and_never_tracked_stops():
+    # The lead-time branch: each stop is held to its own station's hot window.
+    lead = LeadProfile({"PVD": StationWindow(window_before_secs=1800, hot_window_secs=180)})
+
+    def due(document):
+        (train,) = due_trains(
+            document, NOW, before=BEFORE, after=AFTER, lead=lead, hot=timedelta(minutes=12)
+        )
+        return train
+
+    assert is_hot(due(_fleet_trains({"172": [("PVD", 120, True)]})), {}, 720)
+    assert not is_hot(due(_fleet_trains({"172": [("PVD", 120, False)]})), {}, 720)
+    assert not is_hot(
+        due(_fleet_trains({"172": [("PVD", 120, True)]}, track_stations=["NYP"])), {}, 720
+    )
+    # A later stop inside its own window still counts after a skipped one.
+    later = _fleet_trains({"172": [("RTE", 100, False), ("NHV", 600, True)]})
+    assert is_hot(due(later), {}, 720)
+
+
+def test_a_track_on_a_later_stop_outside_the_hot_window_does_not_keep_a_train_hot():
+    # PVD (5 min) has its track; NHV (20 min) is outside the 12-minute window.
+    train = _fleet_trains({"172": [("PVD", 300, True), ("NHV", 1200, True)]})
+    (due,) = due_trains(train, NOW, before=BEFORE, after=AFTER)
+    assert not is_hot(due, {due.key: frozenset({"PVD"})}, 720)
+    assert is_hot(due, {due.key: frozenset({"NHV"})}, 720)

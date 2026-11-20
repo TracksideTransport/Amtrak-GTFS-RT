@@ -3,10 +3,12 @@
 Amtrak's status API often publishes a track only in the last minutes before a train reaches a
 station (Providence showed track 1 about eight minutes before train 167 arrived). Some stations
 publish earlier, and that value is already on the document once the train enters the window, so
-polling trains with a stop near its ETA collects both kinds. A train is hot, and fetched every
-cycle, when its next stop is inside the hot window and an upcoming stop still has no track in its
-last document. Every other due train, including one that has just left a stop, is rotated under a
-cooldown so a busy hour does not fetch every active train every minute.
+polling trains with a stop near its ETA collects both kinds. A train is hot when a stop where
+riders board, at a station where Amtrak publishes tracks, is inside the hot window and still has
+no track in its last document. A hot train with no document yet is fetched every cycle; one that
+has a document waits out the cooldown like the rest, so more hot trains than the per-cycle cap
+cannot starve the others. Every other due train, including one that has just left a stop, is
+rotated under that cooldown so a busy hour does not fetch every active train every minute.
 """
 
 from __future__ import annotations
@@ -15,6 +17,7 @@ import json
 from collections.abc import Collection, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from typing import NamedTuple
 from zoneinfo import ZoneInfo
 
 _ZONES = {
@@ -29,6 +32,18 @@ _ARIZONA_STATIONS = frozenset({"BEN", "FLG", "KNG", "MRC", "TUS", "WLO", "WMJ", 
 _TIME_FORMATS = ("%m/%d/%Y %H:%M:%S", "%m/%d/%Y %I:%M:%S %p")
 
 
+class TrackStop(NamedTuple):
+    """An upcoming stop whose track a rider can use: boarding is allowed and tracks are published.
+
+    ``secs`` is the time until the stop's next future in-window event. ``hot_secs`` is that
+    station's own hot window from a lead-time profile, or ``None`` for the global hot window.
+    """
+
+    code: str
+    secs: float
+    hot_secs: float | None = None
+
+
 @dataclass(frozen=True)
 class DueTrain:
     """One train-day with a stop inside the polling window.
@@ -36,8 +51,9 @@ class DueTrain:
     ``soonest_secs`` is the distance to the closest in-window event, past or future.
     ``next_secs`` is the time until the next future in-window event, or ``None`` when every
     in-window event is already past. ``upcoming`` holds the codes of the stations those future
-    events belong to. ``hot_due`` is set only when a lead-time profile is in use: whether some
-    future event is inside its own station's hot window.
+    events belong to. ``track_stops`` are the upcoming stops that can make the train hot (see
+    :func:`is_hot`): a stop where riders cannot board, or at a station not in the train list's
+    ``track_stations``, is left out.
     """
 
     train_number: str
@@ -45,7 +61,7 @@ class DueTrain:
     soonest_secs: float
     next_secs: float | None = None
     upcoming: frozenset[str] = frozenset()
-    hot_due: bool | None = None
+    track_stops: tuple[TrackStop, ...] = ()
 
     @property
     def key(self) -> tuple[str, str]:
@@ -63,38 +79,49 @@ def due_trains(
 ) -> list[DueTrain]:
     """Trains with a rail stop whose ETA is between ``now - after`` and ``now + before``.
 
-    ``geojson`` is Amtrak's decrypted train feed, or the ``amtrak-fleet-trains/v1`` document
-    VehiclePositions writes next to each fleet snapshot. An estimated time replaces the
-    scheduled time for that arrival or departure. Bus stops are ignored. ``soonest_secs`` is the absolute distance from ``now`` to the closest such event.
-    When ``lead`` is set, each stop uses that station's lookahead and hot window from an
-    ``amtrak-station-lead-time/v1`` profile, and ``hot`` is the global hot window those
-    per-station values fall back to.
+    ``geojson`` is Amtrak's decrypted train feed, or the ``amtrak-fleet-trains/v1`` list the
+    service writes after each generation. An estimated time replaces the scheduled time for that
+    arrival or departure. Bus stops are ignored. ``soonest_secs`` is the absolute distance from
+    ``now`` to the closest such event. When ``lead`` is set, each stop uses that station's
+    lookahead and hot window from an ``amtrak-station-lead-time/v1`` profile, and ``hot`` is the
+    global hot window those per-station values fall back to.
     """
     if now.tzinfo is None:
         raise ValueError("now must be timezone-aware")
     before_secs = before.total_seconds()
     after_secs = after.total_seconds()
     default_hot = hot.total_seconds() if hot is not None else None
+    track_stations = _track_stations(geojson)
     found: dict[tuple[str, str], DueTrain] = {}
     for number, service_date, stops in _train_events(geojson):
         distances: list[float] = []
         ahead: list[float] = []
         upcoming: set[str] = set()
-        hot_due = None if default_hot is None or lead is None else False
-        for code, moments in stops:
+        track_stops: list[TrackStop] = []
+        for code, moments, boarding in stops:
             station_before = (
                 lead.before_secs(code, before_secs) if lead is not None else before_secs
             )
+            stop_ahead: list[float] = []
             for moment in moments:
                 delta = (moment - now).total_seconds()
                 if -after_secs <= delta <= station_before:
                     distances.append(abs(delta))
                     if delta >= 0:
-                        ahead.append(delta)
-                        if code is not None:
-                            upcoming.add(code)
-                        if hot_due is not None and delta <= lead.hot_secs(code, default_hot):
-                            hot_due = True
+                        stop_ahead.append(delta)
+            if not stop_ahead:
+                continue
+            ahead.extend(stop_ahead)
+            if code is None:
+                continue
+            upcoming.add(code)
+            if boarding and (track_stations is None or code in track_stations):
+                station_hot = (
+                    lead.hot_secs(code, default_hot)
+                    if lead is not None and default_hot is not None
+                    else None
+                )
+                track_stops.append(TrackStop(code, min(stop_ahead), station_hot))
         if not distances:
             continue
         train = DueTrain(
@@ -103,7 +130,7 @@ def due_trains(
             min(distances),
             min(ahead) if ahead else None,
             frozenset(upcoming),
-            hot_due,
+            tuple(track_stops),
         )
         current = found.get(train.key)
         if current is None or train.soonest_secs < current.soonest_secs:
@@ -113,11 +140,30 @@ def due_trains(
 
 FLEET_TRAINS_SCHEMA = "amtrak-fleet-trains/v1"
 
-StopEvents = list[tuple[str | None, list[datetime]]]
+StopEvents = list[tuple[str | None, list[datetime], bool]]
+
+
+def _track_stations(document: dict) -> frozenset[str] | None:
+    """Stations where a track has been published, from the train list's ``track_stations``.
+
+    ``None`` (the map feed, or a list from a service that does not write the field) means every
+    station may publish one.
+    """
+    if document.get("schema") != FLEET_TRAINS_SCHEMA:
+        return None
+    stations = document.get("track_stations")
+    if not isinstance(stations, list):
+        return None
+    return frozenset(
+        code.strip().upper() for code in stations if isinstance(code, str) and code.strip()
+    )
 
 
 def _train_events(document: dict):
-    """Yield ``(train_number, service_date, [(station_code, [instant])])`` per train-day."""
+    """Yield ``(train_number, service_date, [(station_code, [instant], boarding)])`` per train-day.
+
+    The map feed does not say where riders may board, so its stops all allow boarding.
+    """
     if document.get("schema") == FLEET_TRAINS_SCHEMA:
         yield from _fleet_train_events(document)
         return
@@ -128,7 +174,7 @@ def _train_events(document: dict):
         if number is None or service_date is None:
             continue
         stops: StopEvents = [
-            (_station_code(station), _event_times(station))
+            (_station_code(station), _event_times(station), True)
             for station in _stations(properties)
             if station.get("bus") is not True
         ]
@@ -154,23 +200,30 @@ def _fleet_train_events(document: dict):
                 for value in times
                 if isinstance(value, int) and not isinstance(value, bool)
             ]
-            stops.append((code, moments))
+            # A missing field (an older service) means riders can board there.
+            stops.append((code, moments, stop.get("boarding") is not False))
         yield number, service_date, stops
 
 
 def is_hot(train: DueTrain, tracked: Mapping[tuple[str, str], frozenset[str]], hot_secs: float) -> bool:
-    """Whether ``train`` reaches a stop inside the hot window and an upcoming stop lacks a track.
+    """Whether one of ``train``'s track stops is inside its hot window and has no track yet.
 
-    With a lead-time profile each station has its own hot window (``train.hot_due``); otherwise
-    the next stop is compared with ``hot_secs``.
+    ``tracked`` maps a train-day to the station codes that already show a track in its last
+    document. A stop with its own window from a lead-time profile uses it; any other stop uses
+    ``hot_secs``. Stops where riders cannot board, and stations where Amtrak has never published
+    a track, are not track stops (see :class:`DueTrain`), so they never keep a train hot.
     """
-    if train.hot_due is not None:
-        if not train.hot_due:
-            return False
-    elif train.next_secs is None or train.next_secs > hot_secs:
-        return False
     known = tracked.get(train.key, frozenset())
-    return not train.upcoming or not train.upcoming <= known
+    return any(
+        stop.code not in known
+        and stop.secs <= (hot_secs if stop.hot_secs is None else stop.hot_secs)
+        for stop in train.track_stops
+    )
+
+
+def _hot_secs(train: DueTrain, hot_secs: float) -> float:
+    """Time until the train's soonest track stop, for ordering hot trains soonest first."""
+    return min((stop.secs for stop in train.track_stops), default=hot_secs)
 
 
 def choose_fetches(
@@ -184,31 +237,56 @@ def choose_fetches(
     tracked: Mapping[tuple[str, str], frozenset[str]] | None = None,
     hinted: Collection[tuple[str, str]] = (),
 ) -> list[DueTrain]:
-    """Hot trains first, then cooled-down trains, never more than ``max_fetches``.
+    """Pick at most ``max_fetches`` trains, in this order.
 
-    Hot trains (see :func:`is_hot`) are taken next-stop-first on every cycle. Other trains are
-    taken oldest-fetch-first, and a train attempted within ``cooldown_secs`` waits. ``tracked``
-    maps a train-day to the station codes that already show a track in its last document.
-    ``hinted`` train-days were named by an early-refresh hint. The service already spaced those
-    by ``AMTRAK_TRACKS_MIN_GAP_SECS``, so they skip the cooldown and go ahead of the rotation.
+    1. Hot trains (see :func:`is_hot`) with no stored document, every cycle. One attempted within
+       ``cooldown_secs`` goes after the rest, then soonest track stop first.
+    2. Hot trains that have a document, once their cooldown has passed: oldest attempt first,
+       then soonest track stop.
+    3. Every other due train once its cooldown has passed, oldest attempt first.
+
+    ``tracked`` maps a train-day with a stored document to the station codes that already show a
+    track in it. ``hinted`` train-days were named by an early-refresh hint. The service already
+    spaced those by ``AMTRAK_TRACKS_MIN_GAP_SECS``, so they skip the cooldown and go first within
+    their group.
     """
     if max_fetches <= 0:
         return []
     tracked = tracked or {}
     now_ts = now.timestamp()
-    hot_keys = {train.key for train in due if is_hot(train, tracked, hot_secs)}
-    hot = sorted(
-        (train for train in due if train.key in hot_keys),
-        key=lambda train: (train.next_secs, train.train_number, train.service_date),
-    )
-    chosen = hot[:max_fetches]
-    ready = []
-    for train in due:
-        if train.key in hot_keys:
-            continue
+
+    def cooled(train: DueTrain) -> bool:
         previous = last_fetched.get(train.key)
-        if previous is None or train.key in hinted or now_ts - previous >= cooldown_secs:
+        return previous is None or train.key in hinted or now_ts - previous >= cooldown_secs
+
+    new_hot: list[DueTrain] = []
+    stored_hot: list[DueTrain] = []
+    ready: list[DueTrain] = []
+    for train in due:
+        if is_hot(train, tracked, hot_secs):
+            if train.key not in tracked:
+                new_hot.append(train)
+            elif cooled(train):
+                stored_hot.append(train)
+        elif cooled(train):
             ready.append(train)
+    new_hot.sort(
+        key=lambda train: (
+            not cooled(train),
+            _hot_secs(train, hot_secs),
+            train.train_number,
+            train.service_date,
+        )
+    )
+    stored_hot.sort(
+        key=lambda train: (
+            train.key not in hinted,
+            last_fetched.get(train.key, 0.0),
+            _hot_secs(train, hot_secs),
+            train.train_number,
+            train.service_date,
+        )
+    )
     ready.sort(
         key=lambda train: (
             train.key not in hinted,
@@ -218,8 +296,7 @@ def choose_fetches(
             train.service_date,
         )
     )
-    chosen.extend(ready[: max_fetches - len(chosen)])
-    return chosen
+    return (new_hot + stored_hot + ready)[:max_fetches]
 
 
 def _train_number(raw: object) -> str | None:
