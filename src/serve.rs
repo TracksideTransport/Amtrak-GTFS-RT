@@ -3,7 +3,7 @@ use crate::orchestrator::{ArtifactUrls, FeedSetManifest, GenerationId};
 use crate::writer::{GenerationStore, PublishedGeneration};
 use axum::{
     extract::{ConnectInfo, Path, RawQuery, State},
-    http::{header, HeaderMap, StatusCode},
+    http::{header, HeaderMap, HeaderName, StatusCode},
     response::{IntoResponse, Response},
     routing::get,
     Json, Router,
@@ -114,13 +114,15 @@ impl AppState {
 ///
 /// # Returns
 ///
-/// A router containing only the versioned immutable API and `/livez`.
+/// A router containing the versioned immutable API, its fixed `/v1/current/{artifact}` aliases
+/// (#111), `/readyz`, and `/livez`.
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/livez", get(livez))
         .route("/readyz", get(readyz))
         .route("/v1/feed-set.json", get(feed_set))
         .route("/v1/generations/{id}/{artifact}", get(artifact))
+        .route("/v1/current/{artifact}", get(current_artifact))
         .with_state(state)
 }
 
@@ -250,6 +252,51 @@ pub async fn artifact(
     let Some(generation) = state.store.get(&id).await else {
         return StatusCode::NOT_FOUND.into_response();
     };
+    generation_artifact(&state, generation, artifact, raw_query, &headers).await
+}
+
+/// Response header naming the generation an artifact response came from.
+const GENERATION_ID_HEADER: &str = "x-generation-id";
+
+/// Serves one closed artifact name from whichever generation is current when the request arrives
+/// (#111), for consumers configured with fixed URLs.
+///
+/// It answers exactly as `/v1/generations/{id}/{artifact}` does for the current generation,
+/// including its `ETag`, `304` handling and `X-Generation-Id`. A stale current generation is still
+/// served; `/readyz` is the health signal.
+///
+/// # Returns
+///
+/// `403` for a denied/missing peer, `404` for an unknown or empty artifact, `503` before the first
+/// publication, or the current generation's bytes with HTTP `200`.
+pub async fn current_artifact(
+    State(state): State<AppState>,
+    peer: Peer,
+    Path(artifact): Path<String>,
+    RawQuery(raw_query): RawQuery,
+    headers: HeaderMap,
+) -> Response {
+    if let Some(response) = denied_peer(&state.access_policy, peer, "/v1/current/{artifact}") {
+        return response;
+    }
+    let Ok(artifact) = Artifact::from_str(&artifact) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let Some(generation) = state.store.current().await else {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    };
+    generation_artifact(&state, generation, artifact, raw_query, &headers).await
+}
+
+/// Answers for one artifact of an already chosen generation: the shared tail of both artifact
+/// routes.
+async fn generation_artifact(
+    state: &AppState,
+    generation: Arc<PublishedGeneration>,
+    artifact: Artifact,
+    raw_query: Option<String>,
+    headers: &HeaderMap,
+) -> Response {
     let (content_type, bytes) = artifact.bytes(&generation);
     let slot = artifact.slot();
     if bytes.is_empty() {
@@ -287,7 +334,8 @@ pub async fn artifact(
         bytes,
         etag,
         generation.manifest.generated_at_unix,
-        &headers,
+        headers,
+        &generation.id.0,
     )
 }
 
@@ -344,8 +392,13 @@ fn cached_bytes(
     etag: String,
     modified_unix: u64,
     headers: &HeaderMap,
+    generation_id: &str,
 ) -> Response {
     let modified = http_date(modified_unix);
+    let generation_header = (
+        HeaderName::from_static(GENERATION_ID_HEADER),
+        generation_id.to_string(),
+    );
     if not_modified(headers, &etag, modified_unix) {
         return (
             StatusCode::NOT_MODIFIED,
@@ -353,6 +406,7 @@ fn cached_bytes(
                 (header::ETAG, etag),
                 (header::LAST_MODIFIED, modified),
                 (header::CACHE_CONTROL, "private, no-cache".to_string()),
+                generation_header,
             ],
         )
             .into_response();
@@ -364,6 +418,7 @@ fn cached_bytes(
             (header::ETAG, etag),
             (header::LAST_MODIFIED, modified),
             (header::CACHE_CONTROL, "private, no-cache".to_string()),
+            generation_header,
         ],
         // Shares the generation's bytes with the response; nothing is copied per request.
         axum::body::Body::from(axum::body::Bytes::from_owner(bytes)),
@@ -1311,6 +1366,252 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         assert!(started.elapsed() < Duration::from_millis(100));
         assert!(!started_hook.load(std::sync::atomic::Ordering::SeqCst));
+        std::fs::remove_dir_all(output).unwrap();
+    }
+
+    // #111: fixed `/v1/current/{artifact}` URLs that follow the current generation.
+
+    fn loopback(state: AppState, port: u16) -> Router {
+        router(state).layer(MockConnectInfo(SocketAddr::from(([127, 0, 0, 1], port))))
+    }
+
+    fn generation_id_header(response: &Response) -> Option<String> {
+        response
+            .headers()
+            .get("x-generation-id")
+            .map(|value| value.to_str().unwrap().to_string())
+    }
+
+    #[tokio::test]
+    async fn current_aliases_serve_the_current_generation_with_its_etag() {
+        let (state, output) = fixture_state("current-same", 100, Some(100)).await;
+        let app = loopback(state, 51);
+        let manifest = body_json(
+            app.clone()
+                .oneshot(request("/v1/feed-set.json"))
+                .await
+                .unwrap(),
+        )
+        .await;
+        let id = manifest["generation_id"].as_str().unwrap().to_string();
+        let urls = manifest["urls"].as_object().unwrap();
+        assert_eq!(urls.len(), 6);
+        for url in urls.values() {
+            let url = url.as_str().unwrap();
+            let file = url.rsplit('/').next().unwrap();
+            let pinned = app.clone().oneshot(request(url)).await.unwrap();
+            let alias = app
+                .clone()
+                .oneshot(request(&format!("/v1/current/{file}")))
+                .await
+                .unwrap();
+            assert_eq!(pinned.status(), StatusCode::OK, "{url}");
+            assert_eq!(alias.status(), StatusCode::OK, "{file}");
+            for name in [
+                header::ETAG,
+                header::CONTENT_TYPE,
+                header::LAST_MODIFIED,
+                header::CACHE_CONTROL,
+            ] {
+                assert_eq!(
+                    pinned.headers().get(&name),
+                    alias.headers().get(&name),
+                    "{file} {name}"
+                );
+            }
+            assert_eq!(
+                generation_id_header(&alias).as_deref(),
+                Some(id.as_str()),
+                "{file}"
+            );
+            let pinned_body = to_bytes(pinned.into_body(), 1_000_000).await.unwrap();
+            let alias_body = to_bytes(alias.into_body(), 1_000_000).await.unwrap();
+            assert_eq!(pinned_body, alias_body, "{file}");
+        }
+        std::fs::remove_dir_all(output).unwrap();
+    }
+
+    #[tokio::test]
+    async fn current_alias_answers_304_with_its_generation_id() {
+        let (state, output) = fixture_state("current-304", 100, Some(100)).await;
+        let app = loopback(state, 52);
+        let manifest = body_json(
+            app.clone()
+                .oneshot(request("/v1/feed-set.json"))
+                .await
+                .unwrap(),
+        )
+        .await;
+        let first = app
+            .clone()
+            .oneshot(request("/v1/current/trip-updates.pb"))
+            .await
+            .unwrap();
+        let etag = first.headers()[header::ETAG].to_str().unwrap().to_string();
+        let revalidated = app
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/current/trip-updates.pb")
+                    .header(header::IF_NONE_MATCH, &etag)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(revalidated.status(), StatusCode::NOT_MODIFIED);
+        assert_eq!(revalidated.headers()[header::ETAG], etag.as_str());
+        assert_eq!(
+            generation_id_header(&revalidated).as_deref(),
+            manifest["generation_id"].as_str()
+        );
+        std::fs::remove_dir_all(output).unwrap();
+    }
+
+    #[tokio::test]
+    async fn current_alias_is_unavailable_before_first_generation() {
+        let (state, output) = fixture_state("current-unavailable", 100, None).await;
+        let response = loopback(state, 53)
+            .oneshot(request("/v1/current/trip-updates.pb"))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        std::fs::remove_dir_all(output).unwrap();
+    }
+
+    #[tokio::test]
+    async fn current_alias_requires_an_allowed_peer() {
+        let (state, output) = fixture_state("current-peer", 100, Some(100)).await;
+        let no_peer = router(state.clone())
+            .oneshot(request("/v1/current/static.zip"))
+            .await
+            .unwrap();
+        assert_eq!(no_peer.status(), StatusCode::FORBIDDEN);
+        let denied = router(state)
+            .layer(MockConnectInfo(SocketAddr::from(([10, 0, 0, 1], 54))))
+            .oneshot(request("/v1/current/static.zip"))
+            .await
+            .unwrap();
+        assert_eq!(denied.status(), StatusCode::FORBIDDEN);
+        std::fs::remove_dir_all(output).unwrap();
+    }
+
+    #[tokio::test]
+    async fn current_alias_rejects_unknown_artifacts() {
+        let (state, output) = fixture_state("current-unknown", 100, Some(100)).await;
+        let app = loopback(state, 55);
+        for path in [
+            "/v1/current/missing.pb",
+            "/v1/current/%2e%2e",
+            "/v1/current/trip-updates.pb.bak",
+            "/v1/current/",
+            "/v1/current",
+        ] {
+            assert_eq!(
+                app.clone().oneshot(request(path)).await.unwrap().status(),
+                StatusCode::NOT_FOUND,
+                "{path}"
+            );
+        }
+        std::fs::remove_dir_all(output).unwrap();
+    }
+
+    #[tokio::test]
+    async fn current_alias_serves_a_stale_generation() {
+        let (state, output) = fixture_state("current-stale", 10_000, Some(100)).await;
+        let app = loopback(state, 56);
+        assert_eq!(
+            app.clone()
+                .oneshot(request("/readyz"))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert_eq!(
+            app.oneshot(request("/v1/current/trip-updates.pb"))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::OK
+        );
+        std::fs::remove_dir_all(output).unwrap();
+    }
+
+    #[tokio::test]
+    async fn current_alias_follows_a_new_generation() {
+        let (state, output) = fixture_state("current-follows", 200, Some(100)).await;
+        let app = loopback(state.clone(), 57);
+        let before = app
+            .clone()
+            .oneshot(request("/v1/current/trip-updates.pb"))
+            .await
+            .unwrap();
+        let first_id = generation_id_header(&before).unwrap();
+
+        let candidate = GenerationBuilder::build(
+            Arc::new(StaticSnapshot::identical(
+                "STATIC-V2",
+                Arc::new(Gtfs::default()),
+                Arc::from(&b"PK fixture 2"[..]),
+            )),
+            SelectedBatch {
+                source_name: "fixture",
+                batch: RtBatch {
+                    trip_updates: FeedMessage::default(),
+                    vehicle_positions: FeedMessage::default(),
+                    alerts: FeedMessage::default(),
+                },
+            },
+            UNIX_EPOCH + Duration::from_secs(200),
+        )
+        .unwrap();
+        GenerationPublisher::publish(
+            &output,
+            &state.store,
+            CandidateValidator::validate(candidate).unwrap(),
+        )
+        .await
+        .unwrap();
+
+        let manifest = body_json(
+            app.clone()
+                .oneshot(request("/v1/feed-set.json"))
+                .await
+                .unwrap(),
+        )
+        .await;
+        let after = app
+            .oneshot(request("/v1/current/trip-updates.pb"))
+            .await
+            .unwrap();
+        let second_id = generation_id_header(&after).unwrap();
+        assert_ne!(first_id, second_id);
+        assert_eq!(Some(second_id.as_str()), manifest["generation_id"].as_str());
+        std::fs::remove_dir_all(output).unwrap();
+    }
+
+    #[tokio::test]
+    async fn current_alias_feeds_the_trip_interest_hook() {
+        let (state, output) = fixture_state("current-interest", 100, Some(100)).await;
+        let called = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = called.clone();
+        let state = state.with_trip_interest(Arc::new(move |_interest| {
+            flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        }));
+        let started = std::time::Instant::now();
+        let response = loopback(state, 58)
+            .oneshot(request("/v1/current/trip-updates.pb?train=167"))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(started.elapsed() < Duration::from_millis(100));
+        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        while !called.load(std::sync::atomic::Ordering::SeqCst)
+            && std::time::Instant::now() < deadline
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(called.load(std::sync::atomic::Ordering::SeqCst));
         std::fs::remove_dir_all(output).unwrap();
     }
 }
