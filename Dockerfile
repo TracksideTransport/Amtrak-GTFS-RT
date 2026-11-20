@@ -96,10 +96,21 @@ RUN --mount=type=cache,target=/root/.gradle \
     git add --all && \
     git commit --quiet --message 'pinned MobilityData v8.0.1 source' && \
     git tag v8.0.1 && \
-    ./gradlew --no-daemon \
-      --dependency-verification=strict \
-      --init-script /opt/amtrak/validator-dependency-overrides.gradle \
-      test :cli:shadowJar && \
+    # Maven Central and the Gradle plugin portal sometimes answer a cold cache with errors that
+    # Gradle reports as "Could not find". Retry the build up to three times; later attempts
+    # refresh dependencies so a cached miss is not reused. Strict verification and the JAR digest
+    # below still decide which bytes are accepted.
+    attempt=1 && \
+    until ./gradlew --no-daemon \
+        --dependency-verification=strict \
+        --init-script /opt/amtrak/validator-dependency-overrides.gradle \
+        $( [ "$attempt" -gt 1 ] && echo --refresh-dependencies ) \
+        test :cli:shadowJar; do \
+      if [ "$attempt" -ge 3 ]; then echo "validator build failed after $attempt attempts" >&2; exit 1; fi; \
+      echo "validator build attempt $attempt failed; retrying in $((attempt * 30))s" >&2; \
+      sleep $((attempt * 30)); \
+      attempt=$((attempt + 1)); \
+    done && \
     echo "30de704a8fbd0a81e119f3afa45eaa158fd224275659bc4d3685b3156c443b64  cli/build/libs/gtfs-validator-8.0.1-cli.jar" \
       | sha256sum --check --strict && \
     mkdir -p /out && \
@@ -151,9 +162,10 @@ FROM python:3.12-slim-bookworm@sha256:935c3c5b12357a7e10caa9c1e6ca5692344d97cf22
 
 ARG OCI_VERSION
 ARG OCI_REVISION
-# 1.64.1 bundles Node 24.22.1. 1.64.0's Node 24.21.0 has fixable High advisories
-# (CVE-2026-105482, CVE-2026-105483, CVE-2026-106069, CVE-2026-111497).
-ARG PLAYWRIGHT_VERSION=1.64.1
+# 1.65.2 bundles Node 26.13.1. 1.64.1's Node 24.22.1 has fixable High advisories (CVE-2026-123863,
+# CVE-2026-123864, CVE-2026-123865, CVE-2026-123866, CVE-2026-123872, CVE-2026-123874,
+# CVE-2026-126051), and 1.65.0's Node 26.13.0 is not the fixed release.
+ARG PLAYWRIGHT_VERSION=1.65.2
 ARG CRYPTOGRAPHY_VERSION=50.0.2
 # `headless-shell` (default) installs only chromium-headless-shell. `full` also installs full
 # Chromium and Xvfb for BROWSER_MODE=xvfb-headful, the fallback if Amtrak blocks the headless
@@ -167,7 +179,8 @@ ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \
     PYTHONDONTWRITEBYTECODE=1
 
 # Debian 12 names from Playwright's chromium nativeDeps, a small Latin font set, CA certificates,
-# and tini. `playwright install --with-deps` would also pull Xvfb and large font packs that
+# and tini. libatomic1 is for the Node.js runtime Playwright bundles (Node 26 links
+# libatomic.so.1). `playwright install --with-deps` would also pull Xvfb and large font packs that
 # headless-shell capture does not need. Upgrade first: the slim tag can lag Debian security fixes.
 RUN apt-get update \
     && apt-get upgrade --yes --no-install-recommends \
@@ -175,6 +188,7 @@ RUN apt-get update \
         ca-certificates \
         fonts-liberation \
         libasound2 \
+        libatomic1 \
         libatk-bridge2.0-0 \
         libatk1.0-0 \
         libatspi2.0-0 \
@@ -211,6 +225,9 @@ RUN apt-get update \
 RUN pip install --no-cache-dir \
         "playwright==${PLAYWRIGHT_VERSION}" \
         "cryptography==${CRYPTOGRAPHY_VERSION}" \
+    && node="$(python -c 'import os, playwright; print(os.path.join(os.path.dirname(playwright.__file__), "driver", "node"))')" \
+    && ! ldd "${node}" | grep 'not found' \
+    && "${node}" --version \
     && if [ "${BROWSER_BUNDLE}" = "full" ]; then \
         python -m playwright install chromium \
         && full="$(find /ms-playwright -type f -name chrome -path '*chrome-linux*' -print -quit)" \
