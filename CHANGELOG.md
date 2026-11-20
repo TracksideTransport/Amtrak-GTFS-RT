@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **The status page is recycled every 30 minutes.** `BROWSER_MAX_AGE_SECS` now defaults to `1800`
+  instead of `21600`. Chromium's renderer for the status page grew from about 230 MiB to about
+  700 MiB over three hours of status fetches, which with the worker and driver put a 1.5 GiB
+  container near its limit. A recycle costs one page load. Set `BROWSER_MAX_AGE_SECS=21600` to keep
+  the old cadence (#118).
+
 ### Fixed
 
 - **A hot train with no status document gets fetched.** The track poller fetched up to 24 hot

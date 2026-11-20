@@ -159,7 +159,7 @@ Tracks:
 | `AMTRAK_TRACKS_LEAD_TIME_FILE` | empty | `amtrak-station-lead-time/v1` profile; see [Station coverage](#station-coverage) |
 | `DOCUMENT_TTL_SECS` | `7200` | How long a fetched document stays in `/tracks.json` |
 | `FETCH_TIMEOUT_SECS` | `20` | Abort one status request after this many seconds |
-| `BROWSER_MAX_AGE_SECS` | `21600` | Recycle the status page after this long |
+| `BROWSER_MAX_AGE_SECS` | `1800` | Recycle the status page after this long. The renderer grows by hundreds of MiB over hours of status fetches; recycling every 30 minutes bounds it |
 | `RELAUNCH_BACKOFF_MAX_SECS` | `900` | Longest wait before relaunching after a browser failure |
 | `MAX_STALE_SECS` | `300` | Serve `503` once the last successful poll is older than this |
 | `LIVENESS_SECS` | `900` | `/healthz` fails once no poll has finished for this long. It also fails after three polls in a row fail |

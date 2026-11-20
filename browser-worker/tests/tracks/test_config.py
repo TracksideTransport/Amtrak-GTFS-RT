@@ -19,7 +19,7 @@ def test_defaults_poll_near_arrival_and_cap_each_cycle():
     assert cfg.block_subresources is True
     assert cfg.max_stale_secs == 300
     assert cfg.fetch_timeout_secs == 20
-    assert cfg.browser_max_age_secs == 21600
+    assert cfg.browser_max_age_secs == 1800
     assert cfg.relaunch_backoff_max_secs == 900
     assert cfg.liveness_secs == 900
     assert cfg.block_third_party is True

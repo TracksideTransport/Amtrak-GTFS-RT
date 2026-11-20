@@ -44,7 +44,7 @@ class Config:
     document_ttl_secs: int = 7200
     nav_timeout_secs: int = 45
     fetch_timeout_secs: int = 20
-    browser_max_age_secs: int = 21600
+    browser_max_age_secs: int = 1800
     relaunch_backoff_max_secs: int = 900
     max_stale_secs: int = 300
     liveness_secs: int = 900
@@ -69,7 +69,7 @@ class Config:
             document_ttl_secs=pos_int(env, "DOCUMENT_TTL_SECS", 7200),
             nav_timeout_secs=pos_int(env, "NAV_TIMEOUT_SECS", 45),
             fetch_timeout_secs=pos_int(env, "FETCH_TIMEOUT_SECS", 20),
-            browser_max_age_secs=pos_int(env, "BROWSER_MAX_AGE_SECS", 21600),
+            browser_max_age_secs=pos_int(env, "BROWSER_MAX_AGE_SECS", 1800),
             relaunch_backoff_max_secs=pos_int(env, "RELAUNCH_BACKOFF_MAX_SECS", 900),
             max_stale_secs=pos_int(env, "MAX_STALE_SECS", 300),
             liveness_secs=pos_int(env, "LIVENESS_SECS", 900),
