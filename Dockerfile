@@ -179,7 +179,8 @@ ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \
     PYTHONDONTWRITEBYTECODE=1
 
 # Debian 12 names from Playwright's chromium nativeDeps, a small Latin font set, CA certificates,
-# and tini. `playwright install --with-deps` would also pull Xvfb and large font packs that
+# and tini. libatomic1 is for the Node.js runtime Playwright bundles (Node 26 links
+# libatomic.so.1). `playwright install --with-deps` would also pull Xvfb and large font packs that
 # headless-shell capture does not need. Upgrade first: the slim tag can lag Debian security fixes.
 RUN apt-get update \
     && apt-get upgrade --yes --no-install-recommends \
@@ -187,6 +188,7 @@ RUN apt-get update \
         ca-certificates \
         fonts-liberation \
         libasound2 \
+        libatomic1 \
         libatk-bridge2.0-0 \
         libatk1.0-0 \
         libatspi2.0-0 \
@@ -223,6 +225,9 @@ RUN apt-get update \
 RUN pip install --no-cache-dir \
         "playwright==${PLAYWRIGHT_VERSION}" \
         "cryptography==${CRYPTOGRAPHY_VERSION}" \
+    && node="$(python -c 'import os, playwright; print(os.path.join(os.path.dirname(playwright.__file__), "driver", "node"))')" \
+    && ! ldd "${node}" | grep 'not found' \
+    && "${node}" --version \
     && if [ "${BROWSER_BUNDLE}" = "full" ]; then \
         python -m playwright install chromium \
         && full="$(find /ms-playwright -type f -name chrome -path '*chrome-linux*' -print -quit)" \
