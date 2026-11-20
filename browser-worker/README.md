@@ -267,7 +267,7 @@ Train  Service date  Station  Side       Track  Gate  Scheduled                 
 ```
 
 `--json` prints one object per track instead. Locally it needs Playwright and its headless shell
-(`python -m pip install playwright==1.64.1`, then `python -m playwright install --only-shell
+(`python -m pip install playwright==1.65.2`, then `python -m playwright install --only-shell
 chromium`). The released image already has both; the worker lives in `/app`:
 
 ```bash
@@ -303,7 +303,7 @@ From `browser-worker/`, with Playwright's headless shell installed the same way 
 
 ```bash
 python -m pip install --requirement requirements.txt
-python -m pip install playwright==1.64.1
+python -m pip install playwright==1.65.2
 python -m playwright install --only-shell chromium
 
 # Train 66, origin date 2026-10-31, only Kingston's stop.
