@@ -24,8 +24,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   TransitDocs ASM fallback alike. GTFS-Realtime already read an absent value as `SCHEDULED`, so
   the meaning is unchanged, but the best practices ask for it to be explicit, and the MobilityData
   validator no longer reports W009 (`schedule_relationship not populated`) on all three feeds.
-  Values the service already set are kept: `SKIPPED` on a canceled stop, `NO_DATA`, and a
-  `CANCELED` or `DELETED` trip. The offline fixture now carries a train-status alert informed by
+  Values a source sets, such as `SKIPPED` on a canceled stop, are kept. An unset stop on a trip
+  marked `UNSCHEDULED` becomes `UNSCHEDULED`, as the reference requires for every stop of such a
+  trip. The offline fixture now carries a train-status alert informed by
   its trip, as the crate builds one, and fails on W009 (#101).
 
 ### Changed

@@ -6,6 +6,9 @@
 //! [`make_explicit`] on each product after every source and rewrite (the fallback, track stamping,
 //! notices, the alert header fill) has run, so one place covers them all.
 //!
+//! An unset stop of an `UNSCHEDULED` trip is filled with `UNSCHEDULED`, because the reference
+//! requires every stop of such a trip to be `UNSCHEDULED`.
+//!
 //! Only an unset value is filled. `SKIPPED`, `NO_DATA`, `CANCELED`, `DELETED` and any other value a
 //! source set is kept. No descriptor is added where there is none: an alert selector without a
 //! `trip` and a vehicle position without one stay as they are.
@@ -14,13 +17,23 @@ use gtfs_realtime::{trip_descriptor, trip_update::stop_time_update, FeedMessage,
 
 /// Sets `SCHEDULED` where `schedule_relationship` is unset on the trip descriptor of every trip
 /// update, vehicle position and alert informed entity in `message`, and on every stop time update.
+/// An unset stop on a trip whose relationship is `UNSCHEDULED` gets `UNSCHEDULED` instead, as the
+/// reference requires for every stop of such a trip.
 pub fn make_explicit(message: &mut FeedMessage) {
     for entity in &mut message.entity {
         if let Some(update) = entity.trip_update.as_mut() {
             schedule(&mut update.trip);
+            // The reference: an UNSCHEDULED trip must set all its stops to UNSCHEDULED.
+            let stop_default = if update.trip.schedule_relationship
+                == Some(trip_descriptor::ScheduleRelationship::Unscheduled as i32)
+            {
+                stop_time_update::ScheduleRelationship::Unscheduled
+            } else {
+                stop_time_update::ScheduleRelationship::Scheduled
+            };
             for stop in &mut update.stop_time_update {
                 stop.schedule_relationship
-                    .get_or_insert(stop_time_update::ScheduleRelationship::Scheduled as i32);
+                    .get_or_insert(stop_default as i32);
             }
         }
         if let Some(trip) = entity
@@ -223,10 +236,53 @@ mod tests {
                     Some(Stop::Skipped as i32),
                     Some(Stop::NoData as i32),
                     Some(Stop::Unscheduled as i32),
-                    Some(STOP_SCHEDULED),
+                    // An unset stop follows its trip: UNSCHEDULED under an UNSCHEDULED trip.
+                    Some(if relationship == Some(Trip::Unscheduled as i32) {
+                        Stop::Unscheduled as i32
+                    } else {
+                        STOP_SCHEDULED
+                    }),
                 ]
             );
         }
+    }
+
+    /// The reference: a trip with `schedule_relationship: UNSCHEDULED` must set all its stop time
+    /// updates to `UNSCHEDULED`. An unset stop on such a trip becomes `UNSCHEDULED`, not
+    /// `SCHEDULED`, and a stop value a source set is still kept.
+    #[test]
+    fn an_unset_stop_on_an_unscheduled_trip_becomes_unscheduled() {
+        use stop_time_update::ScheduleRelationship as Stop;
+        use trip_descriptor::ScheduleRelationship as Trip;
+
+        let mut message = message(vec![FeedEntity {
+            id: "unscheduled".into(),
+            trip_update: Some(TripUpdate {
+                trip: trip(Some(Trip::Unscheduled)),
+                stop_time_update: vec![stop(None), stop(Some(Stop::Skipped)), stop(None)],
+                ..Default::default()
+            }),
+            ..Default::default()
+        }]);
+        make_explicit(&mut message);
+        let update = update_of(&message.entity[0]);
+        assert_eq!(
+            update.trip.schedule_relationship,
+            Some(Trip::Unscheduled as i32)
+        );
+        let stops: Vec<_> = update
+            .stop_time_update
+            .iter()
+            .map(|stop| stop.schedule_relationship)
+            .collect();
+        assert_eq!(
+            stops,
+            vec![
+                Some(Stop::Unscheduled as i32),
+                Some(Stop::Skipped as i32),
+                Some(Stop::Unscheduled as i32),
+            ]
+        );
     }
 
     #[test]

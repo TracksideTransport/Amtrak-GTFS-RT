@@ -361,6 +361,7 @@ pub struct GenerationBuilder;
 
 impl GenerationBuilder {
     /// Partitions payloads, filters unresolved references, and stamps one header.
+    /// It also fills each unset `schedule_relationship` (see [`crate::schedule_relationship`]).
     ///
     /// `is_deleted` is removed because deletion semantics are invalid for the
     /// selected `FULL_DATASET` incrementality. Unmatched references are omitted
@@ -2191,48 +2192,52 @@ mod tests {
                 ..base()
             },
         ];
+        // The explicit form is what the builder writes: each update goes through the real fill,
+        // which gives an unset stop SCHEDULED, or UNSCHEDULED under an UNSCHEDULED trip.
         let trips = [
-            (None, Some(Trip::Scheduled as i32)),
-            (
-                Some(Trip::Unscheduled as i32),
-                Some(Trip::Unscheduled as i32),
-            ),
+            (None, Stop::Scheduled),
+            (Some(Trip::Unscheduled as i32), Stop::Unscheduled),
         ];
         let mut verdicts = HashSet::new();
-        for (unset_trip, explicit_trip) in trips {
+        for (trip_relationship, filled_stop) in trips {
             let unset_descriptor = TripDescriptor {
-                schedule_relationship: unset_trip,
+                schedule_relationship: trip_relationship,
                 ..descriptor()
             };
-            let explicit_descriptor = TripDescriptor {
-                schedule_relationship: explicit_trip,
-                ..descriptor()
+            let unset_update = TripUpdate {
+                trip: unset_descriptor.clone(),
+                stop_time_update: stops.to_vec(),
+                ..Default::default()
             };
-            for stop in &stops {
-                let explicit = trip_update::StopTimeUpdate {
-                    schedule_relationship: Some(Stop::Scheduled as i32),
-                    ..stop.clone()
-                };
+            let mut message = FeedMessage {
+                entity: vec![FeedEntity {
+                    id: "update".into(),
+                    trip_update: Some(unset_update.clone()),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            };
+            crate::schedule_relationship::make_explicit(&mut message);
+            let explicit_update = message.entity[0].trip_update.take().unwrap();
+            assert!(explicit_update.trip.schedule_relationship.is_some());
+            for (stop, explicit) in stops.iter().zip(&explicit_update.stop_time_update) {
+                assert_eq!(explicit.schedule_relationship, Some(filled_stop as i32));
                 let unset_verdict =
                     valid_stop_time_update(stop, &unset_descriptor, &snapshot.parsed);
                 assert_eq!(
-                    valid_stop_time_update(&explicit, &explicit_descriptor, &snapshot.parsed),
+                    valid_stop_time_update(explicit, &explicit_update.trip, &snapshot.parsed),
                     unset_verdict,
                     "{stop:?}"
                 );
                 verdicts.insert(unset_verdict);
             }
-            let unset_update = TripUpdate {
-                trip: unset_descriptor,
-                ..Default::default()
-            };
-            let explicit_update = TripUpdate {
-                trip: explicit_descriptor,
-                ..Default::default()
+            let empty = |update: &TripUpdate| TripUpdate {
+                stop_time_update: Vec::new(),
+                ..update.clone()
             };
             assert_eq!(
-                trip_update_allows_empty(&explicit_update),
-                trip_update_allows_empty(&unset_update)
+                trip_update_allows_empty(&empty(&explicit_update)),
+                trip_update_allows_empty(&empty(&unset_update))
             );
         }
         assert_eq!(verdicts.len(), 2, "the cases cover both verdicts");
