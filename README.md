@@ -81,7 +81,8 @@ The container uses about 400–550 MiB right after it starts. On `v0.8.0` it cli
 1 GiB over several hours, with short peaks near the 1.5 GiB limit. Issue #118 tracks that growth
 and its fix. The Compose `tmpfs` mounts (`/tmp` and `/home/amtrak`, 256 MiB each) and
 `shm_size: 64mb` count toward the same limit, so do not lower `mem_limit` below 1.5 GiB with
-the browser sources on. With both browser sources off (`AMTRAK_TRACKS_AMTRAK=off` and
+the browser sources on. On a Raspberry Pi the limit applies only once the kernel's memory cgroup
+is enabled; see [Raspberry Pi](#raspberry-pi-linuxarm64). With both browser sources off (`AMTRAK_TRACKS_AMTRAK=off` and
 `AMTRAK_ADVISORIES=off`), no Python or Chromium process runs. From the figures above, the service and the
 validator together should peak at about 350 MiB (not measured in that mode), so a 1 GiB limit
 leaves room.
@@ -549,6 +550,21 @@ Without Compose, pull the image as in [Container](#container). Check that a pull
 the arm64 build with `docker image inspect --format '{{.Architecture}}' <image>`. A 32-bit OS
 cannot run these images; there is no `linux/arm/v7` build. To build on the Pi instead, use
 `AMTRAK_IMAGE_TAG=local docker compose up -d --build`.
+
+**Turn on the memory cgroup first.** Raspberry Pi kernels usually boot with the memory cgroup
+disabled (`cgroup_disable=memory` in `/proc/cmdline`). Docker then ignores the Compose
+`mem_limit` without failing: `docker info` prints `WARNING: No memory limit support`, the
+container runs with no memory limit, and `docker stats` shows `0B / 0B`. Check with:
+
+```bash
+grep -o 'cgroup_[a-z]*=memory' /proc/cmdline       # prints cgroup_disable=memory when it is off
+cat /sys/fs/cgroup/cgroup.controllers              # lists memory when it is on
+```
+
+To turn it on, add `cgroup_enable=memory` to the end of the single line in
+`/boot/firmware/cmdline.txt` (`/boot/cmdline.txt` on older images), reboot, and recreate the
+container (`docker compose up -d --force-recreate`). Without it, a memory leak can exhaust the
+whole Pi instead of stopping at the container's limit.
 
 ### Process supervisor
 
