@@ -27,12 +27,15 @@ printf '%s\n' "$proxy_config" | grep -Fq '172.31.240.10' \
   || { echo "proxy has no fixed allowlisted address" >&2; exit 1; }
 printf '%s\n' "$proxy_config" | grep -Fq 'published: "8091"' \
   || { echo "proxy HTTP port is not 8091" >&2; exit 1; }
-grep -Fq 'caddy:2.11.7-alpine@sha256:e70b164da81ef698b3ad19af799ea6086ce6d9e48ed4079eb9fe26f6fbf14ee5' \
-  proxy/Dockerfile \
+# Both upstream images must be pinned by digest. The check names no version, so a digest-pinned
+# update (Dependabot's, for example) passes; an unpinned or tag-only FROM fails.
+grep -Eq '^FROM caddy:[^@[:space:]]+-alpine@sha256:[0-9a-f]{64}$' proxy/Dockerfile \
   || { echo "proxy base image is not digest-pinned" >&2; exit 1; }
-grep -Fq 'caddy:2.11.7-builder-alpine@sha256:95a5e7e2692b5eb9545aadc5b90a39f6f509bee59c9508a493f83ee902eaef63' \
-  proxy/Dockerfile \
+grep -Eq '^FROM caddy:[^@[:space:]]+-builder-alpine@sha256:[0-9a-f]{64} AS builder$' proxy/Dockerfile \
   || { echo "proxy builder image is not digest-pinned" >&2; exit 1; }
+if grep -E '^FROM ' proxy/Dockerfile | grep -Ev '@sha256:[0-9a-f]{64}( AS [a-z]+)?$'; then
+  echo "proxy/Dockerfile has a FROM that is not digest-pinned" >&2; exit 1
+fi
 
 render() {
   AMTRAK_PROXY_PRINT_CONFIG=1 AMTRAK_PROXY_CONFIG="$(mktemp)" "$@" sh proxy/entrypoint.sh
