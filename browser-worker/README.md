@@ -81,7 +81,8 @@ they never share cookies or pages.
   labels them Mountain.
 - Image, font, stylesheet, and media requests are blocked, and so is every host outside
   `amtrak.com` while `BLOCK_THIRD_PARTY` is on. Each fetch aborts after `FETCH_TIMEOUT_SECS`. The
-  status page is recycled every `BROWSER_MAX_AGE_SECS`.
+  status page is recycled every `BROWSER_MAX_AGE_SECS`, between poll cycles: the new page loads
+  before the old one closes, and a failed reload keeps the old page and is retried later.
 - A browser failure (crash, launch failure, or a hung fetch) ends that cycle's fetches. The next
   launch waits 1 minute, doubling up to `RELAUNCH_BACKOFF_MAX_SECS`, and the wait resets after a
   successful fetch. The trains the cycle did not fetch are not counted as attempted. A hot one is
@@ -159,7 +160,7 @@ Tracks:
 | `AMTRAK_TRACKS_LEAD_TIME_FILE` | empty | `amtrak-station-lead-time/v1` profile; see [Station coverage](#station-coverage) |
 | `DOCUMENT_TTL_SECS` | `7200` | How long a fetched document stays in `/tracks.json` |
 | `FETCH_TIMEOUT_SECS` | `20` | Abort one status request after this many seconds |
-| `BROWSER_MAX_AGE_SECS` | `21600` | Recycle the status page after this long |
+| `BROWSER_MAX_AGE_SECS` | `1800` | Recycle the status page after this long, between poll cycles. This recycle is what bounds the renderer, which grows by hundreds of MiB over hours of status fetches; a value near the old `21600` lets it grow larger than in v0.8.0 |
 | `RELAUNCH_BACKOFF_MAX_SECS` | `900` | Longest wait before relaunching after a browser failure |
 | `MAX_STALE_SECS` | `300` | Serve `503` once the last successful poll is older than this |
 | `LIVENESS_SECS` | `900` | `/healthz` fails once no poll has finished for this long. It also fails after three polls in a row fail |

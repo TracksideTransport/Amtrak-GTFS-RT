@@ -20,6 +20,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import time
 import urllib.request
 from collections import Counter
@@ -44,6 +45,7 @@ _FIRST_PARTY = "amtrak.com"
 # as ``text/plain``. ``*/*`` is what that endpoint accepts. The www.amtrak.com status document
 # is JSON, so the in-page fetch below still asks for ``application/json``.
 TRAINS_ACCEPT = "*/*"
+STATUS_PREFIX = "https://www.amtrak.com/dotcom/travel-service/statuses/"
 _RELAUNCH_BACKOFF_MIN_SECS = 60
 _FETCH_JS = """async ([url, timeoutMs]) => {
   const controller = new AbortController();
@@ -111,10 +113,21 @@ def should_abort(cfg: Config, resource_type: str, url: str) -> bool:
 
 def status_url(train_number: str, service_date: str) -> str:
     """Amtrak train-status URL for one train-day."""
-    return (
-        "https://www.amtrak.com/dotcom/travel-service/statuses/"
-        f"{train_number}?service-date={service_date}"
-    )
+    return f"{STATUS_PREFIX}{train_number}?service-date={service_date}"
+
+
+def intercepted_urls() -> re.Pattern[str]:
+    """The status context's route pattern: every URL except the status documents themselves.
+
+    Playwright keeps a ``Request``, a ``Route``, and a ``Response`` object, in its driver and in
+    this process, for every request a context routes, until the page that made it closes (past
+    10,000 of one kind it drops the oldest). The resident page makes up to
+    ``MAX_FETCHES_PER_CYCLE`` status fetches a minute and lives for hours, so routing them grew the
+    worker by tens of MiB an hour (#118). A status fetch is a first-party ``fetch``, which
+    :func:`should_abort` never aborts, so leaving it unrouted changes no routing decision. The
+    driver rebuilds the pattern as a JavaScript ``RegExp``, so it stays a plain lookahead.
+    """
+    return re.compile("^(?!" + re.escape(STATUS_PREFIX) + ")")
 
 
 def load_trains(cfg: Config) -> dict:
@@ -182,8 +195,12 @@ class ResidentBrowser:
     as long as it is up, which keeps that browser resident. A failed fetch closes the page and
     returns the lease (the browser closes too unless the notices source is mid-cycle), and the
     next launch waits an exponential backoff from one minute up to ``RELAUNCH_BACKOFF_MAX_SECS``,
-    reset by the next successful fetch. The page is also recycled after ``BROWSER_MAX_AGE_SECS``
-    to bound its memory growth.
+    reset by the next successful fetch.
+
+    After ``BROWSER_MAX_AGE_SECS`` the page is recycled, to bound the renderer's memory, by
+    :meth:`recycle_if_due` between poll cycles, never in the middle of one. The new context and page
+    are loaded first and the old ones closed only after that succeeds. A reload that fails keeps
+    the old page, starts no backoff, and is tried again a minute or more later.
     """
 
     def __init__(
@@ -202,6 +219,7 @@ class ResidentBrowser:
         self._launched_at = 0.0
         self._backoff = 0.0
         self._next_launch = 0.0
+        self._next_recycle = 0.0
 
     async def fetch(self, cfg: Config, train: DueTrain) -> dict:
         """Return one status document.
@@ -222,19 +240,65 @@ class ResidentBrowser:
         self._backoff = 0.0
         return document_from_eval(raw)
 
+    async def recycle_if_due(self) -> None:
+        """Swap the status page for a fresh one once it is ``BROWSER_MAX_AGE_SECS`` old.
+
+        Called between poll cycles. The new page is opened and loaded before the old one is
+        closed; if that fails, the old page stays, the reason is logged, and no relaunch backoff
+        starts. Nothing happens while no page is up: the next fetch opens one.
+        """
+        now = self._monotonic()
+        if self._page is None or now - self._launched_at < self._cfg.browser_max_age_secs:
+            return
+        if now < self._next_recycle:
+            return
+        logger.info("recycling the status page after %ds", self._cfg.browser_max_age_secs)
+        try:
+            lease, context, page = await self._open()
+        except Exception as error:  # noqa: BLE001 — the browser, its context, or the page load
+            failure = error.error if isinstance(error, _FirstLoadFailed) else error
+            self._next_recycle = now + _RELAUNCH_BACKOFF_MIN_SECS
+            logger.warning(
+                "status page recycle failed (%s); keeping the current page", describe_error(failure)
+            )
+            return
+        old_lease, old_context = self._lease, self._context
+        self._lease, self._context, self._page = lease, context, page
+        self._launched_at = now
+        if await self._close_parts(old_lease, old_context):
+            # The old context would not close, so its browser was closed, and the new page with
+            # it. The next fetch opens a page in a fresh browser, without a backoff.
+            self._lease = self._context = self._page = None
+
     async def close(self) -> None:
         """Close the status page and return the browser lease. The next fetch opens a new one."""
         context, lease = self._context, self._lease
         self._page = None
         self._context = None
         self._lease = None
+        await self._close_parts(lease, context)
+
+    async def _close_parts(self, lease: Lease | None, context) -> bool:
+        """Close ``context`` and return ``lease``. Returns whether the browser had to be closed.
+
+        A context that does not close in time takes its browser down with it, even while the
+        notices source holds that browser: left open, its page and renderer memory would last as
+        long as the browser does.
+        """
         if context is not None:
             try:
                 await asyncio.wait_for(context.close(), self._cfg.fetch_timeout_secs)
-            except Exception:  # noqa: BLE001 — the browser may already be gone
+            except Exception as error:  # noqa: BLE001 — a hung close, or the browser is gone
+                if lease is not None and await self._shared.discard(lease):
+                    logger.warning(
+                        "status context did not close (%s); closed the browser",
+                        describe_error(error),
+                    )
+                    return True
                 logger.debug("status context close failed", exc_info=True)
         if lease is not None:
             await self._shared.release(lease)
+        return False
 
     async def _failed(self, reason: str) -> None:
         await self.close()
@@ -246,16 +310,13 @@ class ResidentBrowser:
         logger.warning("%s; next browser launch in %ds", reason, self._backoff)
 
     async def _ensure_page(self):
-        now = self._monotonic()
-        if self._page is not None and now - self._launched_at >= self._cfg.browser_max_age_secs:
-            logger.info("recycling the status browser after %ds", self._cfg.browser_max_age_secs)
-            await self.close()
         if self._page is not None:
             return self._page
+        now = self._monotonic()
         if now < self._next_launch:
             raise BrowserUnavailable("relaunch backoff")
         try:
-            page = await self._launch()
+            lease, context, page = await self._open()
         except _FirstLoadFailed as failure:
             # The browser launched; the status page did not load (blocked, offline, timed out).
             await self._failed(f"first status page load failed: {describe_error(failure.error)}")
@@ -263,37 +324,47 @@ class ResidentBrowser:
         except Exception as error:  # noqa: BLE001 — the browser, its context, or its page
             await self._failed(f"browser launch failed: {describe_error(error)}")
             raise BrowserUnavailable(type(error).__name__) from None
+        self._lease, self._context, self._page = lease, context, page
         self._launched_at = now
-        self._page = page
+        self._next_recycle = 0.0
         return page
 
-    async def _launch(self):
+    async def _open(self):
+        """Borrow the browser and load the status page in a new context: ``(lease, context, page)``.
+
+        On any failure the context is closed and the lease returned before the error propagates;
+        a failed page load raises :class:`_FirstLoadFailed`.
+        """
         cfg = self._cfg
-        self._lease = await self._shared.acquire()
-        context = await self._lease.browser.new_context()
-        self._context = context
-        if cfg.block_subresources or cfg.block_third_party:
-
-            async def _route(route):
-                request = route.request
-                if should_abort(cfg, request.resource_type, request.url):
-                    await route.abort()
-                else:
-                    await route.continue_()
-
-            await context.route("**/*", _route)
-        page = await context.new_page()
-        # domcontentloaded lets the site's first-party scripts set their cookies before the
-        # first status call; "commit" returned before they ran.
+        lease = await self._shared.acquire()
+        context = None
         try:
-            await page.goto(
-                cfg.page_url,
-                wait_until="domcontentloaded",
-                timeout=cfg.nav_timeout_secs * 1000,
-            )
-        except Exception as error:  # noqa: BLE001 — reported apart from a launch failure
-            raise _FirstLoadFailed(error) from error
-        return page
+            context = await lease.browser.new_context()
+            if cfg.block_subresources or cfg.block_third_party:
+
+                async def _route(route):
+                    request = route.request
+                    if should_abort(cfg, request.resource_type, request.url):
+                        await route.abort()
+                    else:
+                        await route.continue_()
+
+                await context.route(intercepted_urls(), _route)
+            page = await context.new_page()
+            # domcontentloaded lets the site's first-party scripts set their cookies before the
+            # first status call; "commit" returned before they ran.
+            try:
+                await page.goto(
+                    cfg.page_url,
+                    wait_until="domcontentloaded",
+                    timeout=cfg.nav_timeout_secs * 1000,
+                )
+            except Exception as error:  # noqa: BLE001 — reported apart from a launch failure
+                raise _FirstLoadFailed(error) from error
+        except BaseException:
+            await self._close_parts(lease, context)
+            raise
+        return lease, context, page
 
 
 def document_from_eval(raw: object) -> dict:
@@ -334,8 +405,8 @@ async def poll_once(
     backoff) and every pick after a browser failure are not stamped. A hot one is retried as soon
     as the browser is back; a ready one is left out of the cycles between full polls unless it is
     warm or hinted, so it waits for the next full poll. ``last_fetched`` is pruned to the trains
-    still due. One INFO line names each pick, whether it was hot or ready, and its outcome; a
-    second gives the cycle's totals.
+    still due, and ``store`` to documents younger than ``DOCUMENT_TTL_SECS``. One INFO line names
+    each pick, whether it was hot or ready, and its outcome; a second gives the cycle's totals.
     """
     geojson = await trains_fetcher(cfg)
     profile = LeadProfile.load(
@@ -410,6 +481,7 @@ async def poll_once(
         store.put(train.train_number, train.service_date, document, now.timestamp())
         stored += 1
         outcomes.append(f"{train.train_number} {kind} stored")
+    store.prune(now.timestamp(), cfg.document_ttl_secs)
     succeeded = not picks or stored > 0
     if succeeded:
         store.mark_success(now.timestamp())
@@ -470,6 +542,7 @@ async def run_forever(
     cfg: Config,
     *,
     shared: SharedBrowser | None = None,
+    browser: ResidentBrowser | None = None,
     trains_fetcher: TrainsFetcher | None = None,
     status_fetcher: StatusFetcher | None = None,
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
@@ -478,11 +551,12 @@ async def run_forever(
 ) -> None:
     """Poll until cancelled, or ``iterations`` times in tests.
 
-    The default status fetcher keeps one :class:`ResidentBrowser` in ``shared`` for the life of
-    the loop.
+    The default status fetcher keeps one :class:`ResidentBrowser` (``browser``, built on
+    ``shared`` unless a test injects one) for the life of the loop, and recycles its page between
+    cycles.
     """
     trains = trains_fetcher or _default_trains
-    browser = ResidentBrowser(cfg, shared)
+    browser = browser if browser is not None else ResidentBrowser(cfg, shared)
     status = status_fetcher or browser.fetch
     now_of = clock or (lambda: datetime.now(timezone.utc))
     last_fetched: dict[tuple[str, str], float] = {}
@@ -492,6 +566,7 @@ async def run_forever(
         while iterations is None or count < iterations:
             full = elapsed == 0 or elapsed >= cfg.base_interval_secs
             raised = False
+            await browser.recycle_if_due()
             try:
                 succeeded = await poll_once(
                     store,

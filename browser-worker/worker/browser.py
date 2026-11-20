@@ -185,6 +185,21 @@ class SharedBrowser:
             if not self._leases:
                 await self._shutdown()
 
+    async def discard(self, lease: Lease) -> bool:
+        """Return a lease whose context would not close, closing the browser it borrowed.
+
+        A context that does not close keeps its pages, and their renderer memory, for as long as
+        the browser runs, and another holder can keep the browser running for hours. Closing the
+        browser is the only way to free them; the other holders' leases go stale. A stale
+        ``lease`` (its browser already closed or relaunched) does nothing. Returns whether the
+        browser was closed.
+        """
+        async with self._lock:
+            if lease.generation != self._generation or lease.token not in self._leases:
+                return False
+            await self._shutdown()
+            return True
+
     async def close(self) -> None:
         """Close the browser now, whatever is borrowed. Outstanding leases become stale."""
         async with self._lock:

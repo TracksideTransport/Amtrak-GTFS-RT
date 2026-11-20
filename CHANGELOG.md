@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **The status page is recycled every 30 minutes, between poll cycles.** `BROWSER_MAX_AGE_SECS`
+  now defaults to `1800` instead of `21600`. Chromium's renderer for the status page grew from
+  about 230 MiB to about 700 MiB over three hours of status fetches, which with the worker and
+  driver put a 1.5 GiB container near its limit. The recycle now runs between cycles, never in the
+  middle of one: the new page is loaded before the old one closes, and a reload that fails keeps
+  the old page, fetches every train that cycle, and starts no relaunch backoff. With the fix below,
+  the renderer settles higher than before over a long-lived page (about 355 MiB against 245 MiB
+  after 8000 fetches in a local test), so this recycle is now what bounds it. Raising
+  `BROWSER_MAX_AGE_SECS` toward the old `21600` gives a larger renderer than v0.8.0 did, so raise
+  it only with memory to spare (#118).
+
 ### Fixed
 
 - **A hot train with no status document gets fetched.** The track poller fetched up to 24 hot
@@ -31,6 +44,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   also logs one INFO line naming every pick, whether it was hot or ready, and its outcome, for
   example `track poll picks: 172 hot stored, 86 hot rejected (http 404), 95 hot browser
   unavailable (Error), 66 ready skipped (browser unavailable)` (#120).
+- **The browser worker no longer grows with every status fetch.** The status page routed every
+  request, its own status fetches included, and Playwright keeps a request, a route, and a
+  response object, in the worker and in its Node driver, for each routed request until the page
+  closes. At up to 24 fetches a minute that grew the worker by about 40 MiB an hour and the driver
+  with it, until the page was recycled six hours later. Status fetches are now left out of the
+  route (they were never blocked), so a fetch leaves nothing behind. A status context that will not
+  close now closes its browser rather than staying open beside a notices cycle, and stored status
+  documents are pruned every cycle, not only when `/tracks.json` is read. This fixes the cause
+  found for #118; confirmation that a built image stays under 1 GiB through 24 hours on defaults,
+  notices peaks included, is still pending (#118).
 - **Observed tracks reach `static.zip` while the service runs.** A static snapshot built
   from the configured platforms alone no longer counts as current once a track is observed, so the
   rebuild downloads `GTFS.zip` in full instead of accepting a `304`. Before, observed platforms were

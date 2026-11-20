@@ -99,6 +99,15 @@ class TrackStore:
         with self._lock:
             return dict(self._tracked)
 
+    def prune(self, now: float, ttl_secs: float) -> None:
+        """Drop documents older than ``ttl_secs``, so the store holds only the trains in the window.
+
+        :meth:`snapshot` prunes too, but only when ``/tracks.json`` is read; the poll loop calls
+        this each cycle so the store stays bounded when nothing reads it.
+        """
+        with self._lock:
+            self._prune(now, ttl_secs)
+
     def snapshot(self, now: float, ttl_secs: float) -> tuple[float, list[dict]] | None:
         """``(last_success, documents)`` with documents older than ``ttl_secs`` removed.
 
@@ -108,14 +117,19 @@ class TrackStore:
         with self._lock:
             if self._last_success is None:
                 return None
-            fresh: list[dict] = []
-            expired: list[tuple[str, str]] = []
-            for key, (fetched_at, document) in self._documents.items():
-                if now - fetched_at > ttl_secs:
-                    expired.append(key)
-                else:
-                    fresh.append({**document, "fetchedAt": iso_utc(fetched_at)})
-            for key in expired:
-                del self._documents[key]
-                self._tracked.pop(key, None)
+            self._prune(now, ttl_secs)
+            fresh = [
+                {**document, "fetchedAt": iso_utc(fetched_at)}
+                for fetched_at, document in self._documents.values()
+            ]
             return self._last_success, fresh
+
+    def _prune(self, now: float, ttl_secs: float) -> None:
+        expired = [
+            key
+            for key, (fetched_at, _document) in self._documents.items()
+            if now - fetched_at > ttl_secs
+        ]
+        for key in expired:
+            del self._documents[key]
+            self._tracked.pop(key, None)
