@@ -1406,6 +1406,15 @@ mod tests {
 
     impl CapturedLogs {
         fn capture(&self) -> tracing::subscriber::DefaultGuard {
+            // While only one dispatcher is alive, tracing caches a callsite's interest from the
+            // default of whichever thread reaches it first. A parallel test with no subscriber
+            // can then cache `never` and drop this capture's events. A second dispatcher kept
+            // alive for the whole process makes tracing combine every live dispatcher's interest.
+            // A bare registry answers `always`, so no callsite is ever cached as `never`.
+            static KEEP_INTEREST_COMBINED: std::sync::OnceLock<tracing::Dispatch> =
+                std::sync::OnceLock::new();
+            KEEP_INTEREST_COMBINED
+                .get_or_init(|| tracing::Dispatch::new(tracing_subscriber::registry()));
             let writer = self.clone();
             tracing::subscriber::set_default(
                 tracing_subscriber::fmt()
@@ -1418,6 +1427,28 @@ mod tests {
         fn take(&self) -> String {
             String::from_utf8(std::mem::take(&mut *self.0.lock().unwrap())).unwrap()
         }
+    }
+
+    /// A WARN callsite that only the test below reaches.
+    fn warn_from_the_probe_callsite() {
+        tracing::warn!("probe callsite reached");
+    }
+
+    /// A callsite first reached on a thread with no subscriber is still captured afterwards.
+    /// tracing caches each callsite's interest when it is first reached. With one live dispatcher
+    /// it asks only the reaching thread's default, so a parallel test could cache `never` for the
+    /// fallback WARN and silence it for the test capturing it.
+    #[test]
+    fn a_callsite_first_reached_without_a_subscriber_is_still_captured() {
+        let logs = CapturedLogs::default();
+        let _guard = logs.capture();
+        std::thread::spawn(warn_from_the_probe_callsite)
+            .join()
+            .unwrap();
+        assert_eq!(logs.take(), "", "the other thread has no subscriber");
+        warn_from_the_probe_callsite();
+        let lines = logs.take();
+        assert!(lines.contains("probe callsite reached"), "{lines:?}");
     }
 
     /// #110: falling back names the primary's error at WARN; recovery is one INFO line.
