@@ -6,7 +6,8 @@ status documents are fetched in a resident page of the worker's one headless bro
 blocked, and so is every host outside ``amtrak.com`` unless ``BLOCK_THIRD_PARTY`` is off.
 
 A failed status fetch keeps the last good document. A browser failure ends the cycle's fetches
-and the relaunch backs off, so a blocked or crashing browser is not relaunched once per train. A
+and the relaunch backs off, so a blocked or crashing browser is not relaunched once per train.
+The trains it left unfetched are not counted as attempted, so they go first on the next cycle. A
 cycle counts as a success only when it had nothing to fetch or stored a document, so a worker
 Amtrak has stopped answering lets ``/tracks.json`` go stale instead of looking current.
 """
@@ -316,8 +317,11 @@ async def poll_once(
     """One cycle. Raises when the train list itself cannot be read; status misses are skipped.
 
     Returns whether the cycle succeeded: it had nothing to fetch, or it stored a document. Every
-    attempt, failed or not, starts the train's cooldown. ``last_fetched`` is pruned to the trains
-    still due.
+    attempt that reached Amtrak, stored or rejected, starts the train's cooldown. A pick the
+    browser could not run (:class:`BrowserUnavailable`, including the relaunch backoff) and every
+    pick after it are not stamped, so they are picked again first. ``last_fetched`` is pruned to
+    the trains still due. One INFO line names each pick, whether it was hot or ready, and its
+    outcome; a second gives the cycle's totals.
     """
     geojson = await trains_fetcher(cfg)
     profile = LeadProfile.load(
@@ -345,6 +349,7 @@ async def poll_once(
     due_keys = {train.key for train in due}
     for key in [key for key in last_fetched if key not in due_keys]:
         del last_fetched[key]
+    tracked = store.tracked()
     picks = choose_fetches(
         due,
         last_fetched,
@@ -352,30 +357,42 @@ async def poll_once(
         hot_secs=cfg.hot_window_secs,
         cooldown_secs=cfg.cooldown_secs,
         max_fetches=cfg.max_fetches_per_cycle,
-        tracked=store.tracked(),
+        tracked=tracked,
         hinted={train.key for train in due if train.train_number in early},
     )
     stored = 0
     rejected: Counter[str] = Counter()
     browser_down = None
+    outcomes: list[str] = []
     for train in picks:
-        last_fetched[train.key] = now.timestamp()
+        kind = "hot" if is_hot(train, tracked, cfg.hot_window_secs) else "ready"
+        if browser_down is not None:
+            outcomes.append(f"{train.train_number} {kind} skipped (browser unavailable)")
+            continue
         try:
             document = await status_fetcher(cfg, train)
         except BrowserUnavailable as error:
             browser_down = str(error)
-            break
-        except StatusMiss as error:
-            rejected[str(error)] += 1
+            outcomes.append(f"{train.train_number} {kind} browser unavailable ({browser_down})")
             continue
+        except StatusMiss as error:
+            last_fetched[train.key] = now.timestamp()
+            rejected[str(error)] += 1
+            outcomes.append(f"{train.train_number} {kind} rejected ({error})")
+            continue
+        last_fetched[train.key] = now.timestamp()
         if document is None:
             rejected["empty"] += 1
+            outcomes.append(f"{train.train_number} {kind} rejected (empty)")
             continue
         store.put(train.train_number, train.service_date, document, now.timestamp())
         stored += 1
+        outcomes.append(f"{train.train_number} {kind} stored")
     succeeded = not picks or stored > 0
     if succeeded:
         store.mark_success(now.timestamp())
+    if outcomes:
+        logger.info("track poll picks: %s", ", ".join(outcomes))
     logger.info(
         "track poll due=%s picked=%s stored=%s rejected=%s%s",
         len(due),
