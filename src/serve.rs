@@ -536,7 +536,7 @@ fn manifest_json(manifest: &FeedSetManifest) -> Value {
         }
     });
     // Added for #61: how much of what the source emitted resolved against the static feed. Absent
-    // for a generation recovered from disk, which does not persist it.
+    // only for a generation written by a release before the match rate was stored (#116).
     if let Some(rate) = manifest.match_rate {
         value["match_rate"] = json!({
             "trip_updates": {

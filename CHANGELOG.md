@@ -7,6 +7,190 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Trip updates and vehicle positions carry a vehicle id.** A train's trip update and its
+  vehicle position now carry the same `VehicleDescriptor`: `vehicle.id` is the train's
+  per-train-day id, the entity id it already had (`20261119-172`), and `vehicle.label` is the
+  train number (`172`). Consumers can join a trip update to its vehicle position by `vehicle.id`,
+  and the MobilityData validator no longer reports W002 (`vehicle_id not populated`) on every
+  entity. The descriptor is set after the pinned `amtrak-gtfs-rt` crate encodes the feed, which
+  sets none; an entity whose id does not hold a service date and train number gets none rather
+  than an invented one. The offline fixture (`scripts/validate-feeds.sh --fixture`) now encodes its
+  train as that crate does and fails on W002 (#100).
+- **Every trip and stop time update says it is scheduled.** Trip updates, their stop time updates,
+  vehicle positions, and the `trip` in an alert's informed entity now carry
+  `schedule_relationship: SCHEDULED` where they carried none, from the Amtrak source and the
+  TransitDocs ASM fallback alike. GTFS-Realtime already read an absent value as `SCHEDULED`, so
+  the meaning is unchanged, but the best practices ask for it to be explicit, and the MobilityData
+  validator no longer reports W009 (`schedule_relationship not populated`) on all three feeds.
+  Values a source sets, such as `SKIPPED` on a canceled stop, are kept. An unset stop on a trip
+  marked `UNSCHEDULED` becomes `UNSCHEDULED`, as the reference requires for every stop of such a
+  trip. The offline fixture now carries a train-status alert informed by
+  its trip, as the crate builds one, and fails on W009 (#101).
+
+### Changed
+
+- **The status page is recycled every 30 minutes, between poll cycles.** `BROWSER_MAX_AGE_SECS`
+  now defaults to `1800` instead of `21600`. Chromium's renderer for the status page grew from
+  about 230 MiB to about 700 MiB over three hours of status fetches, which with the worker and
+  driver put a 1.5 GiB container near its limit. The recycle now runs between cycles, never in the
+  middle of one: the new page is loaded before the old one closes, and a reload that fails keeps
+  the old page, fetches every train that cycle, and starts no relaunch backoff. With the fix below,
+  the renderer settles higher than before over a long-lived page (about 355 MiB against 245 MiB
+  after 8000 fetches in a local test), so this recycle is now what bounds it. Raising
+  `BROWSER_MAX_AGE_SECS` toward the old `21600` gives a larger renderer than v0.8.0 did, so raise
+  it only with memory to spare (#118).
+
+### Fixed
+
+- **A hot train with no status document gets fetched.** The track poller fetched up to 24 hot
+  trains every cycle, soonest stop first, with no cooldown, so with more than 24 a train 8 to 13
+  minutes out could go without one: train 172 had no document until about 6 minutes before
+  Providence, and after a restart none again until Route 128 was about 6 minutes away. A train
+  whose remaining stops are deboard-only (Route 128 and Back Bay toward Boston) or at stations
+  that never show a track also stayed hot until its last stop, taking a slot every cycle. Hot
+  trains with no document now go first; every train, hot or not, waits out `TRACK_COOLDOWN_SECS`
+  after Amtrak answers for it (even with a 404 or an empty answer), oldest fetch first. A train is
+  now hot only for a stop inside the hot window where riders can board and Amtrak has published a
+  track: `fleet-trains.json` marks a stop with static `pickup_type` 1 `"boarding": false`, and
+  lists the stations with a configured or observed platform as `track_stations`. A boarding stop
+  inside the hot window at a station not yet listed (on a fresh install, everything but the seeded
+  New York, Newark, and New Haven) still keeps the train checked between full polls, under the
+  cooldown. Both fields are optional and the schema stays `amtrak-fleet-trains/v1`; a list without
+  them counts every stop, as before. A browser failure mid-cycle no longer marks the trains it left
+  unfetched as attempted: a hot one is retried as soon as the browser is back, and a ready one
+  waits for the next full poll, up to 15 minutes, unless it is warm or hinted. The pick whose own
+  status fetch failed (timed out or refused) does count as an attempt and waits out its cooldown,
+  so one train's failing request cannot take the browser down after every relaunch. Each cycle
+  also logs one INFO line naming every pick, whether it was hot or ready, and its outcome, for
+  example `track poll picks: 172 hot stored, 86 hot rejected (http 404), 95 hot browser
+  unavailable (Error), 66 ready skipped (browser unavailable)` (#120).
+- **The browser worker no longer grows with every status fetch.** The status page routed every
+  request, its own status fetches included, and Playwright keeps a request, a route, and a
+  response object, in the worker and in its Node driver, for each routed request until the page
+  closes. At up to 24 fetches a minute that grew the worker by about 40 MiB an hour and the driver
+  with it, until the page was recycled six hours later. Status fetches are now left out of the
+  route (they were never blocked), so a fetch leaves nothing behind. A status context that will not
+  close now closes its browser rather than staying open beside a notices cycle, and stored status
+  documents are pruned every cycle, not only when `/tracks.json` is read. This fixes the cause
+  found for #118; confirmation that a built image stays under 1 GiB through 24 hours on defaults,
+  notices peaks included, is still pending (#118).
+- **The fallback names a train as the Amtrak source does.** A generation built from
+  `transitdocs-asm` gave every vehicle its route name as `vehicle.label` (`Northeast Regional`),
+  put the bare train number in `vehicle.id`, and used entity ids such as `asm-172-20261119`, so
+  a train's identity changed whenever the source did. The fallback now uses the Amtrak source's
+  scheme: entity id and `vehicle.id` `20261119-172` (service date and train number) and
+  `vehicle.label` `172`, on the trip update as well as the vehicle position. The fallback's
+  service date now follows the schedule, as the Amtrak source's does: a train that leaves the
+  Central, Mountain or Pacific zone in the evening after midnight Eastern, such as 595 out of San
+  Diego at 21:01 Pacific, runs on the next day's service. Before, it got the origin's local date,
+  so its `start_date` was a day early and it was matched against the wrong day's calendar; a
+  train whose local origin date matches no service day is now left out. Consumers that keyed
+  on `asm-` entity ids or read `vehicle.label` as a route name must change; see "Consumer
+  migration" in the README. Consumers that read the train number from `trip_short_name` are not
+  affected (#122).
+- **`AMTRAK_FILTER_CAPITAL_CORRIDOR` applies to the fallback.** The filter wrapped only the
+  Amtrak source, so with it on, a generation built from `transitdocs-asm` still published Capitol
+  Corridor (route `84`) trip updates and vehicle positions. The fallback is now filtered the same
+  way.
+- **Observed tracks reach `static.zip` while the service runs.** A static snapshot built
+  from the configured platforms alone no longer counts as current once a track is observed, so the
+  rebuild downloads `GTFS.zip` in full instead of accepting a `304`. Before, observed platforms were
+  published only after a fresh start or a new upstream feed. A scheduled rebuild now logs
+  `new track observed; static rebuild scheduled` (#112).
+- **`static.zip`'s `feed_info.feed_version` matches the realtime headers.** It now carries the
+  published static version, `{feed_version}+tracks.{digest}`, as the GTFS-Realtime reference
+  requires. Before, it kept Amtrak's version, and two `static.zip` files with
+  different platform stops shared one `feed_version`. `official-static.zip` is unchanged, and
+  `platform-addon.zip` now lists `feed_info.txt` among its files. Consumers that read
+  `feed_info.feed_version` to compare with Amtrak's own version should strip the `+tracks.` suffix
+  or read `official-static.zip` (#108).
+- **A stalled `GTFS.zip` download times out.** The download had no timeout, so a connection that
+  stalled could hang startup or the daily refresh until the operating system gave up. It now
+  allows 30 seconds to connect and 5 minutes in all, and a timeout is reported like any other
+  download failure (#106).
+- **A fatal startup error says what failed.** It is logged at `ERROR` through tracing with its
+  stage (`configuration`, `static GTFS bootstrap`, `HTTP listener bind`, ...) and the full cause
+  chain, for example `static GTFS download failed: error sending request: client error
+  (Connect): tcp connect error: Connection refused`, in place of a bare
+  `Error: StaticError("static fetch failed")`. A failed static download now names the timeout,
+  DNS, connect, TLS, or HTTP status cause in scheduled refresh warnings too. URLs are never
+  logged. The process exits with status 1, as before: the `exit=0` in the report is what
+  `docker inspect` shows for a container that a restart policy has already started again (#106).
+- **Train-status alerts have a `header_text`.** The per-train alerts in `alerts.pb` (ids such as
+  `20261117-98`) had only `description_text`, although GTFS-Realtime requires a header. The header
+  is now the description's leading label after the train number, such as `Train 98: Delay
+  Notification`, with `Train 98 service alert` or `Service alert` as the fallback. An alert whose
+  notices are all delay notifications gets `effect: SIGNIFICANT_DELAYS`; other alerts keep no
+  effect. Alerts that already had a header are unchanged (#107).
+- **Falling back to `transitdocs-asm` says why.** Each cycle in which the Amtrak source errors or
+  returns nothing logs `WARN primary realtime source failed; falling back` with the source, the
+  fallback, and the error (timeout, connect, HTTP status, decode), with URLs removed. A fallback
+  that also fails, or a chain with no fallback, is warned too. When the Amtrak source succeeds
+  again, one `INFO` line says it recovered; a healthy source logs nothing extra. The bare
+  `ASM data successfully downloaded` line each cycle is a `println!` in the pinned
+  `amtrak-gtfs-rt` crate and still appears (#110).
+- **An Amtrak answer with no trains falls back.** An answer with no trip updates and no vehicle
+  positions still counted as a batch when it carried alerts: the Amtrak crate adds its Pacific
+  Surfliner advisories even when it returns no trains, and with notices on the cached station and
+  passenger notices were added too. The chain did not fall back to `transitdocs-asm`, nothing was
+  warned, and the generation published alerts and no trains. Such an answer now counts as empty,
+  and notices are added only to a batch that has something in it, so the fallback takes over and
+  publishes the notices. When the fallback is also empty or switched off, no new generation is
+  published: the last one keeps serving, and `/readyz` returns `503` once it is 300 s old (#110).
+- **Notices survive a fallback generation.** A generation built from `transitdocs-asm` published
+  no station or passenger notices, so they vanished from `alerts.pb` for that cycle. The fallback
+  now shares the Amtrak source's notices cache, so it publishes the same notices without another
+  page fetch. Train-status alerts still come only from the Amtrak source (#110).
+- **The feed set served right after a restart has `match_rate`.** Each generation now stores its
+  match rate in `match-rate.txt` beside `manifest.txt`, and recovery reads it, so the manifest
+  served from disk matches the live one. `manifest.txt` keeps its exact shape, so 0.8.0 can still
+  recover these generations after a rollback, and a generation written by 0.8.0 still loads, with
+  no `match_rate` (#116).
+- **Generation ids count up by one.** The `-<sequence>` suffix advanced by 2 per published
+  generation because the `current` marker's temp file name took a number from the same counter.
+  The marker has its own counter now, so the suffix reads `-0`, `-1`, `-2`, and a failed publish
+  does not use a number up. It still starts at 0 after a restart; the timestamp prefix keeps ids
+  unique, and an id already on disk is skipped. Ids remain opaque: fetch `/v1/feed-set.json`
+  rather than predicting them (#117).
+- **A stalled notices request no longer holds up the feeds.** The service's request to the
+  notices page had no timeout, and it runs while the generation is assembled, so a worker that
+  accepted the connection and then stopped answering held up every feed. It now gives up after 5
+  seconds to connect or 30 seconds in all, and the generation publishes with the last good notices
+  (#109).
+- **A cold start no longer logs a traceback.** Until the service writes its first train list
+  (`{AMTRAK_OUTPUT_DIR}/tracks/fleet-trains.json`), the worker's track poll logs one INFO line,
+  `waiting for the service's first train list`, and retries on the next tick. A train list that
+  exists but cannot be read, is not JSON, or is not `amtrak-fleet-trains/v1` still logs at ERROR
+  (#103).
+- **A client that hangs up no longer prints a traceback.** The container healthcheck reads only
+  the status line of the worker's `/healthz` and closes, so the worker's body write could fail
+  with `ConnectionResetError` or `BrokenPipeError`, and `socketserver` printed the traceback to
+  stderr. The worker now logs one line with the peer and path (no query string): DEBUG for
+  `/healthz`, WARNING for any other path. Any other handler error is logged at ERROR, with its
+  traceback, through the worker's logger. No feed data was lost: the service's track and notices
+  requests read whole bodies (#109).
+- **Browser failures in the worker's log name their cause.** The track poller logged
+  `browser launch failed: Error` when the browser had launched and only the first load of the
+  status page had failed. It now logs `first status page load failed:` or `browser launch failed:`
+  followed by the error's type and the first line of its message, for example
+  `Error: Page.goto: net::ERR_TUNNEL_CONNECTION_FAILED at https://www.amtrak.com/tickets/train-status.html`.
+  A failed status fetch carries the same detail. The notices poller's
+  `advisories markup not obtained this cycle` line now gives the reason: the navigation error, a
+  gate that never appeared, or a page still changing at the timeout. A failed detail page also
+  logs its reason. A notices cycle in which the browser itself fails (for example, it closed
+  mid-cycle) logs one `WARNING`, `poll cycle failed (...)`, instead of a traceback whose Playwright
+  message carried the browser's recent output, page URLs and query strings included; any other
+  error still logs its traceback. Any URL in these lines keeps only its scheme, host, port, and
+  path (#115).
+- **Validation reports carry only their own run.** `validation-reports/` held two tracked
+  records from August 2026, so every `scripts/validate-feeds.sh` run overwrote the tracked
+  `release-evidence.json` and the `validation-reports` and `offline-validation-reports`
+  artifacts paired fresh evidence with a stale "block" `release-decision.json`. The two records
+  now live in `.security/release-gate/2026-08-14/`, `validation-reports/` is fully ignored, and
+  `scripts/test-release-controls.sh` fails if a file under it is tracked (#102).
+
 ### Security
 
 - **Playwright 1.65.2 with Node 26.13.1.** The Node.js runtime that Playwright 1.64.1 bundled,

@@ -308,7 +308,7 @@
       "files": [
         "scripts/validate-feeds.sh",
         "validation/baseline.json",
-        "validation-reports",
+        ".security/release-gate/2026-08-14",
         ".security/dependency-audit"
       ],
       "id": "5.1",

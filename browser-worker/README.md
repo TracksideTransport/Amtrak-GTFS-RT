@@ -53,25 +53,48 @@ they never share cookies or pages.
   stop between `TRACK_WINDOW_AFTER_SECS` in the past and `TRACK_WINDOW_BEFORE_SECS` in the future
   (default 10 minutes back and 30 minutes ahead). An estimated time replaces the scheduled time.
   Bus stops are ignored.
-- A train is hot when its next stop is inside `TRACK_HOT_WINDOW_SECS` (default 12 minutes) and
-  one of its upcoming stops in the window has no track in its last document. Hot trains are
-  fetched every cycle, soonest first. Every other due train, including one that has just left a
-  stop, is rotated, and a train attempted within `TRACK_COOLDOWN_SECS` (default 90 seconds)
-  waits; a failed attempt counts. Each cycle fetches at most `MAX_FETCHES_PER_CYCLE` trains
-  (default 24).
+- A train is hot when one of its upcoming stops is inside `TRACK_HOT_WINDOW_SECS` (default 12
+  minutes, or the station's own hot window from a lead-time profile) and has no track in its last
+  document. Only stops where riders can board count: the train list marks a stop with static
+  `pickup_type` 1 `"boarding": false` (Route 128 and Back Bay on Boston-bound trains). Only
+  stations where a track has been published count: the train list's `track_stations`, the
+  stations in `AMTRAK_TRACKS_PLATFORMS` or `observed-platforms.txt`. A list without these fields
+  (from an older service, or the map feed) counts every stop.
+- A train is warm when a boarding stop inside its hot window, at a station not yet in
+  `track_stations`, has no track in its last document. On a fresh install only the seeded
+  stations are listed, so this keeps Providence or Washington checked while the service learns
+  where Amtrak publishes tracks. A warm train is not hot: it takes the cooldown like any other
+  train.
+- Each cycle takes, in order: hot trains with no document yet, soonest first; hot trains that
+  have a document, oldest attempt first; then every other due train, including a warm one or one
+  that has just left a stop, oldest attempt first. Every group waits `TRACK_COOLDOWN_SECS`
+  (default 90 seconds) after an attempt. Trains named in an early-refresh hint skip the cooldown,
+  and they go first among hot trains that have a document and among the other due trains; hot
+  trains with no document stay soonest first. A fetch Amtrak answered counts as an attempt, even
+  a rejected one, and so does a status fetch that ran in the page and failed (timed out or was
+  refused). A pick the browser could not run at all does not. Each cycle fetches at most
+  `MAX_FETCHES_PER_CYCLE` trains (default 24).
 - Full polls run every `AMTRAK_TRACKS_BASE_INTERVAL_SECS` (default 900). Between them, each
-  `POLL_INTERVAL_SECS` cycle fetches only hot trains and trains named in the service's early
-  refresh hints.
+  `POLL_INTERVAL_SECS` cycle fetches only hot and warm trains and trains named in the service's
+  early refresh hints.
 - Arizona stations use `America/Phoenix` (no daylight saving time), although the train feed
   labels them Mountain.
 - Image, font, stylesheet, and media requests are blocked, and so is every host outside
   `amtrak.com` while `BLOCK_THIRD_PARTY` is on. Each fetch aborts after `FETCH_TIMEOUT_SECS`. The
-  status page is recycled every `BROWSER_MAX_AGE_SECS`.
+  status page is recycled every `BROWSER_MAX_AGE_SECS`, between poll cycles: the new page loads
+  before the old one closes, and a failed reload keeps the old page and is retried later.
 - A browser failure (crash, launch failure, or a hung fetch) ends that cycle's fetches. The next
   launch waits 1 minute, doubling up to `RELAUNCH_BACKOFF_MAX_SECS`, and the wait resets after a
-  successful fetch.
+  successful fetch. The trains the cycle did not fetch are not counted as attempted. A hot one is
+  retried as soon as the browser is back. A ready one is left out of the cycles between full
+  polls unless it is warm or named in a hint, so it waits for the next full poll, up to
+  `AMTRAK_TRACKS_BASE_INTERVAL_SECS` (15 minutes by default). The pick whose own fetch failed
+  counts as an attempt and waits out its cooldown, so a train whose status request keeps failing
+  cannot take the browser down after every relaunch.
 - Each cycle logs `due=`, `picked=`, `stored=`, and `rejected=` with the reason per train (for
-  example `{'http 403': 3}`), so an Akamai block is visible in the logs.
+  example `{'http 403': 3}`), so an Akamai block is visible in the logs. A line before it names
+  every pick, whether it was hot or ready, and its outcome, for example
+  `track poll picks: 172 hot stored, 86 hot rejected (http 404), 95 hot browser unavailable (Error), 66 ready skipped (browser unavailable)`.
 - `/tracks.json` is the latest documents (`200`), each with `fetchedAt`, the time it was read
   from Amtrak. It is `503` when no poll has succeeded or the last success is older than
   `MAX_STALE_SECS`. A poll succeeds only when it had nothing to fetch or stored at least one
@@ -131,13 +154,13 @@ Tracks:
 | `AMTRAK_TRACKS_BASE_INTERVAL_SECS` | `900` | Seconds between full polls |
 | `TRACK_WINDOW_BEFORE_SECS` | `1800` | How far ahead a stop's ETA may be |
 | `TRACK_WINDOW_AFTER_SECS` | `600` | How recently a stop may have passed and still be fetched |
-| `TRACK_HOT_WINDOW_SECS` | `720` | Closest stop within this many seconds is fetched every cycle |
-| `TRACK_COOLDOWN_SECS` | `90` | Minimum gap before the same outer-window train is fetched again |
+| `TRACK_HOT_WINDOW_SECS` | `720` | A boarding stop within this many seconds that has no track makes the train hot (or warm) |
+| `TRACK_COOLDOWN_SECS` | `90` | Minimum gap before the same train is fetched again, unless a hint names it |
 | `MAX_FETCHES_PER_CYCLE` | `24` | Cap on status requests per cycle |
 | `AMTRAK_TRACKS_LEAD_TIME_FILE` | empty | `amtrak-station-lead-time/v1` profile; see [Station coverage](#station-coverage) |
 | `DOCUMENT_TTL_SECS` | `7200` | How long a fetched document stays in `/tracks.json` |
 | `FETCH_TIMEOUT_SECS` | `20` | Abort one status request after this many seconds |
-| `BROWSER_MAX_AGE_SECS` | `21600` | Recycle the status page after this long |
+| `BROWSER_MAX_AGE_SECS` | `1800` | Recycle the status page after this long, between poll cycles. This recycle is what bounds the renderer, which grows by hundreds of MiB over hours of status fetches; a value near the old `21600` lets it grow larger than in v0.8.0 |
 | `RELAUNCH_BACKOFF_MAX_SECS` | `900` | Longest wait before relaunching after a browser failure |
 | `MAX_STALE_SECS` | `300` | Serve `503` once the last successful poll is older than this |
 | `LIVENESS_SECS` | `900` | `/healthz` fails once no poll has finished for this long. It also fails after three polls in a row fail |

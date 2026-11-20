@@ -203,7 +203,7 @@ flowchart TD
     - Run `dependency-security-audit` in `release` mode, review both reports, and require complete inventory plus a shippable result no older than 24 hours; unresolved design-baseline audit warnings do not count as release evidence.
     - Record the controlled-consumer migration and rollback decision; stop for user review rather than deploying or exposing the service.
     - **Dependency delivery evidence:** state=completed | mode=release | timestamp=2026-08-14T01:30:23.662401Z | revision=c52a97c5c7528f1f6d58456823b6c8096f8e8da4 | json=[release.json](../../.security/dependency-audit/release.json) | markdown=[release.md](../../.security/dependency-audit/release.md) | review=completed | result=unavailable | exit=2 | decision=BLOCK rollout; no deployment or consumer migration | warnings_reviewed=true | clean=false
-    - **Files:** [scripts/validate-feeds.sh](../../scripts/validate-feeds.sh), [validation/baseline.json](../../validation/baseline.json), [validation-reports](../../validation-reports), [.security/dependency-audit](../../.security/dependency-audit)
+    - **Files:** [scripts/validate-feeds.sh](../../scripts/validate-feeds.sh), [validation/baseline.json](../../validation/baseline.json), [.security/release-gate/2026-08-14](../../.security/release-gate/2026-08-14), [.security/dependency-audit](../../.security/dependency-audit)
     - **Dependency resolution:** none
     - **Dependency delivery:** release
     - **Depends on:** 1.3, 4.1

@@ -52,6 +52,61 @@ flowchart LR
   http --> apps["Transit apps and consumers"]
 ```
 
+## System requirements
+
+The image runs the service, one headless Chromium for the browser sources, and a Java validator
+in one container. Memory is what decides the size of the host.
+
+| | Minimum | Recommended |
+| --- | --- | --- |
+| CPU | 2 cores, 64-bit (`x86-64` or `ARMv8`) | 4 cores |
+| Memory for the container | 1.5 GiB (the Compose `mem_limit`) | 2 GiB (set `mem_limit: 2g`) |
+| Host RAM | 2 GiB | 4 GiB |
+| Free disk | 2 GiB | 5 GiB |
+| OS | 64-bit Linux, macOS, or Windows with Docker Engine and the Compose v2 plugin, or Docker Desktop | The same |
+| Network | Outbound HTTPS to the hosts listed below | The same |
+
+**Memory.** These figures were measured on `v0.8.0` with every source on and the Compose
+defaults, sampled from `docker stats` and per-process RSS:
+
+| Process | Typical | Notes |
+| --- | --- | --- |
+| Service (Rust) | 55–85 MiB | Flat over 24 hours |
+| Java validator | about 265 MiB | Only while it checks a new static ZIP: at startup, when Amtrak publishes a new `GTFS.zip`, and when newly observed tracks rebuild `static.zip` |
+| Browser worker (Python) | 60–250 MiB | Grew with uptime in `v0.8.0` (#118) |
+| Playwright driver (Node.js) | about 160 MiB | |
+| Chromium headless shell | 350–700 MiB | Grows with the status page's age; the page is recycled every `BROWSER_MAX_AGE_SECS` |
+
+The container uses about 400–550 MiB right after it starts. On `v0.8.0` it climbs to about
+1 GiB over several hours, with short peaks near the 1.5 GiB limit. Issue #118 tracks that growth
+and its fix. The Compose `tmpfs` mounts (`/tmp` and `/home/amtrak`, 256 MiB each) and
+`shm_size: 64mb` count toward the same limit, so do not lower `mem_limit` below 1.5 GiB with
+the browser sources on. On a Raspberry Pi the limit applies only once the kernel's memory cgroup
+is enabled; see [Raspberry Pi](#raspberry-pi-linuxarm64). With both browser sources off (`AMTRAK_TRACKS_AMTRAK=off` and
+`AMTRAK_ADVISORIES=off`), no Python or Chromium process runs. From the figures above, the service and the
+validator together should peak at about 350 MiB (not measured in that mode), so a 1 GiB limit
+leaves room.
+
+**CPU.** CPU use has not been measured yet, so the CPU row is sizing guidance. Chromium page
+loads and validator runs are the busy moments; between them the service mostly waits
+on its next poll. A 64-bit OS is required: there is no `linux/arm/v7` image, so a Raspberry Pi
+needs a 64-bit OS (see [Raspberry Pi](#raspberry-pi-linuxarm64)).
+
+**Disk.** The image is about 1.1 GB. The `amtrak-data` volume holds the immutable generations,
+capped at 256 MiB of unique bytes by `AMTRAK_GENERATION_BUDGET_BYTES` (see
+[Volume retention and rollback](#volume-retention-and-rollback)); it held about 42 MB after a
+few hours. Leave room to pull the next image beside the current one.
+
+**Network.** The service needs outbound HTTPS to `content.amtrak.com` (`GTFS.zip`, about 18.5 MB,
+downloaded only when Amtrak publishes a new one), `maps.amtrak.com` (the train poll each cycle), and
+`asm-backend.transitdocs.com` (the fallback). The browser worker needs `www.amtrak.com` for
+notices and track documents. Track sources also call `hartfordline.com` and, with credentials,
+`raildata.njtransit.com`. Nothing needs to reach the host from outside: the feed is published on
+`127.0.0.1:8090`.
+
+**Tested on** Docker Engine 29.10 with Compose v5.8 (Debian 13, amd64), Docker Desktop on macOS
+(Apple silicon), and Podman 4.9 (Ubuntu 24.04, `--network=host`).
+
 ## Install with Docker
 
 Everything (the service, its browser worker with one headless Chromium, and the GTFS validator)
@@ -138,9 +193,10 @@ source returned) and `matched` (the ones that resolved against the generation's 
 fall in `matched / emitted` is the earliest sign that the static and realtime data disagree, for
 example after an Amtrak schedule change; the service also logs both numbers every cycle and warns
 when fewer than 80% of at least ten trip updates match. It is measured over what the source
-returned, because the source crate exposes no count of the raw trains it observed. A generation
-recovered from disk after a restart has no `match_rate` until the next one is built, since it is
-not stored in the on-disk manifest. Consumers that ignore unknown keys are unaffected.
+returned, because the source crate exposes no count of the raw trains it observed. It is stored
+with each generation (`match-rate.txt`, beside the unchanged manifest), so the feed set served
+from disk right after a restart carries it too. Only a generation written by 0.8.0 or earlier,
+before that file existed, has no `match_rate`. Consumers that ignore unknown keys are unaffected.
 
 `static.zip` is still the feed to load if you want one file. It is the official zip plus the
 platform add-on. `assigned_stop_id` values such as `NYP:track:21` exist only in that combined
@@ -495,6 +551,21 @@ the arm64 build with `docker image inspect --format '{{.Architecture}}' <image>`
 cannot run these images; there is no `linux/arm/v7` build. To build on the Pi instead, use
 `AMTRAK_IMAGE_TAG=local docker compose up -d --build`.
 
+**Turn on the memory cgroup first.** Raspberry Pi kernels usually boot with the memory cgroup
+disabled (`cgroup_disable=memory` in `/proc/cmdline`). Docker then ignores the Compose
+`mem_limit` without failing: `docker info` prints `WARNING: No memory limit support`, the
+container runs with no memory limit, and `docker stats` shows `0B / 0B`. Check with:
+
+```bash
+grep -o 'cgroup_[a-z]*=memory' /proc/cmdline       # prints cgroup_disable=memory when it is off
+cat /sys/fs/cgroup/cgroup.controllers              # lists memory when it is on
+```
+
+To turn it on, add `cgroup_enable=memory` to the end of the single line in
+`/boot/firmware/cmdline.txt` (`/boot/cmdline.txt` on older images), reboot, and recreate the
+container (`docker compose up -d --force-recreate`). Without it, a memory leak can exhaust the
+whole Pi instead of stopping at the container's limit.
+
 ### Process supervisor
 
 Run it under a process supervisor. The service exits with a non-zero status if any of its
@@ -684,12 +755,21 @@ endpoint the catenary crate already reads for alerts. It makes **no request whil
 is healthy**, and at most one per cycle while it is not.
 
 Each Amtrak train in the map is matched to a static trip by its train number (`trip_short_name`)
-and the service calendar on the train's origin date, and a train with no active matching trip is
-left out, so every trip and stop id in the batch resolves against the static feed. Delays are the
+and the service calendar on the train's service date (its origin date, or the day after for a
+train that leaves the West in the evening after midnight Eastern), and a train with no active
+matching trip is left out, so every trip and stop id in the batch resolves against the static feed. Delays are the
 map's per-stop `variance` values (seconds); positions convert mph to metres per second. On the day
 this was written, 82 of 93 live Amtrak trains resolved to a static trip. While the fallback is
 the source, `/v1/feed-set.json` names it (`source: transitdocs-asm`), trips carry no track or gate
-stamps, and `alerts.pb` has only what the notices source supplies.
+stamps, and `alerts.pb` carries the station and passenger notices (from the same cache the Amtrak
+source uses) but no train-status alerts, which come only with the Amtrak source's batch. Each
+train keeps the identity the Amtrak source gives it: entity id and `vehicle.id` such as
+`20261119-172` (service date and train number), and `vehicle.label` the train number, on its trip
+update and its vehicle position.
+
+Each cycle that falls back logs a `WARN` line, `primary realtime source failed; falling back`,
+with the Amtrak source's error (a timeout, connection failure, HTTP status, or decode failure,
+with any URL removed). When the Amtrak source answers again, one `INFO` line says it recovered.
 
 The client is original code written against the endpoint's public JSON, not a copy of anyone's
 code. Credit for the data goes to TransitDocs. I could not find published terms of use for that
@@ -705,6 +785,13 @@ notices source of the [browser worker](browser-worker/README.md). The worker sna
 notices list and each linked `/alert/...` detail page. The service GETs those pages on the worker
 origin: `header_text` is the list title, and `description_text` is the detail body (effective
 date, paragraphs, and PSN). A missing detail page keeps that alert's title and effective date.
+
+Every published alert has a `header_text`. The per-train alerts from Amtrak's train status (entity
+ids such as `20261117-98`) arrive with only a description, so the service titles each one from the
+description's leading label and the informed trip's train number: `Train 98: Delay Notification`,
+`Train 98: Service Resumption`, or `Train 98 service alert` when there is no label. When every
+notice in the description is a `Delay Notification`, `effect` is `SIGNIFICANT_DELAYS`; otherwise
+it is left unset.
 
 The worker re-renders the notices list on `NOTICES_POLL_INTERVAL_SECS` (default 15 minutes), in a
 fresh browser context in its one Chromium. It samples
@@ -766,10 +853,12 @@ flowchart TD
   stop -.->|"trip update assigned_stop_id"| t1
 ```
 
-Nothing else in Amtrak's feed changes, and the other files are copied byte-for-byte (after the
-[stop-reference repair](#validation-gate), when one applies). The published
-static version becomes `{feed_version}+tracks.{digest}`, where the digest changes only when the
-platform list changes. The augmented bytes go through the same MobilityData validator gate; if
+The published static version becomes `{feed_version}+tracks.{digest}`, where the digest changes
+only when the platform list changes. `feed_info.txt`'s `feed_version` carries the same value, so it
+matches the `feed_version` in every GTFS-Realtime header, as the reference requires;
+`official-static.zip` keeps Amtrak's own version. Nothing else in Amtrak's feed changes, and the
+other files are copied byte-for-byte (after the [stop-reference repair](#validation-gate), when one
+applies). The augmented bytes go through the same MobilityData validator gate; if
 augmentation fails or is rejected, Amtrak's feed is published unchanged and no tracks are stamped.
 The only new validator notice is a `stop_without_stop_time` warning per platform stop, because no
 scheduled trip calls at a platform directly.
@@ -831,9 +920,11 @@ track change.
 flowchart TD
   maps["maps.amtrak.com getTrainsData"] --> dec["Decrypt in the browser worker"]
   dec --> win["Stops from 10 min past to 30 min ahead"]
-  win --> hot["Next stop within 12 min, no track yet: every cycle"]
-  win --> outer["Otherwise: 90s cooldown, 24 fetches max"]
-  hot --> browser["One resident headless browser"]
+  win --> hot["Boarding stop with tracks within 12 min, no track yet"]
+  hot --> first["No document yet: first, 90s cooldown"]
+  hot --> outer["Otherwise: 90s cooldown, 24 fetches max"]
+  win --> outer
+  first --> browser["One resident headless browser"]
   outer --> browser
   browser --> status["Status JSON for that train-day"]
   status --> snap["/tracks.json"]
@@ -874,9 +965,14 @@ On 2026-10-17 the app showed track 1 at Providence for train 167 about ten minut
 (`arrival.track.number` `1`, `asOf` 16:57, scheduled 17:06). Some stations publish hours earlier,
 and that value is already on the document once the train is near the stop, so the worker polls
 trains with a stop inside a 30-minute lookahead and a 10-minute lookback instead of the whole
-fleet. A train whose next stop is within about 12 minutes and still has no track is fetched every
-cycle; every other train in the window, including one that has just left a stop, rotates with a
-90-second cooldown, and a cycle makes at most 24 fetches. A track Amtrak has shown is kept until
+fleet. A train is hot when a stop within about 12 minutes still has no track, counting only stops
+where riders can board (a static `pickup_type` other than 1, so not Route 128 or Back Bay on a
+Boston-bound train) at stations where a track has been published (a station in
+`AMTRAK_TRACKS_PLATFORMS` or `observed-platforms.txt`). A hot train with no status document yet
+goes ahead of the rest. A boarding stop at a station where no track has been seen yet still keeps
+its train checked between full polls, so a fresh install polls Providence while it learns where
+Amtrak publishes tracks. Every train, hot or not, waits a 90-second cooldown after Amtrak answers
+for it, oldest fetch first, and a cycle makes at most 24 fetches. A track Amtrak has shown is kept until
 the stop's latest scheduled or predicted time plus `AMTRAK_TRACKS_RETAIN_GRACE_SECS` (default 15
 minutes), including when a later document drops the field after departure.
 
@@ -1107,7 +1203,8 @@ feeds generated from live data:
 
 The script generates feeds (or reuses `out/`), fetches and pins both validators, validates each RT
 feed type in its own directory, and prints every notice by severity. Reports land in
-`validation-reports/`. It needs Java 17 and Maven, and falls back to Docker automatically if they
+`validation-reports/`, which is ignored run output: nothing there is tracked, so a run never
+changes a checked-in file. It needs Java 17 and Maven, and falls back to Docker automatically if they
 aren't installed.
 
 **How the gate decides.** It fails when a validator reports an ERROR code that is not listed in
@@ -1144,6 +1241,20 @@ Controlled consumers must switch atomically to manifest-first discovery, accept
 unauthorized peer, unknown immutable generation or artifact, and no current or fresh generation
 respectively. Rollback uses the preceding service binary and retained generation directory; it
 never rewrites immutable artifacts.
+
+**Vehicle identity (#100, #122, unreleased).** Every trip update and vehicle position whose id
+holds a date and number now carries a `VehicleDescriptor`, from either source: `vehicle.id` is the
+train's per-train-day id, the same string as its entity id (`20261119-172`), and `vehicle.label`
+is the train number (`172`). Join a trip update to its vehicle position by `vehicle.id`. Generations built by the `transitdocs-asm`
+fallback change in three ways:
+
+- entity ids are `20261119-172`, as the Amtrak source's are, not `asm-172-20261119`;
+- `vehicle.id` is that per-train-day id, not the bare train number;
+- `vehicle.label` is the train number, not the route name (`Northeast Regional`).
+
+A consumer that keyed on `asm-` entity ids, or showed `vehicle.label` as a route name, must
+change: take the route from `trip.route_id` and the static `routes.txt`. A consumer that reads the
+train number from the static `trip_short_name` (Trackside does) is not affected.
 
 ## Changelog
 

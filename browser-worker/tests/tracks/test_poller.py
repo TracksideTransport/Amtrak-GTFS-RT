@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import logging
 import threading
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -17,7 +18,9 @@ from worker.tracks.poller import (
     BrowserUnavailable,
     ResidentBrowser,
     StatusMiss,
+    TrainListNotReady,
     document_from_eval,
+    load_train_list_file,
     load_trains,
     poll_once,
     run_forever,
@@ -330,9 +333,9 @@ def test_browser_relaunch_backs_off_and_resets_after_a_success():
         outcome = pages.pop(0) if pages else _FakePage({"status": 200, "body": '{"data": []}'})
         if isinstance(outcome, Exception):
             raise outcome
-        return outcome
+        return None, None, outcome
 
-    browser._launch = launch
+    browser._open = launch
     train = DueTrain("167", "2026-10-17", 60.0)
 
     async def attempt():
@@ -375,14 +378,22 @@ def test_the_browser_is_recycled_after_its_maximum_age():
 
     async def launch():
         launches.append(clock[0])
-        return _FakePage({"status": 200, "body": '{"data": []}'})
+        return None, None, _FakePage({"status": 200, "body": '{"data": []}'})
 
-    browser._launch = launch
+    browser._open = launch
     train = DueTrain("167", "2026-10-17", 60.0)
-    asyncio.run(browser.fetch(cfg, train))
+
+    async def cycle():
+        await browser.recycle_if_due()
+        return await browser.fetch(cfg, train)
+
+    asyncio.run(cycle())
     clock[0] = 50
-    asyncio.run(browser.fetch(cfg, train))
+    asyncio.run(cycle())
     clock[0] = 100
+    asyncio.run(cycle())
+    # Only between cycles: a fetch alone never recycles, whatever the page's age.
+    clock[0] = 500
     asyncio.run(browser.fetch(cfg, train))
     assert launches == [0.0, 100]
 
@@ -423,6 +434,65 @@ def test_missing_train_list_file_fails_the_cycle_without_polling(tmp_path, monke
     monkeypatch.setattr("urllib.request.urlopen", no_network)
     with pytest.raises(OSError):
         asyncio.run(_default_trains(Config()))
+
+
+def _run_with_train_list(path, monkeypatch, caplog):
+    monkeypatch.setenv("AMTRAK_OUTPUT_DIR", str(path.parent))
+    monkeypatch.setenv("AMTRAK_FLEET_TRAINS_FILE", str(path))
+
+    def no_network(*_args, **_kwargs):
+        raise AssertionError("the embedded poller must not GET getTrainsData")
+
+    monkeypatch.setattr("urllib.request.urlopen", no_network)
+    store = TrackStore(started_at=0)
+    with caplog.at_level(logging.INFO, logger="worker.tracks.poller"):
+        asyncio.run(
+            run_forever(
+                store,
+                Config(),
+                status_fetcher=_status_for([]),
+                sleep=_no_sleep,
+                clock=lambda: NOW,
+                iterations=1,
+            )
+        )
+    return store, [r for r in caplog.records if r.name == "worker.tracks.poller"]
+
+
+def test_a_cold_start_without_a_train_list_logs_one_info_line_and_no_traceback(
+    tmp_path, monkeypatch, caplog
+):
+    store, records = _run_with_train_list(tmp_path / "fleet-trains.json", monkeypatch, caplog)
+    assert [(r.levelno, r.getMessage()) for r in records] == [
+        (logging.INFO, "waiting for the service's first train list")
+    ]
+    assert records[0].exc_info is None
+    assert store.consecutive_failures() == 1  # not a success; the next tick retries
+
+
+@pytest.mark.parametrize(
+    "body",
+    ["{not json", "[]", json.dumps({"schema": "amtrak-fleet-trains/v0", "trains": []})],
+    ids=["not-json", "not-an-object", "wrong-schema"],
+)
+def test_an_existing_but_unusable_train_list_is_still_an_error(
+    tmp_path, monkeypatch, caplog, body
+):
+    path = tmp_path / "fleet-trains.json"
+    path.write_text(body, encoding="utf-8")
+    _store, records = _run_with_train_list(path, monkeypatch, caplog)
+    assert [r.levelno for r in records] == [logging.ERROR]
+    assert records[0].getMessage() == "track poll failed; keeping the last snapshot"
+    with pytest.raises(ValueError):
+        load_train_list_file(str(path))
+
+
+def test_an_unreadable_train_list_is_an_error_not_a_cold_start(tmp_path):
+    with pytest.raises(TrainListNotReady):
+        load_train_list_file(str(tmp_path / "absent.json"))
+    with pytest.raises(OSError) as raised:
+        load_train_list_file(str(tmp_path))  # a directory: exists, cannot be read as a file
+    assert not isinstance(raised.value, TrainListNotReady)
 
 
 def test_a_cycle_without_a_train_list_retries_the_full_poll_on_the_next_tick(monkeypatch):
@@ -523,3 +593,337 @@ def test_station_hint_picks_due_trains_stopping_there(tmp_path, monkeypatch):
                   status_fetcher=status, full=False)
     )
     assert fetched == ["163"]
+
+
+def _hot_fleet(*numbers):
+    """Fleet trains whose next stop, Providence, is inside the hot window, in train order."""
+    return {
+        "schema": "amtrak-fleet-trains/v1",
+        "trains": [
+            {
+                "train_number": number,
+                "service_date": "2026-10-17",
+                "stops": [
+                    {"code": "PVD", "times_unix": [int((NOW + timedelta(seconds=60 + 10 * index)).timestamp())]}
+                ],
+            }
+            for index, number in enumerate(numbers)
+        ],
+    }
+
+
+def test_a_browser_failure_leaves_later_picks_unstamped_and_first_next_cycle():
+    # #120: 24 picked, 3 stored, then the browser failed. The other 21 were stamped as attempted,
+    # so the next cycle went back to the trains that already had documents.
+    store = TrackStore()
+    last_fetched: dict = {}
+    calls: list[str] = []
+    numbers = [str(number) for number in range(1, 7)]
+
+    async def trains(_cfg):
+        return _hot_fleet(*numbers)
+
+    async def fourth_fails(_cfg, train: DueTrain):
+        calls.append(train.train_number)
+        if len(calls) == 4:
+            raise BrowserUnavailable("Error")
+        return {"data": []}
+
+    cfg = Config(max_fetches_per_cycle=4, hot_window_secs=720, cooldown_secs=90)
+    asyncio.run(
+        poll_once(store, cfg, last_fetched, now=NOW, trains_fetcher=trains, status_fetcher=fourth_fails)
+    )
+    assert calls == ["1", "2", "3", "4"]
+    assert set(last_fetched) == {("1", "2026-10-17"), ("2", "2026-10-17"), ("3", "2026-10-17")}
+
+    calls.clear()
+
+    async def answers(_cfg, train: DueTrain):
+        calls.append(train.train_number)
+        return {"data": []}
+
+    later = NOW + timedelta(seconds=60)
+    asyncio.run(
+        poll_once(store, cfg, last_fetched, now=later, trains_fetcher=trains, status_fetcher=answers)
+    )
+    assert calls == ["4", "5", "6"]
+
+
+def test_a_pick_whose_own_fetch_failed_takes_the_cooldown_and_later_picks_go_first():
+    # A status fetch that times out or is refused inside the page surfaces as BrowserUnavailable.
+    # If that failure is specific to one train, leaving it unstamped put it first after every
+    # relaunch, where it killed the browser again and starved every other train.
+    store = TrackStore()
+    last_fetched: dict = {}
+    calls: list[str] = []
+    numbers = [str(number) for number in range(1, 5)]
+
+    async def trains(_cfg):
+        return _hot_fleet(*numbers)
+
+    async def second_fails_in_page(_cfg, train: DueTrain):
+        calls.append(train.train_number)
+        if train.train_number == "2":
+            raise BrowserUnavailable("TimeoutError", attempted=True)
+        return {"data": []}
+
+    cfg = Config(max_fetches_per_cycle=4, hot_window_secs=720, cooldown_secs=90)
+    asyncio.run(
+        poll_once(store, cfg, last_fetched, now=NOW, trains_fetcher=trains,
+                  status_fetcher=second_fails_in_page)
+    )
+    assert calls == ["1", "2"]
+    assert set(last_fetched) == {("1", "2026-10-17"), ("2", "2026-10-17")}
+
+    calls.clear()
+    later = NOW + timedelta(seconds=60)
+    asyncio.run(
+        poll_once(store, cfg, last_fetched, now=later, trains_fetcher=trains,
+                  status_fetcher=second_fails_in_page)
+    )
+    assert calls == ["3", "4"], "the failed pick waits out its cooldown"
+
+
+def test_only_a_failed_in_page_fetch_counts_as_an_attempt():
+    cfg = Config(relaunch_backoff_max_secs=150, browser_max_age_secs=3_600)
+    clock = [1_000.0]
+    browser = ResidentBrowser(cfg, monotonic=lambda: clock[0])
+    train = DueTrain("167", "2026-10-17", 60.0)
+
+    async def failed_launch():
+        raise RuntimeError("launch")
+
+    browser._launch = failed_launch
+    with pytest.raises(BrowserUnavailable) as launch:
+        asyncio.run(browser.fetch(cfg, train))
+    assert launch.value.attempted is False
+    with pytest.raises(BrowserUnavailable, match="backoff") as backoff:
+        asyncio.run(browser.fetch(cfg, train))
+    assert backoff.value.attempted is False
+
+    browser._page = _FakePage(asyncio.TimeoutError())
+    browser._launched_at = clock[0]
+    with pytest.raises(BrowserUnavailable) as in_page:
+        asyncio.run(browser.fetch(cfg, train))
+    assert in_page.value.attempted is True
+
+
+def test_each_cycle_logs_its_picks_with_their_outcomes(caplog):
+    store = TrackStore()
+    hot = _hot_fleet("172", "86", "2154", "95")
+    hot["trains"].append(
+        {
+            "train_number": "66",
+            "service_date": "2026-10-17",
+            "stops": [{"code": "NYP", "times_unix": [int((NOW + timedelta(minutes=25)).timestamp())]}],
+        }
+    )
+
+    async def trains(_cfg):
+        return hot
+
+    async def mixed(_cfg, train: DueTrain):
+        if train.train_number == "86":
+            raise StatusMiss("http 404")
+        if train.train_number == "2154":
+            return None
+        if train.train_number == "95":
+            raise BrowserUnavailable("Error")
+        return {"data": []}
+
+    caplog.set_level(logging.INFO, logger="worker.tracks.poller")
+    asyncio.run(poll_once(store, Config(), {}, now=NOW, trains_fetcher=trains, status_fetcher=mixed))
+    lines = [record.getMessage() for record in caplog.records]
+    assert (
+        "track poll picks: 172 hot stored, 86 hot rejected (http 404), 2154 hot rejected (empty), "
+        "95 hot browser unavailable (Error), 66 ready skipped (browser unavailable)"
+    ) in lines
+    assert any(line.startswith("track poll due=5 picked=5 stored=1 ") for line in lines)
+
+
+def test_a_fresh_install_still_checks_a_boarding_stop_at_an_unobserved_station():
+    # track_stations holds only the seeded stations. Providence is 8 minutes out and has no
+    # observed platform yet; v0.8.0 fetched such a train every minute, so a hot check between
+    # full polls must still pick it once its cooldown has passed.
+    document = {
+        "schema": "amtrak-fleet-trains/v1",
+        "track_stations": ["NHV", "NWK", "NYP"],
+        "trains": [
+            {
+                "train_number": "172",
+                "service_date": "2026-10-17",
+                "stops": [{"code": "PVD", "times_unix": [int((NOW + timedelta(minutes=8)).timestamp())]}],
+            },
+            {
+                "train_number": "174",
+                "service_date": "2026-10-17",
+                "stops": [
+                    {"code": "RTE", "boarding": False,
+                     "times_unix": [int((NOW + timedelta(minutes=8)).timestamp())]}
+                ],
+            },
+        ],
+    }
+    fetched: list[str] = []
+
+    async def trains(_cfg):
+        return document
+
+    async def status(_cfg, train):
+        fetched.append(train.train_number)
+        raise StatusMiss("http 404")
+
+    last_fetched: dict = {}
+
+    def check(at):
+        fetched.clear()
+        asyncio.run(
+            poll_once(TrackStore(), Config(), last_fetched, now=at, trains_fetcher=trains,
+                      status_fetcher=status, full=False)
+        )
+        return list(fetched)
+
+    assert check(NOW) == ["172"]
+    assert check(NOW + timedelta(seconds=60)) == []
+    assert check(NOW + timedelta(seconds=90)) == ["172"]
+
+
+def _three_trains():
+    trains = _two_trains()
+    third = json.loads(json.dumps(trains["features"][0]))
+    third["properties"]["TrainNum"] = "175"
+    trains["features"].append(third)
+    return trains
+
+
+class _RecyclePage:
+    def __init__(self, number, log, clock, fail_goto):
+        self.number = number
+        self.log = log
+        self.clock = clock
+        self.fail_goto = fail_goto
+
+    async def goto(self, _url, **_kwargs):
+        self.log.append(("load", self.number))
+        if self.fail_goto:
+            raise TimeoutError("Timeout 45000ms exceeded.")
+
+    async def evaluate(self, _script, _args):
+        self.log.append(("fetch", self.number))
+        self.clock[0] += 40  # a slow fetch: the maximum age can pass mid-cycle
+        return {"status": 200, "body": '{"data": []}'}
+
+
+class _RecycleContext:
+    def __init__(self, owner):
+        self.owner = owner
+        self.closed = False
+
+    async def route(self, _pattern, _handler):
+        return None
+
+    async def new_page(self):
+        owner = self.owner
+        number = len(owner.pages) + 1
+        fail = number in owner.failing_loads
+        page = _RecyclePage(number, owner.log, owner.clock, fail)
+        owner.pages.append(page)
+        return page
+
+    async def close(self):
+        self.closed = True
+
+
+class _RecycleBrowser:
+    def __init__(self, log, clock, failing_loads):
+        self.log = log
+        self.clock = clock
+        self.failing_loads = failing_loads
+        self.pages: list[_RecyclePage] = []
+        self.contexts: list[_RecycleContext] = []
+
+    def is_connected(self):
+        return True
+
+    async def new_context(self, **_kwargs):
+        context = _RecycleContext(self)
+        self.contexts.append(context)
+        return context
+
+    async def close(self):
+        return None
+
+
+def _recycle_run(failing_loads, cycles):
+    from worker.browser import SharedBrowser
+
+    class _Playwright:
+        async def stop(self):
+            return None
+
+    log: list[tuple] = []
+    clock = [0.0]
+    fake = _RecycleBrowser(log, clock, failing_loads)
+
+    async def start(_mode):
+        return _Playwright(), fake
+
+    cfg = Config(browser_max_age_secs=70, cooldown_secs=0)
+    shared = SharedBrowser(start=start)
+    resident = ResidentBrowser(cfg, shared, monotonic=lambda: clock[0])
+
+    async def trains(_cfg):
+        return _three_trains()
+
+    async def tick(_secs):
+        log.append(("cycle",))
+        clock[0] += 60
+
+    store = TrackStore()
+    asyncio.run(
+        run_forever(
+            store,
+            cfg,
+            shared=shared,
+            browser=resident,
+            trains_fetcher=trains,
+            sleep=tick,
+            clock=lambda: NOW,
+            iterations=cycles,
+        )
+    )
+    per_cycle: list[list[tuple]] = [[]]
+    for event in log:
+        if event == ("cycle",):
+            per_cycle.append([])
+        else:
+            per_cycle[-1].append(event)
+    return per_cycle, resident, shared, fake, store
+
+
+def test_a_due_recycle_happens_between_cycles_not_mid_cycle():
+    per_cycle, _resident, shared, fake, _store = _recycle_run(failing_loads=set(), cycles=2)
+    # The maximum age passes during the first cycle's fetches; the page is not swapped there.
+    assert per_cycle[0] == [("load", 1), ("fetch", 1), ("fetch", 1), ("fetch", 1)]
+    # The next cycle loads the new page before its first fetch, then fetches every pick on it.
+    assert per_cycle[1] == [("load", 2), ("fetch", 2), ("fetch", 2), ("fetch", 2)]
+    assert fake.contexts[0].closed and shared.holders == 0
+
+
+def test_a_failed_recycle_keeps_the_old_page_fetches_every_pick_and_starts_no_backoff(caplog):
+    with caplog.at_level(logging.WARNING, logger="worker.tracks.poller"):
+        per_cycle, resident, _shared, fake, store = _recycle_run(failing_loads={2}, cycles=3)
+    assert per_cycle[0] == [("load", 1), ("fetch", 1), ("fetch", 1), ("fetch", 1)]
+    # The reload failed: the old page served every pick of the cycle.
+    assert per_cycle[1] == [("load", 2), ("fetch", 1), ("fetch", 1), ("fetch", 1)]
+    assert fake.contexts[1].closed, "the failed reload's context is closed"
+    assert resident._backoff == 0 and resident._next_launch == 0
+    assert store.consecutive_failures() == 0
+    # A later cycle tries again, and the swap succeeds.
+    assert per_cycle[2] == [("load", 3), ("fetch", 3), ("fetch", 3), ("fetch", 3)]
+    assert fake.contexts[0].closed
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert warnings == [
+        "status page recycle failed (TimeoutError: Timeout 45000ms exceeded.); "
+        "keeping the current page"
+    ]

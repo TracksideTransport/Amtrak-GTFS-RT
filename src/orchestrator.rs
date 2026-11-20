@@ -1,4 +1,4 @@
-use crate::sources::{RtBatch, RtSource};
+use crate::sources::{describe_error, RtBatch, RtSource};
 use crate::static_gtfs::StaticSnapshotState;
 use crate::writer::{GenerationPublisher, GenerationStore, PublishError, PublishedGeneration};
 use async_trait::async_trait;
@@ -8,6 +8,7 @@ use prost::Message;
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::str::FromStr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -196,8 +197,8 @@ pub struct FeedSetManifest {
     pub platform_addon_version: String,
     pub source: String,
     pub entity_counts: EntityCounts,
-    /// Present for a generation built by this process. A generation recovered from disk has none,
-    /// because the on-disk manifest format is unchanged so that a rollback can still read it.
+    /// Stored with the generation in `match-rate.txt`, so a generation recovered from disk after
+    /// a restart reports it too. `None` only for a generation written before that file existed.
     pub match_rate: Option<MatchRate>,
     pub urls: ArtifactUrls,
 }
@@ -269,7 +270,30 @@ impl std::fmt::Display for ValidationError {
 
 impl std::error::Error for ValidationError {}
 
+/// Whether the first (primary) source failed on its last attempt.
+///
+/// The poller keeps one across cycles, so the primary's recovery is logged once at `INFO`
+/// instead of every cycle.
+#[derive(Debug, Default)]
+pub struct PrimaryHealth {
+    failing: AtomicBool,
+}
+
+impl PrimaryHealth {
+    fn mark_failed(&self) {
+        self.failing.store(true, Ordering::Relaxed);
+    }
+
+    /// Marks the primary healthy and reports whether it was failing.
+    fn mark_recovered(&self) -> bool {
+        self.failing.swap(false, Ordering::Relaxed)
+    }
+}
+
 /// Tries sources in order and returns the first successful non-empty batch.
+///
+/// Every source that errors or returns nothing is logged at `WARN` with its reason, so a
+/// generation from the fallback says why the primary was skipped.
 ///
 /// # Errors
 ///
@@ -278,15 +302,53 @@ pub async fn select_batch(
     sources: &[Box<dyn RtSource>],
     gtfs: &Gtfs,
 ) -> Result<SelectedBatch, RefreshError> {
-    for source in sources {
-        match source.fetch(gtfs).await {
+    select_batch_tracking(sources, gtfs, &PrimaryHealth::default()).await
+}
+
+/// [`select_batch`], plus one `INFO` line when the primary succeeds after `primary` saw it fail.
+async fn select_batch_tracking(
+    sources: &[Box<dyn RtSource>],
+    gtfs: &Gtfs,
+    primary: &PrimaryHealth,
+) -> Result<SelectedBatch, RefreshError> {
+    for (index, source) in sources.iter().enumerate() {
+        let reason = match source.fetch(gtfs).await {
             Ok(batch) if !batch.is_empty() => {
+                if index == 0 && primary.mark_recovered() {
+                    tracing::info!(
+                        source = source.name(),
+                        "primary realtime source recovered; generations come from it again"
+                    );
+                }
                 return Ok(SelectedBatch {
                     source_name: source.name(),
                     batch,
                 });
             }
-            Ok(_) | Err(_) => {}
+            Ok(_) => "returned no entities".to_string(),
+            Err(error) => describe_error(error.as_ref()),
+        };
+        if index == 0 {
+            primary.mark_failed();
+        }
+        match sources.get(index + 1) {
+            Some(next) if index == 0 => tracing::warn!(
+                source = source.name(),
+                fallback = next.name(),
+                error = %reason,
+                "primary realtime source failed; falling back"
+            ),
+            Some(next) => tracing::warn!(
+                source = source.name(),
+                next = next.name(),
+                error = %reason,
+                "realtime source failed; trying the next source"
+            ),
+            None => tracing::warn!(
+                source = source.name(),
+                error = %reason,
+                "realtime source failed; no source left to try"
+            ),
         }
     }
     Err(RefreshError(
@@ -299,6 +361,7 @@ pub struct GenerationBuilder;
 
 impl GenerationBuilder {
     /// Partitions payloads, filters unresolved references, and stamps one header.
+    /// It also fills each unset `schedule_relationship` (see [`crate::schedule_relationship`]).
     ///
     /// `is_deleted` is removed because deletion semantics are invalid for the
     /// selected `FULL_DATASET` incrementality. Unmatched references are omitted
@@ -412,6 +475,8 @@ impl GenerationBuilder {
                     && alert_has_text(&alert)
                     && alert_ids.insert(entity.id.clone())
                 {
+                    // GTFS-Realtime requires `header_text`; train-status alerts arrive without.
+                    crate::alert_header::ensure_header_text(&mut alert, &static_snapshot.parsed);
                     alerts.entity.push(FeedEntity {
                         id: entity.id,
                         is_deleted: None,
@@ -420,6 +485,11 @@ impl GenerationBuilder {
                     });
                 }
             }
+        }
+
+        // #101: after every source and rewrite, an unset relationship is written as SCHEDULED.
+        for message in [&mut trip_updates, &mut vehicle_positions, &mut alerts] {
+            crate::schedule_relationship::make_explicit(message);
         }
 
         let match_rate = MatchRate {
@@ -581,6 +651,7 @@ pub async fn refresh_generation_once(
         snapshots,
         committer,
         &DefaultGenerationProcessor,
+        &PrimaryHealth::default(),
         generated_at,
     )
     .await
@@ -591,11 +662,12 @@ async fn refresh_generation_once_with(
     snapshots: &StaticSnapshotState,
     committer: &dyn GenerationCommitter,
     processor: &dyn GenerationProcessor,
+    primary: &PrimaryHealth,
     generated_at: SystemTime,
 ) -> RefreshTelemetry {
     let started = Instant::now();
     let (snapshot, was_pending) = snapshots.candidate().await;
-    let selected = match select_batch(sources, &snapshot.parsed).await {
+    let selected = match select_batch_tracking(sources, &snapshot.parsed, primary).await {
         Ok(selected) => selected,
         Err(_) => {
             return finish_refresh(
@@ -750,12 +822,15 @@ pub async fn run_poller(
     interval: Duration,
 ) {
     let mut ticker = tokio::time::interval(interval);
+    let primary = PrimaryHealth::default();
     loop {
         ticker.tick().await;
-        refresh_generation_once(
+        refresh_generation_once_with(
             sources.as_slice(),
             &snapshots,
             committer.as_ref(),
+            &DefaultGenerationProcessor,
+            &primary,
             SystemTime::now(),
         )
         .await;
@@ -1300,6 +1375,167 @@ mod tests {
         );
     }
 
+    /// A source that fails while `failing` is set and otherwise returns one entity.
+    struct Switchable {
+        failing: Arc<AtomicBool>,
+    }
+
+    #[async_trait]
+    impl RtSource for Switchable {
+        fn name(&self) -> &'static str {
+            "amtrak"
+        }
+
+        async fn fetch(&self, _gtfs: &Gtfs) -> Result<RtBatch, crate::sources::SourceError> {
+            if self.failing.load(Ordering::SeqCst) {
+                Err("operation timed out fetching https://maps.example/getTrainsData".into())
+            } else {
+                Ok(batch_with(1))
+            }
+        }
+    }
+
+    /// Log lines written while the returned guard is alive on this thread.
+    #[derive(Clone, Default)]
+    struct CapturedLogs(Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for CapturedLogs {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl CapturedLogs {
+        fn capture(&self) -> tracing::subscriber::DefaultGuard {
+            // While only one dispatcher is alive, tracing caches a callsite's interest from the
+            // default of whichever thread reaches it first. A parallel test with no subscriber
+            // can then cache `never` and drop this capture's events. A second dispatcher kept
+            // alive for the whole process makes tracing combine every live dispatcher's interest.
+            // A bare registry answers `always`, so no callsite is ever cached as `never`.
+            static KEEP_INTEREST_COMBINED: std::sync::OnceLock<tracing::Dispatch> =
+                std::sync::OnceLock::new();
+            KEEP_INTEREST_COMBINED
+                .get_or_init(|| tracing::Dispatch::new(tracing_subscriber::registry()));
+            let writer = self.clone();
+            tracing::subscriber::set_default(
+                tracing_subscriber::fmt()
+                    .with_ansi(false)
+                    .with_writer(move || writer.clone())
+                    .finish(),
+            )
+        }
+
+        fn take(&self) -> String {
+            String::from_utf8(std::mem::take(&mut *self.0.lock().unwrap())).unwrap()
+        }
+    }
+
+    /// A WARN callsite that only the test below reaches.
+    fn warn_from_the_probe_callsite() {
+        tracing::warn!("probe callsite reached");
+    }
+
+    /// A callsite first reached on a thread with no subscriber is still captured afterwards.
+    /// tracing caches each callsite's interest when it is first reached. With one live dispatcher
+    /// it asks only the reaching thread's default, so a parallel test could cache `never` for the
+    /// fallback WARN and silence it for the test capturing it.
+    #[test]
+    fn a_callsite_first_reached_without_a_subscriber_is_still_captured() {
+        let logs = CapturedLogs::default();
+        let _guard = logs.capture();
+        std::thread::spawn(warn_from_the_probe_callsite)
+            .join()
+            .unwrap();
+        assert_eq!(logs.take(), "", "the other thread has no subscriber");
+        warn_from_the_probe_callsite();
+        let lines = logs.take();
+        assert!(lines.contains("probe callsite reached"), "{lines:?}");
+    }
+
+    /// #110: falling back names the primary's error at WARN; recovery is one INFO line.
+    #[tokio::test(flavor = "current_thread")]
+    async fn falling_back_warns_with_the_reason_and_recovery_is_logged_once() {
+        let failing = Arc::new(AtomicBool::new(true));
+        let chain: Vec<Box<dyn RtSource>> = vec![
+            Box::new(Switchable {
+                failing: failing.clone(),
+            }),
+            Box::new(MockSource {
+                name: "transitdocs-asm",
+                behavior: Behavior::Ok(batch_with(2)),
+            }),
+        ];
+        let primary = PrimaryHealth::default();
+        let logs = CapturedLogs::default();
+        let _guard = logs.capture();
+        let gtfs = Gtfs::default();
+
+        for _ in 0..2 {
+            let selected = select_batch_tracking(&chain, &gtfs, &primary)
+                .await
+                .unwrap();
+            assert_eq!(selected.source_name, "transitdocs-asm");
+            let lines = logs.take();
+            assert!(lines.contains("WARN"), "{lines}");
+            assert!(
+                lines.contains("primary realtime source failed; falling back"),
+                "{lines}"
+            );
+            assert!(lines.contains("source=\"amtrak\""), "{lines}");
+            assert!(lines.contains("fallback=\"transitdocs-asm\""), "{lines}");
+            assert!(lines.contains("error=operation timed out"), "{lines}");
+            assert!(!lines.contains("https://"), "{lines}");
+            assert!(!lines.contains("recovered"), "{lines}");
+        }
+
+        failing.store(false, Ordering::SeqCst);
+        let selected = select_batch_tracking(&chain, &gtfs, &primary)
+            .await
+            .unwrap();
+        assert_eq!(selected.source_name, "amtrak");
+        let lines = logs.take();
+        assert_eq!(
+            lines.matches("primary realtime source recovered").count(),
+            1
+        );
+        assert!(lines.contains(" INFO "), "{lines}");
+        assert!(!lines.contains("WARN"), "{lines}");
+
+        for _ in 0..3 {
+            select_batch_tracking(&chain, &gtfs, &primary)
+                .await
+                .unwrap();
+        }
+        assert_eq!(logs.take(), "", "a healthy primary logs nothing per cycle");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn an_empty_primary_and_an_exhausted_chain_are_warned() {
+        let chain = sources(vec![
+            ("amtrak", Behavior::Empty),
+            ("transitdocs-asm", Behavior::Fail),
+        ]);
+        let logs = CapturedLogs::default();
+        let _guard = logs.capture();
+        assert!(select_batch(&chain, &Gtfs::default()).await.is_err());
+        let lines = logs.take();
+        assert!(
+            lines.contains("primary realtime source failed; falling back")
+                && lines.contains("error=returned no entities"),
+            "{lines}"
+        );
+        assert!(
+            lines.contains("realtime source failed; no source left to try")
+                && lines.contains("error=mock failure"),
+            "{lines}"
+        );
+    }
+
     #[test]
     fn builder_partitions_mixed_payloads_and_validator_round_trips() {
         let generated_at = UNIX_EPOCH + std::time::Duration::from_secs(1234);
@@ -1474,6 +1710,38 @@ mod tests {
         assert!(candidate.trip_updates.entity.is_empty());
         assert!(candidate.vehicle_positions.entity.is_empty());
         assert!(candidate.alerts.entity.is_empty());
+    }
+
+    /// #107: an alert with only a description (Amtrak's train status) is published with a header.
+    #[test]
+    fn builder_gives_a_description_only_alert_a_header() {
+        let mut batch = mixed_batch();
+        let alert = batch.trip_updates.entity[0].alert.as_mut().unwrap();
+        alert.header_text = None;
+        alert.description_text = Some(TranslatedString {
+            translation: vec![translated_string::Translation {
+                text: "Delay Notification: As of 11:40 PM ET Train 98 is stopped.".into(),
+                language: Some("en".into()),
+            }],
+        });
+        let candidate = GenerationBuilder::build(
+            static_snapshot(),
+            SelectedBatch {
+                source_name: "fixture",
+                batch,
+            },
+            UNIX_EPOCH,
+        )
+        .unwrap();
+        let alert = candidate.alerts.entity[0].alert.as_ref().unwrap();
+        let header = &alert.header_text.as_ref().unwrap().translation[0];
+        assert_eq!(header.text, "Delay Notification");
+        assert_eq!(header.language.as_deref(), Some("en"));
+        assert_eq!(
+            alert.effect(),
+            gtfs_realtime::alert::Effect::SignificantDelays
+        );
+        CandidateValidator::validate(candidate).unwrap();
     }
 
     #[test]
@@ -1744,6 +2012,237 @@ mod tests {
         ));
     }
 
+    /// #101: whatever reaches the builder, every published trip and stop says what it is. Unset
+    /// values become `SCHEDULED`; `SKIPPED`, `NO_DATA` and a `CANCELED` trip are kept; a route-only
+    /// alert selector gets no trip.
+    #[test]
+    fn builder_makes_every_schedule_relationship_explicit() {
+        use gtfs_realtime::trip_descriptor::ScheduleRelationship as Trip;
+        use gtfs_realtime::trip_update::stop_time_update::{
+            ScheduleRelationship as Stop, StopTimeProperties,
+        };
+
+        let mut batch = mixed_batch();
+        let alert = batch.trip_updates.entity[0].alert.as_mut().unwrap();
+        alert.informed_entity.push(EntitySelector {
+            route_id: Some("route".into()),
+            trip: Some(descriptor()),
+            ..Default::default()
+        });
+        let only_stop = |stop: trip_update::StopTimeUpdate| FeedEntity {
+            trip_update: Some(TripUpdate {
+                trip: descriptor(),
+                stop_time_update: vec![stop],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        batch.trip_updates.entity.push(FeedEntity {
+            id: "skipped".into(),
+            ..only_stop(trip_update::StopTimeUpdate {
+                stop_sequence: Some(1),
+                schedule_relationship: Some(Stop::Skipped as i32),
+                ..Default::default()
+            })
+        });
+        batch.trip_updates.entity.push(FeedEntity {
+            id: "no-data".into(),
+            ..only_stop(trip_update::StopTimeUpdate {
+                stop_sequence: Some(1),
+                schedule_relationship: Some(Stop::NoData as i32),
+                stop_time_properties: Some(StopTimeProperties {
+                    assigned_stop_id: Some("platform".into()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            })
+        });
+        batch.trip_updates.entity.push(FeedEntity {
+            id: "canceled".into(),
+            trip_update: Some(TripUpdate {
+                trip: TripDescriptor {
+                    schedule_relationship: Some(Trip::Canceled as i32),
+                    ..descriptor()
+                },
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+
+        let candidate = GenerationBuilder::build(
+            static_snapshot(),
+            SelectedBatch {
+                source_name: "fixture",
+                batch,
+            },
+            UNIX_EPOCH,
+        )
+        .unwrap();
+        let validated = CandidateValidator::validate(candidate).unwrap();
+        let decode = |bytes: &[u8]| FeedMessage::decode(bytes).unwrap();
+
+        let trip_updates = decode(&validated.trip_updates);
+        let relationships: Vec<_> = trip_updates
+            .entity
+            .iter()
+            .map(|entity| {
+                let update = entity.trip_update.as_ref().unwrap();
+                (
+                    entity.id.as_str(),
+                    update.trip.schedule_relationship,
+                    update
+                        .stop_time_update
+                        .iter()
+                        .map(|stop| stop.schedule_relationship)
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .collect();
+        let scheduled = Some(Trip::Scheduled as i32);
+        assert_eq!(
+            relationships,
+            vec![
+                ("mixed", scheduled, vec![Some(Stop::Scheduled as i32)]),
+                ("skipped", scheduled, vec![Some(Stop::Skipped as i32)]),
+                ("no-data", scheduled, vec![Some(Stop::NoData as i32)]),
+                ("canceled", Some(Trip::Canceled as i32), vec![]),
+            ]
+        );
+
+        let positions = decode(&validated.vehicle_positions);
+        let trip = positions.entity[0].vehicle.as_ref().unwrap().trip.as_ref();
+        assert_eq!(trip.unwrap().schedule_relationship, scheduled);
+
+        let alerts = decode(&validated.alerts);
+        let selectors = &alerts.entity[0].alert.as_ref().unwrap().informed_entity;
+        assert_eq!(selectors.len(), 2);
+        assert_eq!(
+            selectors[0].trip, None,
+            "a route-only selector gets no trip"
+        );
+        assert_eq!(
+            selectors[1].trip.as_ref().unwrap().schedule_relationship,
+            scheduled
+        );
+    }
+
+    /// #101: semantic validation reads an unset stop relationship as `SCHEDULED`, so writing
+    /// `SCHEDULED` out changes no verdict, on the stop or on whether an update may be empty.
+    #[test]
+    fn explicit_scheduled_gives_the_same_verdicts_as_unset() {
+        use gtfs_realtime::trip_descriptor::ScheduleRelationship as Trip;
+        use gtfs_realtime::trip_update::stop_time_update::{
+            ScheduleRelationship as Stop, StopTimeProperties,
+        };
+
+        let snapshot = static_snapshot();
+        let event = Some(gtfs_realtime::trip_update::StopTimeEvent {
+            delay: Some(60),
+            ..Default::default()
+        });
+        let empty_event = Some(gtfs_realtime::trip_update::StopTimeEvent::default());
+        let assigned = |id: &str| {
+            Some(StopTimeProperties {
+                assigned_stop_id: Some(id.into()),
+                ..Default::default()
+            })
+        };
+        let base = trip_update::StopTimeUpdate::default;
+        let stops = [
+            trip_update::StopTimeUpdate {
+                stop_id: Some("stop".into()),
+                arrival: event,
+                ..base()
+            },
+            trip_update::StopTimeUpdate {
+                stop_sequence: Some(1),
+                departure: event,
+                ..base()
+            },
+            trip_update::StopTimeUpdate {
+                stop_sequence: Some(2),
+                stop_id: Some("stop".into()),
+                arrival: event,
+                ..base()
+            },
+            trip_update::StopTimeUpdate {
+                stop_sequence: Some(1),
+                ..base()
+            },
+            trip_update::StopTimeUpdate {
+                stop_sequence: Some(1),
+                arrival: empty_event,
+                ..base()
+            },
+            trip_update::StopTimeUpdate {
+                stop_sequence: Some(1),
+                arrival: event,
+                stop_time_properties: assigned("platform"),
+                ..base()
+            },
+            trip_update::StopTimeUpdate {
+                stop_sequence: Some(1),
+                stop_time_properties: assigned("platform"),
+                ..base()
+            },
+            trip_update::StopTimeUpdate {
+                stop_sequence: Some(1),
+                arrival: event,
+                stop_time_properties: assigned("elsewhere"),
+                ..base()
+            },
+        ];
+        // The explicit form is what the builder writes: each update goes through the real fill,
+        // which gives an unset stop SCHEDULED, or UNSCHEDULED under an UNSCHEDULED trip.
+        let trips = [
+            (None, Stop::Scheduled),
+            (Some(Trip::Unscheduled as i32), Stop::Unscheduled),
+        ];
+        let mut verdicts = HashSet::new();
+        for (trip_relationship, filled_stop) in trips {
+            let unset_descriptor = TripDescriptor {
+                schedule_relationship: trip_relationship,
+                ..descriptor()
+            };
+            let unset_update = TripUpdate {
+                trip: unset_descriptor.clone(),
+                stop_time_update: stops.to_vec(),
+                ..Default::default()
+            };
+            let mut message = FeedMessage {
+                entity: vec![FeedEntity {
+                    id: "update".into(),
+                    trip_update: Some(unset_update.clone()),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            };
+            crate::schedule_relationship::make_explicit(&mut message);
+            let explicit_update = message.entity[0].trip_update.take().unwrap();
+            assert!(explicit_update.trip.schedule_relationship.is_some());
+            for (stop, explicit) in stops.iter().zip(&explicit_update.stop_time_update) {
+                assert_eq!(explicit.schedule_relationship, Some(filled_stop as i32));
+                let unset_verdict =
+                    valid_stop_time_update(stop, &unset_descriptor, &snapshot.parsed);
+                assert_eq!(
+                    valid_stop_time_update(explicit, &explicit_update.trip, &snapshot.parsed),
+                    unset_verdict,
+                    "{stop:?}"
+                );
+                verdicts.insert(unset_verdict);
+            }
+            let empty = |update: &TripUpdate| TripUpdate {
+                stop_time_update: Vec::new(),
+                ..update.clone()
+            };
+            assert_eq!(
+                trip_update_allows_empty(&empty(&explicit_update)),
+                trip_update_allows_empty(&empty(&unset_update))
+            );
+        }
+        assert_eq!(verdicts.len(), 2, "the cases cover both verdicts");
+    }
+
     struct RejectCommitter;
 
     #[async_trait]
@@ -1868,6 +2367,7 @@ mod tests {
                 &snapshots,
                 &RejectCommitter,
                 &RejectProcessor(stage),
+                &PrimaryHealth::default(),
                 UNIX_EPOCH + Duration::from_secs(100),
             )
             .await;

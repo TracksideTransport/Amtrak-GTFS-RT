@@ -1,6 +1,6 @@
 use crate::config::GenerationRetention;
 use crate::orchestrator::{
-    ArtifactUrls, EntityCounts, FeedSetManifest, GenerationId, ValidatedGeneration,
+    ArtifactUrls, EntityCounts, FeedSetManifest, GenerationId, MatchRate, ValidatedGeneration,
 };
 use gtfs_realtime::FeedMessage;
 use prost::Message;
@@ -17,10 +17,15 @@ const GENERATIONS_DIR: &str = "generations";
 const BLOBS_DIR: &str = "blobs";
 const CURRENT_MARKER: &str = "current";
 const MANIFEST_FILE: &str = "manifest.txt";
+/// The generation's match rate, beside `manifest.txt` rather than in it: the manifest keeps its
+/// exact eight-line shape so that an older release can still recover the generation.
+const MATCH_RATE_FILE: &str = "match-rate.txt";
+const MATCH_RATE_HEADER: &str = "amtrak-match-rate-v1";
 const STATIC_FILE: &str = "static.zip";
 /// Spare blocks kept free so the next publish can create its directory.
 const PUBLISH_FREE_MARGIN: u64 = 1024 * 1024;
-static GENERATION_COUNTER: AtomicU64 = AtomicU64::new(0);
+/// Makes each `current` marker temp name unique within the process. Generation ids do not use it.
+static MARKER_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Strong ETags for one immutable generation's artifacts, each hashed at most once.
 ///
@@ -128,7 +133,9 @@ pub struct GenerationStore {
     output_dir: Arc<PathBuf>,
     current: Arc<RwLock<Option<Arc<PublishedGeneration>>>>,
     generations: Arc<RwLock<HashMap<GenerationId, Arc<PublishedGeneration>>>>,
-    publish_lock: Arc<Mutex<()>>,
+    /// Serializes publication and holds the sequence the next generation id starts from. It
+    /// starts at 0 in every process; the id's timestamp prefix keeps ids unique across restarts.
+    publish_lock: Arc<Mutex<u64>>,
     retention: GenerationRetention,
     static_intern: Arc<Mutex<HashMap<String, Arc<[u8]>>>>,
 }
@@ -221,7 +228,7 @@ impl GenerationStore {
             output_dir: Arc::new(canonical_output),
             current: Arc::new(RwLock::new(selected)),
             generations: Arc::new(RwLock::new(recovered)),
-            publish_lock: Arc::new(Mutex::new(())),
+            publish_lock: Arc::new(Mutex::new(0)),
             retention,
             static_intern,
         };
@@ -477,7 +484,7 @@ fn publish_inner(
         ));
     }
     let output_dir = store.output_dir.as_path();
-    let _publish_guard = store
+    let mut next_sequence = store
         .publish_lock
         .lock()
         .map_err(|_| PublishError("publisher lock poisoned".into()))?;
@@ -487,7 +494,11 @@ fn publish_inner(
         .enforce_retention(incoming)
         .and_then(|_| store.ensure_publish_space(incoming))
         .map_err(PublishError)?;
-    let id = next_generation_id(candidate.generated_at_unix, &generations_dir)?;
+    let (id, sequence) = next_generation_id(
+        candidate.generated_at_unix,
+        *next_sequence,
+        &generations_dir,
+    );
     let temporary_dir = generations_dir.join(format!(".{}.tmp", id.0));
     let final_dir = generations_dir.join(&id.0);
     fs::create_dir(&temporary_dir)?;
@@ -535,12 +546,21 @@ fn publish_inner(
         &candidate.vehicle_positions,
         &candidate.alerts,
     );
+    if let Some(rate) = manifest.match_rate {
+        write_synced(
+            &temporary_dir.join(MATCH_RATE_FILE),
+            &encode_match_rate(&id, &rate),
+        )?;
+    }
     write_synced(&temporary_dir.join(MANIFEST_FILE), &manifest_bytes)?;
     fail_at(failure, FailurePoint::ManifestArtifact)?;
     sync_directory(&temporary_dir)?;
     fail_at(failure, FailurePoint::TemporaryDirectory)?;
 
     fs::rename(&temporary_dir, &final_dir)?;
+    // The id is now taken on disk. An earlier failure leaves only a temp directory, which the
+    // next publish removes before it picks the same sequence again.
+    *next_sequence = sequence + 1;
     fail_at(failure, FailurePoint::GenerationRename)?;
     sync_directory(&generations_dir)?;
     fail_at(failure, FailurePoint::GenerationsDirectory)?;
@@ -553,10 +573,8 @@ fn publish_inner(
     sync_directory(output_dir)?;
     fail_at(failure, FailurePoint::MarkerDirectory)?;
 
+    // The match rate comes back from `match-rate.txt`, exactly as a restart will read it.
     let mut loaded = load_generation(&final_dir, &id.0).map_err(PublishError)?;
-    // The on-disk manifest does not carry the match rate (so a rollback can still read it), but
-    // this process just measured it, so the live generation keeps it.
-    loaded.manifest.match_rate = manifest.match_rate;
     if loaded.static_zip.as_ref() == candidate.static_snapshot.zip.as_ref() {
         loaded.static_zip = candidate.static_snapshot.zip.clone();
     }
@@ -887,6 +905,7 @@ fn scan_retention(output_dir: &Path) -> Result<(u64, Vec<RetentionCandidate>), S
                 "vehicle-positions.pb",
                 "alerts.pb",
                 MANIFEST_FILE,
+                MATCH_RATE_FILE,
             ] {
                 let path = directory.join(artifact);
                 if artifact == STATIC_FILE {
@@ -1045,19 +1064,25 @@ fn fail_at(actual: Option<FailurePoint>, expected: FailurePoint) -> Result<(), P
     }
 }
 
+/// The first free `<unix-nanoseconds>-<sequence>` id at or after `first`, and its sequence.
+///
+/// The sequence advances by one per published generation. A directory already on disk with the
+/// same id (a restart within the same second) is skipped, so ids never repeat.
 fn next_generation_id(
     generated_at_unix: u64,
+    first: u64,
     generations_dir: &Path,
-) -> Result<GenerationId, PublishError> {
+) -> (GenerationId, u64) {
     let nanoseconds = u128::from(generated_at_unix) * 1_000_000_000;
+    let mut sequence = first;
     loop {
-        let counter = GENERATION_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let id = GenerationId(format!("{nanoseconds}-{counter}"));
+        let id = GenerationId(format!("{nanoseconds}-{sequence}"));
         if !generations_dir.join(&id.0).exists()
             && !generations_dir.join(format!(".{}.tmp", id.0)).exists()
         {
-            return Ok(id);
+            return (id, sequence);
         }
+        sequence += 1;
     }
 }
 
@@ -1129,7 +1154,7 @@ fn marker_temporary(output_dir: &Path, id: &GenerationId) -> PathBuf {
         ".{CURRENT_MARKER}.{}.{}.{}.tmp",
         id.0,
         std::process::id(),
-        GENERATION_COUNTER.fetch_add(1, Ordering::Relaxed)
+        MARKER_TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
     ))
 }
 
@@ -1391,6 +1416,42 @@ fn encode_manifest(
     .into_bytes()
 }
 
+/// `match-rate.txt`: a header line, the generation id, then `emitted,matched` per product.
+fn encode_match_rate(id: &GenerationId, rate: &MatchRate) -> Vec<u8> {
+    format!(
+        "{MATCH_RATE_HEADER}\nid={}\ntrip_updates={},{}\nvehicle_positions={},{}\n",
+        id.0,
+        rate.trip_updates_emitted,
+        rate.trip_updates_matched,
+        rate.vehicle_positions_emitted,
+        rate.vehicle_positions_matched,
+    )
+    .into_bytes()
+}
+
+/// Reads `match-rate.txt`. `None` when it is malformed, names another generation, or claims more
+/// matched than emitted; the generation still loads, without a match rate.
+fn decode_match_rate(bytes: &[u8], id: &GenerationId) -> Option<MatchRate> {
+    let text = std::str::from_utf8(bytes).ok()?;
+    let lines: Vec<_> = text.lines().collect();
+    if lines.len() != 4 || lines[0] != MATCH_RATE_HEADER {
+        return None;
+    }
+    if manifest_field(lines[1], "id=").ok()? != id.0 {
+        return None;
+    }
+    let [trip_emitted, trip_matched] =
+        parse_numbers::<usize, 2>(manifest_field(lines[2], "trip_updates=").ok()?).ok()?;
+    let [vehicle_emitted, vehicle_matched] =
+        parse_numbers::<usize, 2>(manifest_field(lines[3], "vehicle_positions=").ok()?).ok()?;
+    (trip_matched <= trip_emitted && vehicle_matched <= vehicle_emitted).then_some(MatchRate {
+        trip_updates_emitted: trip_emitted,
+        trip_updates_matched: trip_matched,
+        vehicle_positions_emitted: vehicle_emitted,
+        vehicle_positions_matched: vehicle_matched,
+    })
+}
+
 fn load_generation(directory: &Path, expected_id: &str) -> Result<PublishedGeneration, String> {
     require_real_directory(directory)?;
     let directory_handle = open_real_directory(directory)?;
@@ -1511,6 +1572,10 @@ fn load_generation_from_handle(
         vehicle_positions: counts[1],
         alerts: counts[2],
     };
+    // Optional: a generation written before the match rate was persisted has no file.
+    let match_rate = read_regular_at(directory_handle, directory, MATCH_RATE_FILE)
+        .ok()
+        .and_then(|bytes| decode_match_rate(&bytes, &id));
     let manifest = FeedSetManifest {
         generation_id: id.clone(),
         generated_at_unix,
@@ -1518,7 +1583,7 @@ fn load_generation_from_handle(
         platform_addon_version,
         source,
         entity_counts,
-        match_rate: None,
+        match_rate,
         urls: artifact_urls(&id),
     };
     Ok(PublishedGeneration {
@@ -1628,6 +1693,144 @@ mod tests {
         let reopened = GenerationStore::open(&dir).await.unwrap();
         assert_eq!(reopened.current().await.unwrap().id, second.id);
         assert!(reopened.get(&first.id).await.is_some());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// #116: a generation recovered after a restart reports the match rate it was published with.
+    #[tokio::test]
+    async fn the_match_rate_survives_a_restart() {
+        let dir = test_dir("match-rate");
+        let store = GenerationStore::open(&dir).await.unwrap();
+        let rate = MatchRate {
+            trip_updates_emitted: 40,
+            trip_updates_matched: 37,
+            vehicle_positions_emitted: 41,
+            vehicle_positions_matched: 38,
+        };
+        let mut built = candidate(300, 1);
+        built.match_rate = rate;
+        let published = GenerationPublisher::publish(&dir, &store, built)
+            .await
+            .unwrap();
+        assert_eq!(published.manifest.match_rate, Some(rate));
+
+        let reopened = GenerationStore::open(&dir).await.unwrap();
+        let recovered = reopened.current().await.unwrap();
+        assert_eq!(recovered.id, published.id);
+        assert_eq!(recovered.manifest, published.manifest);
+
+        // The manifest keeps the eight-line shape an older release reads.
+        let manifest = fs::read_to_string(
+            dir.join(GENERATIONS_DIR)
+                .join(&published.id.0)
+                .join(MANIFEST_FILE),
+        )
+        .unwrap();
+        assert_eq!(manifest.lines().count(), 8);
+        assert!(manifest.starts_with("amtrak-generation-v2\n"));
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// #116: a generation written before `match-rate.txt` existed, or with a damaged one, still
+    /// loads; it just has no match rate.
+    #[tokio::test]
+    async fn a_generation_without_a_readable_match_rate_still_loads() {
+        let dir = test_dir("match-rate-legacy");
+        let store = GenerationStore::open(&dir).await.unwrap();
+        let published = GenerationPublisher::publish(&dir, &store, candidate(400, 1))
+            .await
+            .unwrap();
+        let file = dir
+            .join(GENERATIONS_DIR)
+            .join(&published.id.0)
+            .join(MATCH_RATE_FILE);
+        assert!(file.is_file());
+
+        for damaged in [
+            None,
+            Some("not a match rate\n".to_string()),
+            Some(format!(
+                "{MATCH_RATE_HEADER}\nid=1-1\ntrip_updates=1,1\nvehicle_positions=1,1\n"
+            )),
+            Some(format!(
+                "{MATCH_RATE_HEADER}\nid={}\ntrip_updates=1,2\nvehicle_positions=1,1\n",
+                published.id.0
+            )),
+        ] {
+            let _ = fs::remove_file(&file);
+            if let Some(text) = &damaged {
+                fs::write(&file, text).unwrap();
+            }
+            let reopened = GenerationStore::open(&dir).await.unwrap();
+            let recovered = reopened.current().await.unwrap();
+            assert_eq!(recovered.id, published.id, "{damaged:?}");
+            assert_eq!(recovered.manifest.match_rate, None, "{damaged:?}");
+            assert_eq!(
+                recovered.manifest.entity_counts, published.manifest.entity_counts,
+                "{damaged:?}"
+            );
+        }
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn match_rate_file_round_trips() {
+        let id = GenerationId("1794986876000000000-60".into());
+        let rate = MatchRate {
+            trip_updates_emitted: 7,
+            trip_updates_matched: 5,
+            vehicle_positions_emitted: 0,
+            vehicle_positions_matched: 0,
+        };
+        assert_eq!(
+            decode_match_rate(&encode_match_rate(&id, &rate), &id),
+            Some(rate)
+        );
+    }
+
+    fn sequence_of(id: &GenerationId) -> u64 {
+        id.0.split_once('-').unwrap().1.parse().unwrap()
+    }
+
+    /// #117: each published generation advances the sequence by exactly one, a failed attempt
+    /// does not use a number up, and ids stay unique when a restart lands in the same second.
+    #[tokio::test]
+    async fn the_generation_sequence_advances_by_one_per_publication() {
+        let dir = test_dir("sequence");
+        let store = GenerationStore::open(&dir).await.unwrap();
+        let mut sequences = Vec::new();
+        for (index, generated_at) in [500, 530, 560].into_iter().enumerate() {
+            let published =
+                GenerationPublisher::publish(&dir, &store, candidate(generated_at, index as u8))
+                    .await
+                    .unwrap();
+            sequences.push(sequence_of(&published.id));
+        }
+        assert_eq!(sequences, [0, 1, 2]);
+
+        assert!(publish_inner(
+            &dir,
+            &store,
+            candidate(590, 3),
+            Some(FailurePoint::ManifestArtifact)
+        )
+        .is_err());
+        let after_failure = GenerationPublisher::publish(&dir, &store, candidate(590, 4))
+            .await
+            .unwrap();
+        assert_eq!(sequence_of(&after_failure.id), 3);
+
+        // A restart starts the sequence at 0 again; the timestamp prefix keeps ids unique, and a
+        // directory already on disk for the same second is skipped.
+        let restarted = GenerationStore::open(&dir).await.unwrap();
+        let first = GenerationPublisher::publish(&dir, &restarted, candidate(500, 5))
+            .await
+            .unwrap();
+        assert_eq!(first.id.0, "500000000000-1");
+        let next = GenerationPublisher::publish(&dir, &restarted, candidate(620, 6))
+            .await
+            .unwrap();
+        assert_eq!(next.id.0, "620000000000-2");
         fs::remove_dir_all(dir).unwrap();
     }
 

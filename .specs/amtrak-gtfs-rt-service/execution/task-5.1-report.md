@@ -6,7 +6,7 @@ task_id: "5.1"
 capability_tier: frontier
 resolved_model: controller
 reasoning_level: extra_high
-changed_files: ["scripts/validate-feeds.sh", "validation/baseline.json", "validation-reports/release-evidence.json", "validation-reports/release-decision.json", ".security/dependency-audit/release.json", ".security/dependency-audit/release.md"]
+changed_files: ["scripts/validate-feeds.sh", "validation/baseline.json", ".security/release-gate/2026-08-14/release-evidence.json", ".security/release-gate/2026-08-14/release-decision.json", ".security/dependency-audit/release.json", ".security/dependency-audit/release.md"]
 criteria:
   - id: "R1.2-R1.5,R8.1-R8.10"
     result: pass
@@ -25,6 +25,6 @@ findings:
   - "The release gate surfaced only approved realtime E029 in this live sample and zero static errors; stale exception codes remain visible for later evidence across varying operating conditions."
   - "The validator gate now checks the official 8.0.1 SHA-256 for downloaded and cached bytes before startup use and immediately before independent validation."
   - "Both independent reviewers agree that rollout must remain blocked; their content-pin and explicit-decision findings were repaired."
-decision_record: "validation-reports/release-decision.json"
+decision_record: ".security/release-gate/2026-08-14/release-decision.json"
 context_requests: []
 ```

@@ -23,13 +23,59 @@ import asyncio
 import itertools
 import logging
 import os
+import re
 import signal
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from urllib.parse import urlsplit
 
 logger = logging.getLogger(__name__)
 
 LAUNCH_ARGS = ["--disable-dev-shm-usage", "--disable-gpu"]
+
+# Longest error message :func:`describe_error` keeps.
+MAX_ERROR_CHARS = 300
+_URL = re.compile(r"\b[A-Za-z][A-Za-z0-9+.-]*://\S+")
+
+
+def describe_error(error: BaseException) -> str:
+    """One log-safe line naming ``error``: ``Type: first line of its message``, or ``Type``.
+
+    Playwright's errors are all class ``Error`` and their messages run on into a multi-line call
+    log, so only the first non-empty line is kept, with its whitespace collapsed and its length
+    capped at :data:`MAX_ERROR_CHARS`. Any URL in it keeps only its scheme, host, port, and path:
+    credentials, query strings, and fragments are dropped.
+    """
+    name = type(error).__name__
+    first = next((line for line in str(error).splitlines() if line.strip()), "")
+    message = _URL.sub(_url_without_secrets, " ".join(first.split()))
+    if not message:
+        return name
+    if len(message) > MAX_ERROR_CHARS:
+        message = message[: MAX_ERROR_CHARS - 1] + "…"
+    return f"{name}: {message}"
+
+
+def is_browser_error(error: BaseException) -> bool:
+    """Whether ``error`` is one of Playwright's own errors rather than a fault in this code.
+
+    Playwright's message can run on into a call log and the browser's recent output, which may
+    name a page URL with its query string, so such an error is logged through
+    :func:`describe_error`, not as a traceback. Checked by package, so Playwright is not imported.
+    """
+    return any(cls.__module__.split(".", 1)[0] == "playwright" for cls in type(error).__mro__)
+
+
+def _url_without_secrets(match: re.Match[str]) -> str:
+    try:
+        parts = urlsplit(match.group(0))
+        host = parts.hostname or ""
+        port = f":{parts.port}" if parts.port else ""
+    except ValueError:
+        return "<url>"
+    if ":" in host:
+        host = f"[{host}]"
+    return f"{parts.scheme}://{host}{port}{parts.path}"
 
 # A navigation stuck in the driver does not return when a poll task is cancelled. These markers
 # match Playwright's Node driver and the Chromium builds it launches, and nothing else in the image.
@@ -138,6 +184,21 @@ class SharedBrowser:
             self._leases.discard(lease.token)
             if not self._leases:
                 await self._shutdown()
+
+    async def discard(self, lease: Lease) -> bool:
+        """Return a lease whose context would not close, closing the browser it borrowed.
+
+        A context that does not close keeps its pages, and their renderer memory, for as long as
+        the browser runs, and another holder can keep the browser running for hours. Closing the
+        browser is the only way to free them; the other holders' leases go stale. A stale
+        ``lease`` (its browser already closed or relaunched) does nothing. Returns whether the
+        browser was closed.
+        """
+        async with self._lock:
+            if lease.generation != self._generation or lease.token not in self._leases:
+                return False
+            await self._shutdown()
+            return True
 
     async def close(self) -> None:
         """Close the browser now, whatever is borrowed. Outstanding leases become stale."""

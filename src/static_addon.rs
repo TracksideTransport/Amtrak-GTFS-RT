@@ -191,7 +191,8 @@ mod tests {
         let (addon, version) = build_addon(&official, &combined);
         assert!(version.starts_with(&format!("{ADDON_SCHEMA}.")));
         let files = listed_files(&addon);
-        assert_eq!(files, ["stop_times.txt", "stops.txt"]);
+        // feed_info.txt carries the `+tracks.{digest}` version (#108).
+        assert_eq!(files, ["feed_info.txt", "stop_times.txt", "stops.txt"]);
         for name in &files {
             assert_eq!(
                 read_entry(&addon, name).unwrap(),
