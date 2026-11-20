@@ -10,6 +10,12 @@
 //! - `static.zip`: the augmented feed the service would publish
 //! - `trip-updates.pb`, `vehicle-positions.pb`, `alerts.pb`
 //!
+//! The train is shaped as the primary crate encodes it (one unified entity with the per-train-day
+//! id `{YYYYMMDD}-123` and no vehicle descriptor, copied into each product) and goes through the
+//! primary source's own conversion, so `vehicle.id` and `vehicle.label` come from the service's
+//! code, not from the fixture. The example checks that both products carry the same `vehicle.id`,
+//! and the script fails if the realtime validator reports W002 (`vehicle_id` not populated).
+//!
 //! The batch stamps `assigned_stop_id` the way the track source does (`stop_sequence` set, `stop_id`
 //! cleared), so platform and gate stops are exercised. The fixture has none of the live-data
 //! mismatches behind the entries in `validation/baseline.json`, so the validators must report zero
@@ -22,13 +28,13 @@
 use amtrak_gtfs_rt_service::orchestrator::{
     CandidateValidator, GenerationBuilder, SelectedBatch, StaticSnapshot,
 };
-use amtrak_gtfs_rt_service::sources::RtBatch;
+use amtrak_gtfs_rt_service::sources::amtrak::batch_from_results;
 use amtrak_gtfs_rt_service::static_augment::{augment_static, PlatformTable};
 use gtfs_realtime::trip_update::stop_time_update::StopTimeProperties;
 use gtfs_realtime::trip_update::{StopTimeEvent, StopTimeUpdate};
 use gtfs_realtime::{
     alert, translated_string, Alert, EntitySelector, FeedEntity, FeedMessage, Position, TimeRange,
-    TranslatedString, TripDescriptor, TripUpdate, VehicleDescriptor, VehiclePosition,
+    TranslatedString, TripDescriptor, TripUpdate, VehiclePosition,
 };
 use gtfs_structures::Gtfs;
 use std::io::{Cursor, Write};
@@ -105,7 +111,8 @@ fn text(value: &str) -> TranslatedString {
     }
 }
 
-/// The unified entity the primary source emits: one train, with its update and its position.
+/// The unified entity the primary crate emits: one train, with its update and its position, under
+/// its per-train-day id and with no vehicle descriptor.
 fn train(now: u64, start_date: &str) -> FeedEntity {
     let trip = TripDescriptor {
         trip_id: Some("fixture-123".into()),
@@ -116,14 +123,9 @@ fn train(now: u64, start_date: &str) -> FeedEntity {
     // Track 7 boards through gate A, so it is its own platform stop.
     let platform = PLATFORM;
     FeedEntity {
-        id: "fixture-123".into(),
+        id: format!("{start_date}-123"),
         trip_update: Some(TripUpdate {
             trip: trip.clone(),
-            vehicle: Some(VehicleDescriptor {
-                id: Some("123".into()),
-                label: Some("Northeast Regional 123".into()),
-                ..Default::default()
-            }),
             timestamp: Some(now),
             stop_time_update: vec![
                 // The stamped stop: stop_sequence set, stop_id cleared, platform assigned.
@@ -157,11 +159,6 @@ fn train(now: u64, start_date: &str) -> FeedEntity {
         }),
         vehicle: Some(VehiclePosition {
             trip: Some(trip),
-            vehicle: Some(VehicleDescriptor {
-                id: Some("123".into()),
-                label: Some("Northeast Regional 123".into()),
-                ..Default::default()
-            }),
             position: Some(Position {
                 latitude: 40.75,
                 longitude: -73.99,
@@ -256,16 +253,18 @@ fn main() {
     trip_updates.entity.push(entity.clone());
     vehicle_positions.entity.push(entity);
     alerts.entity.push(advisory(now));
+    // The primary source's conversion sets each train's vehicle descriptor.
+    let batch = batch_from_results(amtrak_gtfs_rt::GtfsAmtrakResults {
+        trip_updates,
+        vehicle_positions,
+        alerts,
+    });
 
     let candidate = GenerationBuilder::build(
         snapshot,
         SelectedBatch {
             source_name: "fixture",
-            batch: RtBatch {
-                trip_updates,
-                vehicle_positions,
-                alerts,
-            },
+            batch,
         },
         UNIX_EPOCH + std::time::Duration::from_secs(now),
     )
@@ -282,6 +281,33 @@ fn main() {
         "vehicle was dropped"
     );
     assert_eq!(candidate.alerts.entity.len(), 1, "alert was dropped");
+    // #100: the train's trip update and its position carry the same vehicle id, its per-train-day
+    // id, and the train number as the label.
+    let train_day = format!("{start_date}-123");
+    let update_vehicle = candidate.trip_updates.entity[0]
+        .trip_update
+        .as_ref()
+        .and_then(|update| update.vehicle.as_ref());
+    let position_vehicle = candidate.vehicle_positions.entity[0]
+        .vehicle
+        .as_ref()
+        .and_then(|position| position.vehicle.as_ref());
+    for (product, vehicle) in [
+        ("trip update", update_vehicle),
+        ("vehicle position", position_vehicle),
+    ] {
+        let vehicle = vehicle.unwrap_or_else(|| panic!("the {product} has no vehicle descriptor"));
+        assert_eq!(
+            vehicle.id.as_deref(),
+            Some(train_day.as_str()),
+            "{product} vehicle.id"
+        );
+        assert_eq!(
+            vehicle.label.as_deref(),
+            Some("123"),
+            "{product} vehicle.label"
+        );
+    }
     // Neither validator checks this: every stamped platform is a stop in the augmented feed, under
     // the same parent station as the stop it replaces.
     for entity in &candidate.trip_updates.entity {

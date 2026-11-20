@@ -461,6 +461,24 @@ where
     }
 }
 
+/// The fallback `source`, with the same notices handle as the primary and, when
+/// `AMTRAK_FILTER_CAPITAL_CORRIDOR` is on, the same Capitol Corridor filter. It is never
+/// track-stamped.
+fn fallback_source<S>(
+    source: S,
+    notices: Option<Notices>,
+    filter_capital_corridor: bool,
+) -> Box<dyn RtSource>
+where
+    S: RtSource + 'static,
+{
+    if filter_capital_corridor {
+        realtime_source(CapitalCorridorFiltered(source), notices, None)
+    } else {
+        realtime_source(source, notices, None)
+    }
+}
+
 fn healthcheck_address(bind_address: &str) -> std::io::Result<SocketAddr> {
     let configured: SocketAddr = bind_address.parse().map_err(|error| {
         std::io::Error::new(
@@ -611,7 +629,8 @@ pub async fn run_combined() -> Result<(), FatalError> {
     };
     // The fallback runs only when the source above errors or returns an empty batch. Its trips
     // are not track-stamped, it carries the same cached notices (but no train-status alerts, which
-    // come from the Amtrak source), and the manifest names it as the source.
+    // come from the Amtrak source), it drops Capitol Corridor trains when the primary does, and the
+    // manifest names it as the source.
     let mut chain = vec![source];
     let fallback = crate::config::FallbackConfig::from_env().at_stage(CONFIGURATION)?;
     if let Some(url) = fallback.asm_url {
@@ -619,11 +638,11 @@ pub async fn run_combined() -> Result<(), FatalError> {
             source = sources::asm::SOURCE_NAME,
             "fallback position source on (used only when the Amtrak source fails or is empty)"
         );
-        let asm = sources::asm::AsmSource::new(url);
-        chain.push(match notices {
-            Some(notices) => Box::new(WithAdvisories::sharing(asm, notices)),
-            None => Box::new(asm),
-        });
+        chain.push(fallback_source(
+            sources::asm::AsmSource::new(url),
+            notices,
+            config.filter_capital_corridor,
+        ));
     }
     let sources: Arc<Vec<Box<dyn RtSource>>> = Arc::new(chain);
     let base_url = endpoints::base_url(config.bind_addr, config.public_url.as_deref());
@@ -1256,6 +1275,78 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(fetched.trip_updates, batch.trip_updates);
+    }
+
+    /// One train on Capitol Corridor (route 84) and one on route `r`, each with a trip update
+    /// and a position.
+    fn corridor_batch() -> RtBatch {
+        use gtfs_realtime::{FeedEntity, TripDescriptor, TripUpdate, VehiclePosition};
+        let entity = |id: &str, route: &str| {
+            let trip = TripDescriptor {
+                route_id: Some(route.into()),
+                ..Default::default()
+            };
+            FeedEntity {
+                id: id.into(),
+                trip_update: Some(TripUpdate {
+                    trip: trip.clone(),
+                    ..Default::default()
+                }),
+                vehicle: Some(VehiclePosition {
+                    trip: Some(trip),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }
+        };
+        let message = FeedMessage {
+            entity: vec![entity("20261119-523", "84"), entity("20261119-172", "r")],
+            ..Default::default()
+        };
+        RtBatch {
+            trip_updates: message.clone(),
+            vehicle_positions: message,
+            alerts: FeedMessage::default(),
+        }
+    }
+
+    fn entity_ids(message: &FeedMessage) -> Vec<&str> {
+        message
+            .entity
+            .iter()
+            .map(|entity| entity.id.as_str())
+            .collect()
+    }
+
+    /// With `AMTRAK_FILTER_CAPITAL_CORRIDOR` on, a generation built from the fallback drops
+    /// Capitol Corridor trains, as one built from the Amtrak source does.
+    #[tokio::test]
+    async fn the_capitol_corridor_filter_applies_to_the_fallback() {
+        let fallback = |filter| {
+            fallback_source(
+                MockSource {
+                    name: sources::asm::SOURCE_NAME,
+                    behavior: Behavior::Ok(corridor_batch()),
+                },
+                None,
+                filter,
+            )
+        };
+        let gtfs = gtfs_structures::Gtfs::default();
+
+        let filtered = fallback(true).fetch(&gtfs).await.unwrap();
+        assert_eq!(entity_ids(&filtered.trip_updates), vec!["20261119-172"]);
+        assert_eq!(
+            entity_ids(&filtered.vehicle_positions),
+            vec!["20261119-172"]
+        );
+
+        let unfiltered = fallback(false).fetch(&gtfs).await.unwrap();
+        assert_eq!(
+            entity_ids(&unfiltered.trip_updates),
+            vec!["20261119-523", "20261119-172"]
+        );
+        assert_eq!(fallback(true).name(), sources::asm::SOURCE_NAME);
     }
 
     #[test]

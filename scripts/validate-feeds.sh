@@ -21,8 +21,10 @@
 #
 # The --fixture pass needs no network for the feeds: `cargo run --example validation_fixture`
 # builds one generation from mocks and a small static GTFS with platform and gate stops, and both
-# validators must report zero ERROR notices (an empty baseline, through the same ratchet). It is
-# the pull-request check; the live pass stays daily because it depends on Amtrak being up.
+# validators must report zero ERROR notices (an empty baseline, through the same ratchet). Its
+# train carries a vehicle id, so the realtime validator must not report W002 (vehicle_id not
+# populated) on trip updates or vehicle positions either. It is the pull-request check; the live
+# pass stays daily because it depends on Amtrak being up.
 #
 # The --tracks pass validates the platform stops added to static.zip and any
 # stamped assigned_stop_id values. It deliberately runs without RailData
@@ -444,6 +446,17 @@ for feed in trip-updates vehicle-positions alerts; do
   codes=$(jq -r '.[] | select(.errorMessage.validationRule.severity=="ERROR") | .errorMessage.validationRule.errorId' "$results")
   rt_codes="$rt_codes$codes"$'\n'
 done
+
+# #100: the fixture's train goes through the primary source's conversion, which sets its vehicle
+# descriptor, so a W002 there means a trip update or vehicle position lost its vehicle id.
+if [ "$MODE" = "fixture" ]; then
+  for feed in trip-updates vehicle-positions; do
+    if jq -e 'any(.[]; .errorMessage.validationRule.errorId == "W002")' \
+      "$REPORT_DIR/rt/$feed/$feed.pb.results.json" >/dev/null; then
+      fail "fixture $feed: W002, vehicle_id not populated"
+    fi
+  done
+fi
 
 # ---------------------------------------------------------------------------
 # 5. Ratchet against the baseline

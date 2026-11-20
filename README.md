@@ -739,13 +739,17 @@ endpoint the catenary crate already reads for alerts. It makes **no request whil
 is healthy**, and at most one per cycle while it is not.
 
 Each Amtrak train in the map is matched to a static trip by its train number (`trip_short_name`)
-and the service calendar on the train's origin date, and a train with no active matching trip is
-left out, so every trip and stop id in the batch resolves against the static feed. Delays are the
+and the service calendar on the train's service date (its origin date, or the day after for a
+train that leaves the West in the evening after midnight Eastern), and a train with no active
+matching trip is left out, so every trip and stop id in the batch resolves against the static feed. Delays are the
 map's per-stop `variance` values (seconds); positions convert mph to metres per second. On the day
 this was written, 82 of 93 live Amtrak trains resolved to a static trip. While the fallback is
 the source, `/v1/feed-set.json` names it (`source: transitdocs-asm`), trips carry no track or gate
 stamps, and `alerts.pb` carries the station and passenger notices (from the same cache the Amtrak
-source uses) but no train-status alerts, which come only with the Amtrak source's batch.
+source uses) but no train-status alerts, which come only with the Amtrak source's batch. Each
+train keeps the identity the Amtrak source gives it: entity id and `vehicle.id` such as
+`20261119-172` (service date and train number), and `vehicle.label` the train number, on its trip
+update and its vehicle position.
 
 Each cycle that falls back logs a `WARN` line, `primary realtime source failed; falling back`,
 with the Amtrak source's error (a timeout, connection failure, HTTP status, or decode failure,
@@ -1221,6 +1225,20 @@ Controlled consumers must switch atomically to manifest-first discovery, accept
 unauthorized peer, unknown immutable generation or artifact, and no current or fresh generation
 respectively. Rollback uses the preceding service binary and retained generation directory; it
 never rewrites immutable artifacts.
+
+**Vehicle identity (#100, #122, unreleased).** Every trip update and vehicle position whose id
+holds a date and number now carries a `VehicleDescriptor`, from either source: `vehicle.id` is the
+train's per-train-day id, the same string as its entity id (`20261119-172`), and `vehicle.label`
+is the train number (`172`). Join a trip update to its vehicle position by `vehicle.id`. Generations built by the `transitdocs-asm`
+fallback change in three ways:
+
+- entity ids are `20261119-172`, as the Amtrak source's are, not `asm-172-20261119`;
+- `vehicle.id` is that per-train-day id, not the bare train number;
+- `vehicle.label` is the train number, not the route name (`Northeast Regional`).
+
+A consumer that keyed on `asm-` entity ids, or showed `vehicle.label` as a route name, must
+change: take the route from `trip.route_id` and the static `routes.txt`. A consumer that reads the
+train number from the static `trip_short_name` (Trackside does) is not affected.
 
 ## Changelog
 

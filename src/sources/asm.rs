@@ -5,25 +5,30 @@
 //! no request. The primary crate already reads this same endpoint for alerts; the fallback adds at
 //! most one request per cycle, and only while the primary is failing.
 //!
-//! The map lists each train with its number, origin (service) date, position, and per-stop
-//! scheduled and actual or estimated times. Each Amtrak train is matched to a static trip by
-//! `trip_short_name` (the train number) and the service calendar on its origin date, exactly as
-//! Amtrak's own GTFS names its trips. A train with no matching active trip is omitted, so every
-//! trip and stop id in the batch resolves against the static feed. Delays are the map's `variance`
-//! values, which are seconds. Positions are in mph, converted to metres per second.
+//! The map lists each train with its number, origin date (the local date of its departure from its
+//! first stop), position, and per-stop scheduled and actual or estimated times. Each Amtrak train
+//! is matched to a static trip by `trip_short_name` (the train number) and the service calendar on
+//! its service date: the origin date, or the day after for a train whose local evening departure
+//! the schedule writes after midnight Eastern (see `service_day`). A train with no matching active
+//! trip is omitted, so every trip and stop id in the batch resolves against the static feed.
+//! Delays are the map's `variance` values, which are seconds. Positions are in mph, converted to
+//! metres per second. A train is identified as the Amtrak source identifies it
+//! ([`crate::sources::identity`]): entity id and `vehicle.id` `{YYYYMMDD}-{number}` from its
+//! service date, `vehicle.label` the number, on the trip update and the vehicle position. The
+//! map's `name` is the route and is not published.
 //!
 //! This is a clean-room client written from the endpoint's public JSON, not a copy of any other
 //! project's code. Credit and terms-of-use notes are in the README ("Fallback position source").
 
-use crate::sources::{RtBatch, RtSource, SourceError};
+use crate::sources::{identity, RtBatch, RtSource, SourceError};
 use async_trait::async_trait;
-use chrono::NaiveDate;
+use chrono::{NaiveDate, TimeDelta, TimeZone};
+use chrono_tz::Tz;
 use gtfs_realtime::trip_update::{
     stop_time_update::ScheduleRelationship, StopTimeEvent, StopTimeUpdate,
 };
 use gtfs_realtime::{
-    FeedEntity, FeedMessage, Position, TripDescriptor, TripUpdate, VehicleDescriptor,
-    VehiclePosition,
+    FeedEntity, FeedMessage, Position, TripDescriptor, TripUpdate, VehiclePosition,
 };
 use gtfs_structures::{Exception, Gtfs, Trip};
 use serde_json::Value;
@@ -124,8 +129,10 @@ fn entity_for_train(train: &Value, gtfs: &Gtfs, now_unix: u64) -> Option<FeedEnt
     if now_unix.saturating_sub(updated) > MAX_AGE_SECS {
         return None;
     }
-    let trip = trip_for(gtfs, &number, date)?;
+    let (date, trip) = service_day(gtfs, &number, date)?;
     let start_date = date.format("%Y%m%d").to_string();
+    // The Amtrak source's identity (#122): the map's `name` is the route, not the train.
+    let identified = identity::descriptor(&start_date, &number);
     let descriptor = TripDescriptor {
         trip_id: Some(trip.id.clone()),
         route_id: Some(trip.route_id.clone()),
@@ -137,14 +144,7 @@ fn entity_for_train(train: &Value, gtfs: &Gtfs, now_unix: u64) -> Option<FeedEnt
         let longitude = location.get("longitude")?.as_f64()? as f32;
         Some(VehiclePosition {
             trip: Some(descriptor.clone()),
-            vehicle: Some(VehicleDescriptor {
-                id: Some(number.clone()),
-                label: train
-                    .get("name")
-                    .and_then(Value::as_str)
-                    .map(str::to_string),
-                ..Default::default()
-            }),
+            vehicle: Some(identified.clone()),
             position: Some(Position {
                 latitude,
                 longitude,
@@ -176,9 +176,10 @@ fn entity_for_train(train: &Value, gtfs: &Gtfs, now_unix: u64) -> Option<FeedEnt
         return None;
     }
     Some(FeedEntity {
-        id: format!("asm-{number}-{start_date}"),
+        id: identity::train_day_id(&start_date, &number),
         trip_update: Some(TripUpdate {
             trip: descriptor,
+            vehicle: Some(identified),
             stop_time_update: stop_updates,
             timestamp: Some(updated),
             ..Default::default()
@@ -222,6 +223,74 @@ fn event(reading: Option<&Value>) -> Option<StopTimeEvent> {
         delay: Some(delay),
         ..Default::default()
     })
+}
+
+/// The service date and static trip of train `number` that leaves its first stop on `origin_date`
+/// in that stop's local time, which is what ASM's `origin_date` means.
+///
+/// Amtrak's static times are Eastern and never pass 24:00, so a train that leaves the Central,
+/// Mountain or Pacific zone in the evening, after midnight Eastern, runs on the next service date:
+/// 595 leaves San Diego at 21:01 Pacific, which the schedule writes as 0:01 on the next day. The
+/// primary source dates such a train the same way, by its New York date. `origin_date` and the day
+/// after are tried in turn. When neither matches, the train is left out: its schedule has no
+/// service day that leaves on that date, and publishing it on one would name the wrong trip and a
+/// different id than the Amtrak source gives it.
+fn service_day<'a>(
+    gtfs: &'a Gtfs,
+    number: &str,
+    origin_date: NaiveDate,
+) -> Option<(NaiveDate, &'a Trip)> {
+    [Some(origin_date), origin_date.succ_opt()]
+        .into_iter()
+        .flatten()
+        .find_map(|date| {
+            let trip = trip_for(gtfs, number, date)?;
+            (origin_local_date(gtfs, trip, date)? == origin_date).then_some((date, trip))
+        })
+}
+
+/// The local date at `trip`'s first stop (its `stop_timezone`, else the agency's zone) when the
+/// trip runs on service date `date`. GTFS times count from noon minus 12 hours on the service
+/// date, in the agency's zone.
+fn origin_local_date(gtfs: &Gtfs, trip: &Trip, date: NaiveDate) -> Option<NaiveDate> {
+    let first = trip
+        .stop_times
+        .iter()
+        .min_by_key(|time| time.stop_sequence)?;
+    let seconds = first.departure_time.or(first.arrival_time)?;
+    let agency_zone: Tz = agency_timezone(gtfs, trip)?.parse().ok()?;
+    let noon = agency_zone
+        .from_local_datetime(&date.and_hms_opt(12, 0, 0)?)
+        .single()?;
+    let departure = noon - TimeDelta::hours(12) + TimeDelta::seconds(i64::from(seconds));
+    let stop_zone = match first
+        .stop
+        .timezone
+        .as_deref()
+        .filter(|zone| !zone.is_empty())
+    {
+        Some(zone) => zone.parse().ok()?,
+        None => agency_zone,
+    };
+    Some(departure.with_timezone(&stop_zone).date_naive())
+}
+
+/// The zone of the agency that runs `trip`'s route, or of the only agency when the route names
+/// none.
+fn agency_timezone<'a>(gtfs: &'a Gtfs, trip: &Trip) -> Option<&'a str> {
+    let agency_id = gtfs
+        .routes
+        .get(&trip.route_id)
+        .and_then(|route| route.agency_id.as_deref());
+    let agency = match agency_id {
+        Some(id) => gtfs
+            .agencies
+            .iter()
+            .find(|agency| agency.id.as_deref() == Some(id))?,
+        None if gtfs.agencies.len() == 1 => &gtfs.agencies[0],
+        None => return None,
+    };
+    Some(agency.timezone.as_str())
 }
 
 /// The static trip for `number` whose service runs on `date`. When several qualify, the lowest
@@ -307,7 +376,8 @@ mod tests {
         let batch = batch_from_map(&json!([train(785, json!({}))]), &gtfs(), NOW);
         assert_eq!(batch.trip_updates.entity.len(), 1);
         let entity = &batch.trip_updates.entity[0];
-        assert_eq!(entity.id, "asm-785-20261117");
+        // #122: the Amtrak source's id scheme, `{start_date}-{number}`.
+        assert_eq!(entity.id, "20261117-785");
         let update = entity.trip_update.as_ref().unwrap();
         assert_eq!(update.trip.trip_id.as_deref(), Some("t785"));
         assert_eq!(update.trip.route_id.as_deref(), Some("r"));
@@ -337,10 +407,133 @@ mod tests {
             (position.speed.unwrap() - 26.8224).abs() < 1e-3,
             "mph to m/s"
         );
-        assert_eq!(vehicle.vehicle.as_ref().unwrap().id.as_deref(), Some("785"));
         assert_eq!(vehicle.timestamp, Some(1_000_000));
         // Both products carry the same entity, as the primary source's unified feed does.
         assert_eq!(batch.vehicle_positions.entity.len(), 1);
+    }
+
+    /// #122: the trip update and the vehicle position carry the Amtrak source's identity, the
+    /// per-train-day id and the train number, never the route name the map calls `name`.
+    #[test]
+    fn both_products_carry_the_train_day_id_and_the_number_not_the_route_name() {
+        let batch = batch_from_map(&json!([train(785, json!({}))]), &gtfs(), NOW);
+        for entity in [
+            &batch.trip_updates.entity[0],
+            &batch.vehicle_positions.entity[0],
+        ] {
+            for vehicle in [
+                entity.trip_update.as_ref().unwrap().vehicle.as_ref(),
+                entity.vehicle.as_ref().unwrap().vehicle.as_ref(),
+            ] {
+                let vehicle = vehicle.expect("a vehicle descriptor");
+                assert_eq!(vehicle.id.as_deref(), Some("20261117-785"));
+                assert_eq!(vehicle.label.as_deref(), Some("785"));
+            }
+        }
+    }
+
+    /// Amtrak's static GTFS writes every time in Eastern (the agency zone) and never past 24:00,
+    /// and gives each station its own `stop_timezone`. 595 leaves San Diego at 0:01 Eastern, which
+    /// is 21:01 Pacific the evening before; 172 leaves New York at 6:00; 596 leaves San Diego at
+    /// 0:01 Eastern on one service date only, 2026-11-17.
+    fn eastern_gtfs() -> Gtfs {
+        let mut archive = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        let options = SimpleFileOptions::default();
+        for (name, contents) in [
+            ("agency.txt", "agency_id,agency_name,agency_url,agency_timezone\n51,Amtrak,https://amtrak.com,America/New_York\n"),
+            ("stops.txt", "stop_id,stop_name,stop_lat,stop_lon,stop_timezone\nSAN,San Diego,32.7,-117.1,America/Los_Angeles\nLAX,Los Angeles,34.0,-118.2,America/Los_Angeles\nNYP,New York,40.75,-73.99,America/New_York\nWAS,Washington,38.9,-77.0,\n"),
+            ("routes.txt", "route_id,agency_id,route_short_name,route_long_name,route_type\nr,51,PS,Pacific Surfliner,2\nn,51,NER,Northeast Regional,2\n"),
+            ("trips.txt", "route_id,service_id,trip_id,trip_short_name\nr,daily,t595,595\nn,daily,t172,172\nr,one,t596,596\n"),
+            ("stop_times.txt", "trip_id,arrival_time,departure_time,stop_id,stop_sequence\nt595,00:01:00,00:01:00,SAN,1\nt595,03:00:00,03:00:00,LAX,2\nt172,06:00:00,06:00:00,NYP,1\nt172,09:00:00,09:00:00,WAS,2\nt596,00:01:00,00:01:00,SAN,1\n"),
+            ("calendar.txt", "service_id,monday,tuesday,wednesday,thursday,friday,saturday,sunday,start_date,end_date\ndaily,1,1,1,1,1,1,1,20261101,20261231\n"),
+            ("calendar_dates.txt", "service_id,date,exception_type\none,20261117,1\n"),
+        ] {
+            archive.start_file(name, options).unwrap();
+            archive.write_all(contents.as_bytes()).unwrap();
+        }
+        Gtfs::from_reader(Cursor::new(archive.finish().unwrap().into_inner())).unwrap()
+    }
+
+    /// #122: one train gets the same entity id, descriptor and start date from both sources. Each
+    /// source's date is derived the way that source derives it, from one origin departure: the
+    /// primary crate takes the departure's New York date (`origin_departure`, then New York), and
+    /// ASM's `origin_date` is its local date at the origin, which is how the crate itself matches
+    /// ASM trains.
+    #[test]
+    fn the_fallback_and_the_primary_identify_a_train_the_same_way() {
+        use crate::sources::identity::{identify, train_day_id};
+        for (number, origin_text, zone, expected) in [
+            // 21:01 Pacific is 0:01 Eastern the next day: the next day's service, as GTFS has it.
+            (595, "11/17/2026 9:01:00 PM", 'P', "20261118-595"),
+            // An Eastern origin: both dates are the departure's own date.
+            (172, "11/17/2026 6:00:00 AM", 'E', "20261117-172"),
+        ] {
+            let origin = amtrak_gtfs_rt::origin_departure(origin_text, zone);
+            let primary_date = origin
+                .with_timezone(&chrono_tz::America::New_York)
+                .date_naive()
+                .format("%Y%m%d")
+                .to_string();
+            let mut primary = FeedMessage {
+                entity: vec![FeedEntity {
+                    id: train_day_id(&primary_date, &number.to_string()),
+                    trip_update: Some(TripUpdate::default()),
+                    vehicle: Some(VehiclePosition::default()),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            };
+            identify(&mut primary);
+
+            let origin_date = origin.date_naive().format("%Y-%m-%d").to_string();
+            let asm = train(number, json!({"origin_date": origin_date, "stops": []}));
+            let fallback = batch_from_map(&json!([asm]), &eastern_gtfs(), NOW);
+            assert_eq!(fallback.trip_updates.entity.len(), 1, "{number}");
+            let (left, right) = (&fallback.trip_updates.entity[0], &primary.entity[0]);
+            assert_eq!(left.id, expected);
+            assert_eq!(left.id, right.id);
+            let update = left.trip_update.as_ref().unwrap();
+            assert_eq!(
+                update.trip.start_date.as_deref(),
+                Some(primary_date.as_str())
+            );
+            assert_eq!(update.vehicle, right.trip_update.as_ref().unwrap().vehicle);
+            let position = left.vehicle.as_ref().unwrap();
+            assert_eq!(
+                position.trip.as_ref().unwrap().start_date.as_deref(),
+                Some(primary_date.as_str())
+            );
+            assert_eq!(position.vehicle, right.vehicle.as_ref().unwrap().vehicle);
+        }
+    }
+
+    /// A train whose local origin date matches no service day of its schedule is left out rather
+    /// than published on a day its schedule does not run: 596's only service date, 2026-11-17,
+    /// leaves San Diego on the evening of 2026-11-16 Pacific, and no service date leaves on 11-17.
+    #[test]
+    fn a_train_with_no_service_day_for_its_origin_date_is_left_out() {
+        let gtfs = eastern_gtfs();
+        let on_the_evening_before = batch_from_map(
+            &json!([train(
+                596,
+                json!({"origin_date": "2026-11-16", "stops": []})
+            )]),
+            &gtfs,
+            NOW,
+        );
+        assert_eq!(
+            on_the_evening_before.trip_updates.entity[0].id,
+            "20261117-596"
+        );
+        let unscheduled = batch_from_map(
+            &json!([train(
+                596,
+                json!({"origin_date": "2026-11-17", "stops": []})
+            )]),
+            &gtfs,
+            NOW,
+        );
+        assert!(unscheduled.trip_updates.entity.is_empty());
     }
 
     #[test]
@@ -364,7 +557,7 @@ mod tests {
             .iter()
             .map(|e| e.id.clone())
             .collect();
-        assert_eq!(ids, vec!["asm-785-20261117", "asm-790-20261117"]);
+        assert_eq!(ids, vec!["20261117-785", "20261117-790"]);
     }
 
     #[test]
@@ -400,6 +593,16 @@ mod tests {
         let batch = batch_from_map(&json!([one]), &gtfs(), NOW);
         let entity = &batch.trip_updates.entity[0];
         assert!(entity.vehicle.is_none());
+        // The trip update still names its train.
+        let named = entity
+            .trip_update
+            .as_ref()
+            .unwrap()
+            .vehicle
+            .as_ref()
+            .unwrap();
+        assert_eq!(named.id.as_deref(), Some("20261117-785"));
+        assert_eq!(named.label.as_deref(), Some("785"));
         let stops = &entity.trip_update.as_ref().unwrap().stop_time_update;
         assert_eq!(
             stops.len(),

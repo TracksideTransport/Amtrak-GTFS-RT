@@ -9,8 +9,8 @@ default-run = "amtrak-gtfs-rt-service"
 
 [features]
 # Opt-in consumer tooling. The shipped service (`cargo build --locked --release`) does not enable
-# this feature, so `chrono-tz` and the `amtrak-status` binary stay out of the released artifact.
-status = ["dep:chrono-tz"]
+# this feature, so the `amtrak-status` binary stays out of the released artifact.
+status = []
 
 [dependencies]
 amtrak-gtfs-rt = { git = "https://github.com/catenarytransit/amtrak-gtfs-rt" }
@@ -31,9 +31,10 @@ csv = "1.4"
 # Rewrites the static ZIP (copying untouched entries raw) when platform stops are added. Already
 # resolved at this version through gtfs-structures; previously only a dev-dependency.
 zip = { version = "6.0", default-features = false, features = ["deflate"] }
-# Consumer-only (station & train status): per-station local-time rendering with DST. Optional so
-# the released service binary and container link no additional code. Already in the resolved graph.
-chrono-tz = { version = "0.10", optional = true }
+# Station local time with DST: the fallback source dates a train by its local departure at the
+# origin, and the status CLI renders per-station times. Already linked into the service through
+# `amtrak-gtfs-rt`, which dates the primary source's trains with it, so it adds no crate.
+chrono-tz = "0.10"
 chrono = "0.4"
 # HTML parsing for the best-effort Service Alerts & Notices advisory scraper. Already resolved
 # transitively via `amtrak-gtfs-rt` (which the service links), so this is a declaration edge only.
@@ -46,7 +47,7 @@ rustix = { version = "1.1.4", features = ["fs", "process"] }
 tower = { version = "0.5", features = ["util"] }
 
 # Station & train status consumer CLI. Gated behind the `status` feature so the default build and
-# the container image (which build no features) never compile this target or `chrono-tz`.
+# the container image (which build no features) never compile this target.
 [[bin]]
 name = "amtrak-status"
 path = "src/bin/amtrak_status.rs"
