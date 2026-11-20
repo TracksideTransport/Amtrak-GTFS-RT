@@ -64,6 +64,42 @@
     "RUSTSEC-2026-0555": {
       "mitigation": "chrono-tz 0.10.4 is linked through the amtrak-gtfs-rt (catenary) crate for time-zone tables. The advisory is an unmaintained notice with no vulnerability claim and no fix, and no maintained same-chain replacement exists. Controls and review triggers are in 2026-11-cargo-dependencies.md.",
       "approval": "Approved 2026-11-18 by the repository owner, who replied \"approve\" in conversation to this exact sentence: I explicitly accept the documented sixteen-warning Cargo dependency risk in .security/risk-acceptance/2026-11-cargo-dependencies.md through 2027-02-12."
+    },
+    "RUSTSEC-2026-0574": {
+      "mitigation": "heapless 0.6.1, 0.7.17 and 0.8.0 are Cargo.lock entries listed only by rstar versions that geo-types can select through optional features nothing enables; no target or feature combination builds them (cargo tree --target all --all-features -e all prints nothing). The fix, 0.9.4, is outside rstar's version ranges. Controls and review triggers are in 2026-11-cargo-dependencies.md.",
+      "approval": "Approved 2026-11-20 by the repository owner, who replied \"approve\" in conversation to the proposal to accept the nine heapless advisories (RUSTSEC-2026-0574 to RUSTSEC-2026-0582, 27 records across heapless 0.6.1, 0.7.17 and 0.8.0) as locked-not-built under this record's terms, through 2027-02-12, revoked if heapless is ever built (issue #158)."
+    },
+    "RUSTSEC-2026-0575": {
+      "mitigation": "heapless 0.6.1, 0.7.17 and 0.8.0 are Cargo.lock entries listed only by rstar versions that geo-types can select through optional features nothing enables; no target or feature combination builds them (cargo tree --target all --all-features -e all prints nothing). The fix, 0.9.4, is outside rstar's version ranges. Controls and review triggers are in 2026-11-cargo-dependencies.md.",
+      "approval": "Approved 2026-11-20 by the repository owner, who replied \"approve\" in conversation to the proposal to accept the nine heapless advisories (RUSTSEC-2026-0574 to RUSTSEC-2026-0582, 27 records across heapless 0.6.1, 0.7.17 and 0.8.0) as locked-not-built under this record's terms, through 2027-02-12, revoked if heapless is ever built (issue #158)."
+    },
+    "RUSTSEC-2026-0576": {
+      "mitigation": "heapless 0.6.1, 0.7.17 and 0.8.0 are Cargo.lock entries listed only by rstar versions that geo-types can select through optional features nothing enables; no target or feature combination builds them (cargo tree --target all --all-features -e all prints nothing). The fix, 0.9.4, is outside rstar's version ranges. Controls and review triggers are in 2026-11-cargo-dependencies.md.",
+      "approval": "Approved 2026-11-20 by the repository owner, who replied \"approve\" in conversation to the proposal to accept the nine heapless advisories (RUSTSEC-2026-0574 to RUSTSEC-2026-0582, 27 records across heapless 0.6.1, 0.7.17 and 0.8.0) as locked-not-built under this record's terms, through 2027-02-12, revoked if heapless is ever built (issue #158)."
+    },
+    "RUSTSEC-2026-0577": {
+      "mitigation": "heapless 0.6.1, 0.7.17 and 0.8.0 are Cargo.lock entries listed only by rstar versions that geo-types can select through optional features nothing enables; no target or feature combination builds them (cargo tree --target all --all-features -e all prints nothing). The fix, 0.9.4, is outside rstar's version ranges. Controls and review triggers are in 2026-11-cargo-dependencies.md.",
+      "approval": "Approved 2026-11-20 by the repository owner, who replied \"approve\" in conversation to the proposal to accept the nine heapless advisories (RUSTSEC-2026-0574 to RUSTSEC-2026-0582, 27 records across heapless 0.6.1, 0.7.17 and 0.8.0) as locked-not-built under this record's terms, through 2027-02-12, revoked if heapless is ever built (issue #158)."
+    },
+    "RUSTSEC-2026-0578": {
+      "mitigation": "heapless 0.6.1, 0.7.17 and 0.8.0 are Cargo.lock entries listed only by rstar versions that geo-types can select through optional features nothing enables; no target or feature combination builds them (cargo tree --target all --all-features -e all prints nothing). The fix, 0.9.4, is outside rstar's version ranges. Controls and review triggers are in 2026-11-cargo-dependencies.md.",
+      "approval": "Approved 2026-11-20 by the repository owner, who replied \"approve\" in conversation to the proposal to accept the nine heapless advisories (RUSTSEC-2026-0574 to RUSTSEC-2026-0582, 27 records across heapless 0.6.1, 0.7.17 and 0.8.0) as locked-not-built under this record's terms, through 2027-02-12, revoked if heapless is ever built (issue #158)."
+    },
+    "RUSTSEC-2026-0579": {
+      "mitigation": "heapless 0.6.1, 0.7.17 and 0.8.0 are Cargo.lock entries listed only by rstar versions that geo-types can select through optional features nothing enables; no target or feature combination builds them (cargo tree --target all --all-features -e all prints nothing). The fix, 0.9.4, is outside rstar's version ranges. Controls and review triggers are in 2026-11-cargo-dependencies.md.",
+      "approval": "Approved 2026-11-20 by the repository owner, who replied \"approve\" in conversation to the proposal to accept the nine heapless advisories (RUSTSEC-2026-0574 to RUSTSEC-2026-0582, 27 records across heapless 0.6.1, 0.7.17 and 0.8.0) as locked-not-built under this record's terms, through 2027-02-12, revoked if heapless is ever built (issue #158)."
+    },
+    "RUSTSEC-2026-0580": {
+      "mitigation": "heapless 0.6.1, 0.7.17 and 0.8.0 are Cargo.lock entries listed only by rstar versions that geo-types can select through optional features nothing enables; no target or feature combination builds them (cargo tree --target all --all-features -e all prints nothing). The fix, 0.9.4, is outside rstar's version ranges. Controls and review triggers are in 2026-11-cargo-dependencies.md.",
+      "approval": "Approved 2026-11-20 by the repository owner, who replied \"approve\" in conversation to the proposal to accept the nine heapless advisories (RUSTSEC-2026-0574 to RUSTSEC-2026-0582, 27 records across heapless 0.6.1, 0.7.17 and 0.8.0) as locked-not-built under this record's terms, through 2027-02-12, revoked if heapless is ever built (issue #158)."
+    },
+    "RUSTSEC-2026-0581": {
+      "mitigation": "heapless 0.6.1, 0.7.17 and 0.8.0 are Cargo.lock entries listed only by rstar versions that geo-types can select through optional features nothing enables; no target or feature combination builds them (cargo tree --target all --all-features -e all prints nothing). The fix, 0.9.4, is outside rstar's version ranges. Controls and review triggers are in 2026-11-cargo-dependencies.md.",
+      "approval": "Approved 2026-11-20 by the repository owner, who replied \"approve\" in conversation to the proposal to accept the nine heapless advisories (RUSTSEC-2026-0574 to RUSTSEC-2026-0582, 27 records across heapless 0.6.1, 0.7.17 and 0.8.0) as locked-not-built under this record's terms, through 2027-02-12, revoked if heapless is ever built (issue #158)."
+    },
+    "RUSTSEC-2026-0582": {
+      "mitigation": "heapless 0.6.1, 0.7.17 and 0.8.0 are Cargo.lock entries listed only by rstar versions that geo-types can select through optional features nothing enables; no target or feature combination builds them (cargo tree --target all --all-features -e all prints nothing). The fix, 0.9.4, is outside rstar's version ranges. Controls and review triggers are in 2026-11-cargo-dependencies.md.",
+      "approval": "Approved 2026-11-20 by the repository owner, who replied \"approve\" in conversation to the proposal to accept the nine heapless advisories (RUSTSEC-2026-0574 to RUSTSEC-2026-0582, 27 records across heapless 0.6.1, 0.7.17 and 0.8.0) as locked-not-built under this record's terms, through 2027-02-12, revoked if heapless is ever built (issue #158)."
     }
   }
 }

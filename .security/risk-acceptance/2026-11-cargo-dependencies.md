@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | **Approved** 2026-11-18 (rewritten that day for the one-container layout) |
+| Status | **Approved** 2026-11-18 (rewritten that day for the one-container layout); **amended and approved** 2026-11-20 to add nine `heapless` advisories, see [Amendment 2026-11-20](#amendment-2026-11-20-heapless-158) |
 | Supersedes | [v0.2.0 Cargo dependency risk acceptance](v0.2.0-cargo-dependencies.md) (expires 2026-11-12) |
 | Prepared | 2026-11-07; rewritten 2026-11-18 |
 | Audit revision | `ac52a48c24e80a7559a2a8e0e3cb289bbd42d86e` (`main` after #86, plus the lockfile update in #87). The 2026-11-07 audit was at `088104119f86c09b0073674791fd531115316ab3`; `Cargo.lock` is unchanged between them except for #87. |
@@ -55,7 +55,7 @@ entry that no target builds and carries no advisory; it is noted here, not accep
 | `derivative 2.2.0` | `RUSTSEC-2024-0388` | Unknown | None; unmaintained | `gtfs-structures → derivative` (proc-macro) | Compile-time only (`build-time-only`) |
 | `chrono 0.4.45` | `RUSTSEC-2026-0543` | Unknown | None; unmaintained | `amtrak-gtfs-rt → chrono` (also used by the optional `amtrak-status` CLI behind the `status` feature) | Linked into the service through the catenary crate for time arithmetic; an unmaintained notice with no vulnerability claim (`chrono-linked`) |
 | `chrono-tz 0.10.4` | `RUSTSEC-2026-0555` | Unknown | None; unmaintained | `amtrak-gtfs-rt → chrono-tz` | Linked through the catenary crate for time-zone tables; no vulnerability claim (`chrono-linked`) |
-| `fxhash 0.2.1` | `RUSTSEC-2025-0057` | Unknown | None; unmaintained | `amtrak-gtfs-rt` / service `→ scraper → selectors → fxhash` | **Reachable** from HTML parsers (`fxhash-reachable`) |
+| `fxhash 0.2.1` | `RUSTSEC-2025-0057` | Unknown | None; unmaintained | `amtrak-gtfs-rt → scraper 0.22 → selectors 0.26 → fxhash` (since #151 the service's own `scraper` 0.29 does not reach it) | **Reachable** from HTML parsers (`fxhash-reachable`) |
 | `gcc 0.3.55` | `RUSTSEC-2025-0121` | Unknown | None; deprecated | `amtrak-gtfs-rt → rust-crypto → gcc` (build-dependency) | Build script only (`build-time-only`) |
 | `rust-crypto 0.2.36` | `RUSTSEC-2016-0005` | Unknown | No released safe version | `amtrak-gtfs-rt → rust-crypto` | Never referenced; 0 symbols in release binary (`rust-crypto-unreferenced`) |
 | `rust-crypto 0.2.36` | `RUSTSEC-2022-0011` / `GHSA-JP3W-3Q88-34CF` | Critical | None published | `amtrak-gtfs-rt → rust-crypto` | Same as above |
@@ -72,6 +72,34 @@ The reachability claims come from a manual review: `cargo tree`, source grep acr
 `gtfs-structures 0.46.1`, and `amtrak-gtfs-rt f3a83db0`, and `nm` on a host
 (aarch64-apple-darwin) release build. The musl container binaries were not symbol-inspected.
 The owner should review the claims before approving.
+
+### Amendment 2026-11-20: heapless (#158)
+
+RustSec published nine `heapless` advisories on 2026-11-19, `RUSTSEC-2026-0574` to
+`RUSTSEC-2026-0582`. Each matches all three locked versions, so the
+[v0.9.0 release audit](../dependency-audit/release-2026-11-20.md) reported 27 new warning records
+(severity unknown, not in KEV, non-blocking). This amendment accepts them under this record's
+existing scope and expiry. It adds no new dependency and changes nothing else in this record.
+
+| Exact package | Advisory | Severity | Fix status | Dependency path | Reachability (evidence anchor) |
+|---|---|---:|---|---|---|
+| `heapless 0.6.1`, `0.7.17`, `0.8.0` | `RUSTSEC-2026-0574`, `-0575`, `-0576`, `-0577`, `-0578`, `-0579`, `-0580`, `-0581`, `-0582` | Unknown | 0.9.4; outside the version ranges `rstar` asks for | lockfile only: `geo-types → rstar 0.8.4, 0.9.3, 0.10.0 to 0.12.2 (optional features, none enabled) → heapless` | Not built in any target or feature set (`locked-not-built-heapless`) |
+
+Conditions:
+
+- The acceptance holds only while `cargo tree --locked -i heapless@<version> --target all
+  --all-features -e all` prints nothing for each locked version. Re-run it on every dependency
+  change, as for the rest of this record.
+- Revoke it at once if any change builds `heapless`, for example by enabling a `geo-types`
+  `rstar` feature, and treat the advisories as unaccepted.
+- It expires with this record on 2027-02-12.
+
+Approval: approved 2026-11-20 by the repository owner, who replied "approve" in conversation to
+the proposal to accept these 27 records as `locked-not-built` on the terms above.
+
+Also corrected on 2026-11-20: the `fxhash` row's path. #151 moved this crate's own `scraper` to
+0.29, which does not depend on `fxhash`. `fxhash` is still linked through the catenary crate's
+`scraper` 0.22 and stays recorded as reachable.
 
 ### Residual risk this record does not exclude
 
