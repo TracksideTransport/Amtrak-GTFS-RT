@@ -110,7 +110,7 @@ jobs:
 
       - name: Restore validator jars and the Maven repository
         id: cache
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: |
             .validator-cache
@@ -134,7 +134,7 @@ jobs:
       # repository) is not thrown away. Skipped on an exact hit, where there is nothing new.
       - name: Save validator jars and the Maven repository
         if: always() && steps.cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v6
         with:
           path: |
             .validator-cache

@@ -298,7 +298,7 @@ jobs:
       - name: Restore validator jars and the Maven repository
         id: cache
         if: steps.paths.outputs.run == 'true'
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: |
             .validator-cache
@@ -312,7 +312,7 @@ jobs:
 
       - name: Save validator jars and the Maven repository
         if: always() && steps.paths.outputs.run == 'true' && steps.cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v6
         with:
           path: |
             .validator-cache
