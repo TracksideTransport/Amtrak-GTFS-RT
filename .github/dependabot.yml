@@ -42,6 +42,17 @@ updates:
         applies-to: version-updates
         update-types:
           - "major"
+    # These three crates are shared with the pinned catenarytransit/amtrak-gtfs-rt crate, which
+    # depends on gtfs-structures 0.46.1 (and through it zip 6 and sha2 0.10). They move together with
+    # that crate, never alone (#166). update-types applies only to version updates, so security
+    # updates for them still open.
+    ignore:
+      - dependency-name: "gtfs-structures"
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
+      - dependency-name: "zip"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "sha2"
+        update-types: ["version-update:semver-major"]
 
   # The browser worker: browser-worker/requirements.txt (Playwright, pytest, cryptography).
   - package-ecosystem: "pip"
