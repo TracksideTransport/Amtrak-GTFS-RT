@@ -151,6 +151,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   now live in `.security/release-gate/2026-08-14/`, `validation-reports/` is fully ignored, and
   `scripts/test-release-controls.sh` fails if a file under it is tracked (#102).
 
+### Security
+
+- **Playwright 1.65.2 with Node 26.13.1.** The Node.js runtime that Playwright 1.64.1 bundled,
+  24.22.1, has fixable High advisories CVE-2026-123863, CVE-2026-123864, CVE-2026-123865,
+  CVE-2026-123866, CVE-2026-123872, CVE-2026-123874, and CVE-2026-126051, so the image's
+  vulnerability gate failed. 1.65.0 bundles Node 26.13.0, which is not the fixed release. The
+  browser worker also gets the Chromium build that ships with Playwright 1.65.
+
 ## [0.8.0] - 2026-11-18
 
 The first release of the one image: the service, its browser worker with one Chromium, and the

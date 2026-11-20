@@ -6,9 +6,13 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
 report_dir="${REPORT_DIR:-validation-reports/live-amtrak}"
 mkdir -p "$report_dir"
+# sources::advisories_live_tests is left out on purpose: it fetches the Service
+# Alerts page, which Akamai resets for a plain HTTP client, so it needs the
+# browser worker that this job does not start.
 tests=(
   sources::amtrak::tests::live_fetch_returns_batch
   orchestrator::tests::live_candidate_builds_and_passes_semantic_validation
+  sources::asm::tests::live_map_resolves_against_the_static_feed
 )
 
 # Cargo succeeds when a filter matches zero tests. Verify exact registration
