@@ -266,8 +266,9 @@ def choose_fetches(
     """Pick at most ``max_fetches`` trains, in this order.
 
     1. Hot trains (see :func:`is_hot`) with no stored document, soonest track stop first. One
-       attempted within ``cooldown_secs`` (Amtrak answered, but with no usable document) waits;
-       a pick the browser could not run was never stamped, so it is taken again at once.
+       attempted within ``cooldown_secs`` (Amtrak answered without a usable document, or its
+       in-page fetch failed) waits; a pick the browser could not run was never stamped, so it is
+       taken again at once.
     2. Hot trains that have a document, once their cooldown has passed: oldest attempt first,
        then soonest track stop.
     3. Every other due train once its cooldown has passed, oldest attempt first. A warm train

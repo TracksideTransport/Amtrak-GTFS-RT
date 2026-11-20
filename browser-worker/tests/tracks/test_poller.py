@@ -641,6 +641,65 @@ def test_a_browser_failure_leaves_later_picks_unstamped_and_first_next_cycle():
     assert calls == ["4", "5", "6"]
 
 
+def test_a_pick_whose_own_fetch_failed_takes_the_cooldown_and_later_picks_go_first():
+    # A status fetch that times out or is refused inside the page surfaces as BrowserUnavailable.
+    # If that failure is specific to one train, leaving it unstamped put it first after every
+    # relaunch, where it killed the browser again and starved every other train.
+    store = TrackStore()
+    last_fetched: dict = {}
+    calls: list[str] = []
+    numbers = [str(number) for number in range(1, 5)]
+
+    async def trains(_cfg):
+        return _hot_fleet(*numbers)
+
+    async def second_fails_in_page(_cfg, train: DueTrain):
+        calls.append(train.train_number)
+        if train.train_number == "2":
+            raise BrowserUnavailable("TimeoutError", attempted=True)
+        return {"data": []}
+
+    cfg = Config(max_fetches_per_cycle=4, hot_window_secs=720, cooldown_secs=90)
+    asyncio.run(
+        poll_once(store, cfg, last_fetched, now=NOW, trains_fetcher=trains,
+                  status_fetcher=second_fails_in_page)
+    )
+    assert calls == ["1", "2"]
+    assert set(last_fetched) == {("1", "2026-10-17"), ("2", "2026-10-17")}
+
+    calls.clear()
+    later = NOW + timedelta(seconds=60)
+    asyncio.run(
+        poll_once(store, cfg, last_fetched, now=later, trains_fetcher=trains,
+                  status_fetcher=second_fails_in_page)
+    )
+    assert calls == ["3", "4"], "the failed pick waits out its cooldown"
+
+
+def test_only_a_failed_in_page_fetch_counts_as_an_attempt():
+    cfg = Config(relaunch_backoff_max_secs=150, browser_max_age_secs=3_600)
+    clock = [1_000.0]
+    browser = ResidentBrowser(cfg, monotonic=lambda: clock[0])
+    train = DueTrain("167", "2026-10-17", 60.0)
+
+    async def failed_launch():
+        raise RuntimeError("launch")
+
+    browser._launch = failed_launch
+    with pytest.raises(BrowserUnavailable) as launch:
+        asyncio.run(browser.fetch(cfg, train))
+    assert launch.value.attempted is False
+    with pytest.raises(BrowserUnavailable, match="backoff") as backoff:
+        asyncio.run(browser.fetch(cfg, train))
+    assert backoff.value.attempted is False
+
+    browser._page = _FakePage(asyncio.TimeoutError())
+    browser._launched_at = clock[0]
+    with pytest.raises(BrowserUnavailable) as in_page:
+        asyncio.run(browser.fetch(cfg, train))
+    assert in_page.value.attempted is True
+
+
 def test_each_cycle_logs_its_picks_with_their_outcomes(caplog):
     store = TrackStore()
     hot = _hot_fleet("172", "86", "2154", "95")

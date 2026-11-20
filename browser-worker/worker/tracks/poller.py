@@ -59,7 +59,16 @@ _FETCH_JS = """async ([url, timeoutMs]) => {
 
 
 class BrowserUnavailable(Exception):
-    """The browser could not run a fetch. The rest of the cycle is skipped."""
+    """The browser could not run a fetch. The rest of the cycle is skipped.
+
+    ``attempted`` is true when the in-page status fetch for the pick actually ran and failed (a
+    timed-out or refused request, or a renderer that died during it). Such a failure may be
+    specific to that train, so the pick is stamped like any other attempt.
+    """
+
+    def __init__(self, reason: str, *, attempted: bool = False) -> None:
+        super().__init__(reason)
+        self.attempted = attempted
 
 
 class StatusMiss(Exception):
@@ -207,7 +216,7 @@ class ResidentBrowser:
             )
         except Exception as error:  # noqa: BLE001 — a dead renderer or hung request
             await self._failed(f"status fetch failed: {describe_error(error)}")
-            raise BrowserUnavailable(type(error).__name__) from None
+            raise BrowserUnavailable(type(error).__name__, attempted=True) from None
         self._backoff = 0.0
         return document_from_eval(raw)
 
@@ -317,9 +326,12 @@ async def poll_once(
     """One cycle. Raises when the train list itself cannot be read; status misses are skipped.
 
     Returns whether the cycle succeeded: it had nothing to fetch, or it stored a document. Every
-    attempt that reached Amtrak, stored or rejected, starts the train's cooldown. A pick the
-    browser could not run (:class:`BrowserUnavailable`, including the relaunch backoff) and every
-    pick after it are not stamped, so they are picked again first. ``last_fetched`` is pruned to
+    attempt that reached Amtrak, stored or rejected, starts the train's cooldown, and so does a
+    pick whose own in-page fetch ran and failed (:class:`BrowserUnavailable` with ``attempted``).
+    A pick the browser could not run at all (a failed launch or first page load, or the relaunch
+    backoff) and every pick after a browser failure are not stamped. A hot one is picked again
+    first once the browser is back; a ready one is left out of the cycles between full polls
+    unless it is warm or hinted, so it waits for the next full poll. ``last_fetched`` is pruned to
     the trains still due. One INFO line names each pick, whether it was hot or ready, and its
     outcome; a second gives the cycle's totals.
     """
@@ -377,6 +389,10 @@ async def poll_once(
             document = await status_fetcher(cfg, train)
         except BrowserUnavailable as error:
             browser_down = str(error)
+            if error.attempted:
+                # The pick's own fetch ran and failed. It takes the cooldown, so a failure
+                # specific to this train cannot put it first after every relaunch.
+                last_fetched[train.key] = now.timestamp()
             outcomes.append(f"{train.train_number} {kind} browser unavailable ({browser_down})")
             continue
         except StatusMiss as error:
