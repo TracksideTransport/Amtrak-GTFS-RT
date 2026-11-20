@@ -1115,10 +1115,9 @@ aren't installed.
 track how many trains are running and vary legitimately between runs, whereas a new error *code*
 is a real regression.
 
-The baseline currently records eleven known RT error codes, most of them inherited from upstream
-(trips and stations that appear in live data but not in Amtrak's published schedule) and two that
-are fixable here (`E039` `is_deleted` on a FULL_DATASET feed, `E049` unpopulated header
-incrementality). Each entry is annotated with its cause; they are debt to burn down, not permanent
+The baseline currently records three known RT error codes (`E022` and `E025` for upstream
+estimates that are not increasing or put departure before arrival, `E029` for vehicle positions far
+from the trip shape), all inherited from upstream. Each entry is annotated with its cause; they are debt to burn down, not permanent
 exemptions. Amtrak's static GTFS currently produces **zero** ERROR notices, so the static side is
 gated at zero.
 
