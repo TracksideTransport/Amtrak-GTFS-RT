@@ -151,9 +151,10 @@ FROM python:3.12-slim-bookworm@sha256:935c3c5b12357a7e10caa9c1e6ca5692344d97cf22
 
 ARG OCI_VERSION
 ARG OCI_REVISION
-# 1.64.1 bundles Node 24.22.1. 1.64.0's Node 24.21.0 has fixable High advisories
-# (CVE-2026-105482, CVE-2026-105483, CVE-2026-106069, CVE-2026-111497).
-ARG PLAYWRIGHT_VERSION=1.64.1
+# 1.65.2 bundles Node 26.13.1. 1.64.1's Node 24.22.1 has fixable High advisories (CVE-2026-123863,
+# CVE-2026-123864, CVE-2026-123865, CVE-2026-123866, CVE-2026-123872, CVE-2026-123874,
+# CVE-2026-126051), and 1.65.0's Node 26.13.0 is not the fixed release.
+ARG PLAYWRIGHT_VERSION=1.65.2
 ARG CRYPTOGRAPHY_VERSION=50.0.2
 # `headless-shell` (default) installs only chromium-headless-shell. `full` also installs full
 # Chromium and Xvfb for BROWSER_MODE=xvfb-headful, the fallback if Amtrak blocks the headless

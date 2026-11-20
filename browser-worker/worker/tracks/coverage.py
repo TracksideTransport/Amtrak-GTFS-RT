@@ -220,7 +220,7 @@ def abort_message(reason: str) -> str:
     if reason == "playwright is not installed":
         return (
             "Playwright is not installed, so the status page could not be opened. "
-            "From browser-worker/: python -m pip install playwright==1.64.1 && "
+            "From browser-worker/: python -m pip install playwright==1.65.2 && "
             "python -m playwright install --only-shell chromium"
         )
     return (
