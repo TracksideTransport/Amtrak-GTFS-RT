@@ -274,7 +274,7 @@ chromium`). The released image already has both; the worker lives in `/app`:
 ```bash
 docker run --rm --read-only --tmpfs /tmp --tmpfs /home/amtrak:uid=10001,gid=10001 \
   --shm-size 64m --workdir /app --entrypoint python3 \
-  ghcr.io/sohampatwardhan/amtrak-gtfs-rt:0.8.0 -m worker.tracks.dump 66 2150
+  ghcr.io/sohampatwardhan/amtrak-gtfs-rt:0.9.0 -m worker.tracks.dump 66 2150
 ```
 
 ## Station coverage
