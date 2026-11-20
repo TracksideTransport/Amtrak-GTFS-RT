@@ -36,8 +36,8 @@ zip = { version = "6.0", default-features = false, features = ["deflate"] }
 # `amtrak-gtfs-rt`, which dates the primary source's trains with it, so it adds no crate.
 chrono-tz = "0.10"
 chrono = "0.4"
-# HTML parsing for the best-effort Service Alerts & Notices advisory scraper. Already resolved
-# transitively via `amtrak-gtfs-rt` (which the service links), so this is a declaration edge only.
+# HTML parsing for the best-effort Service Alerts & Notices advisory scraper and the Hartford Line
+# board. The catenary crate pins its own `scraper` 0.22, so this is a second copy, not a shared edge.
 scraper = "0.29"
 
 [target.'cfg(unix)'.dependencies]

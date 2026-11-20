@@ -127,6 +127,249 @@
       ],
       "producer": "manual re-key of the 2026-11-07 review for issue #58; the advisory database now folds GHSA-8HXF-QR8P-62X4 (RUSTSEC-2026-0545), GHSA-9HJ8-73FH-9963 (RUSTSEC-2026-0547) and GHSA-M665-V7PM-7GRJ (RUSTSEC-2026-0548) into one record. Source grep and cargo tree re-run 2026-11-18 on main after #87.",
       "timestamp": "2026-11-18T03:45:00Z"
+    },
+    "pkg:cargo/heapless@0.6.1|RUSTSEC-2026-0574": {
+      "status": "unreachable",
+      "method": "delivered_artifact_exclusion",
+      "evidence": [
+        ".security/risk-acceptance/evidence/2026-11-cargo-reachability.txt#locked-not-built-heapless (cargo tree --target all --all-features -e all prints nothing)"
+      ],
+      "producer": "manual review for issue #158 (cargo tree at a321585c37a7)",
+      "timestamp": "2026-11-20T17:00:00Z"
+    },
+    "pkg:cargo/heapless@0.6.1|RUSTSEC-2026-0575": {
+      "status": "unreachable",
+      "method": "delivered_artifact_exclusion",
+      "evidence": [
+        ".security/risk-acceptance/evidence/2026-11-cargo-reachability.txt#locked-not-built-heapless (cargo tree --target all --all-features -e all prints nothing)"
+      ],
+      "producer": "manual review for issue #158 (cargo tree at a321585c37a7)",
+      "timestamp": "2026-11-20T17:00:00Z"
+    },
+    "pkg:cargo/heapless@0.6.1|RUSTSEC-2026-0576": {
+      "status": "unreachable",
+      "method": "delivered_artifact_exclusion",
+      "evidence": [
+        ".security/risk-acceptance/evidence/2026-11-cargo-reachability.txt#locked-not-built-heapless (cargo tree --target all --all-features -e all prints nothing)"
+      ],
+      "producer": "manual review for issue #158 (cargo tree at a321585c37a7)",
+      "timestamp": "2026-11-20T17:00:00Z"
+    },
+    "pkg:cargo/heapless@0.6.1|RUSTSEC-2026-0577": {
+      "status": "unreachable",
+      "method": "delivered_artifact_exclusion",
+      "evidence": [
+        ".security/risk-acceptance/evidence/2026-11-cargo-reachability.txt#locked-not-built-heapless (cargo tree --target all --all-features -e all prints nothing)"
+      ],
+      "producer": "manual review for issue #158 (cargo tree at a321585c37a7)",
+      "timestamp": "2026-11-20T17:00:00Z"
+    },
+    "pkg:cargo/heapless@0.6.1|RUSTSEC-2026-0578": {
+      "status": "unreachable",
+      "method": "delivered_artifact_exclusion",
+      "evidence": [
+        ".security/risk-acceptance/evidence/2026-11-cargo-reachability.txt#locked-not-built-heapless (cargo tree --target all --all-features -e all prints nothing)"
+      ],
+      "producer": "manual review for issue #158 (cargo tree at a321585c37a7)",
+      "timestamp": "2026-11-20T17:00:00Z"
+    },
+    "pkg:cargo/heapless@0.6.1|RUSTSEC-2026-0579": {
+      "status": "unreachable",
+      "method": "delivered_artifact_exclusion",
+      "evidence": [
+        ".security/risk-acceptance/evidence/2026-11-cargo-reachability.txt#locked-not-built-heapless (cargo tree --target all --all-features -e all prints nothing)"
+      ],
+      "producer": "manual review for issue #158 (cargo tree at a321585c37a7)",
+      "timestamp": "2026-11-20T17:00:00Z"
+    },
+    "pkg:cargo/heapless@0.6.1|RUSTSEC-2026-0580": {
+      "status": "unreachable",
+      "method": "delivered_artifact_exclusion",
+      "evidence": [
+        ".security/risk-acceptance/evidence/2026-11-cargo-reachability.txt#locked-not-built-heapless (cargo tree --target all --all-features -e all prints nothing)"
+      ],
+      "producer": "manual review for issue #158 (cargo tree at a321585c37a7)",
+      "timestamp": "2026-11-20T17:00:00Z"
+    },
+    "pkg:cargo/heapless@0.6.1|RUSTSEC-2026-0581": {
+      "status": "unreachable",
+      "method": "delivered_artifact_exclusion",
+      "evidence": [
+        ".security/risk-acceptance/evidence/2026-11-cargo-reachability.txt#locked-not-built-heapless (cargo tree --target all --all-features -e all prints nothing)"
+      ],
+      "producer": "manual review for issue #158 (cargo tree at a321585c37a7)",
+      "timestamp": "2026-11-20T17:00:00Z"
+    },
+    "pkg:cargo/heapless@0.6.1|RUSTSEC-2026-0582": {
+      "status": "unreachable",
+      "method": "delivered_artifact_exclusion",
+      "evidence": [
+        ".security/risk-acceptance/evidence/2026-11-cargo-reachability.txt#locked-not-built-heapless (cargo tree --target all --all-features -e all prints nothing)"
+      ],
+      "producer": "manual review for issue #158 (cargo tree at a321585c37a7)",
+      "timestamp": "2026-11-20T17:00:00Z"
+    },
+    "pkg:cargo/heapless@0.7.17|RUSTSEC-2026-0574": {
+      "status": "unreachable",
+      "method": "delivered_artifact_exclusion",
+      "evidence": [
+        ".security/risk-acceptance/evidence/2026-11-cargo-reachability.txt#locked-not-built-heapless (cargo tree --target all --all-features -e all prints nothing)"
+      ],
+      "producer": "manual review for issue #158 (cargo tree at a321585c37a7)",
+      "timestamp": "2026-11-20T17:00:00Z"
+    },
+    "pkg:cargo/heapless@0.7.17|RUSTSEC-2026-0575": {
+      "status": "unreachable",
+      "method": "delivered_artifact_exclusion",
+      "evidence": [
+        ".security/risk-acceptance/evidence/2026-11-cargo-reachability.txt#locked-not-built-heapless (cargo tree --target all --all-features -e all prints nothing)"
+      ],
+      "producer": "manual review for issue #158 (cargo tree at a321585c37a7)",
+      "timestamp": "2026-11-20T17:00:00Z"
+    },
+    "pkg:cargo/heapless@0.7.17|RUSTSEC-2026-0576": {
+      "status": "unreachable",
+      "method": "delivered_artifact_exclusion",
+      "evidence": [
+        ".security/risk-acceptance/evidence/2026-11-cargo-reachability.txt#locked-not-built-heapless (cargo tree --target all --all-features -e all prints nothing)"
+      ],
+      "producer": "manual review for issue #158 (cargo tree at a321585c37a7)",
+      "timestamp": "2026-11-20T17:00:00Z"
+    },
+    "pkg:cargo/heapless@0.7.17|RUSTSEC-2026-0577": {
+      "status": "unreachable",
+      "method": "delivered_artifact_exclusion",
+      "evidence": [
+        ".security/risk-acceptance/evidence/2026-11-cargo-reachability.txt#locked-not-built-heapless (cargo tree --target all --all-features -e all prints nothing)"
+      ],
+      "producer": "manual review for issue #158 (cargo tree at a321585c37a7)",
+      "timestamp": "2026-11-20T17:00:00Z"
+    },
+    "pkg:cargo/heapless@0.7.17|RUSTSEC-2026-0578": {
+      "status": "unreachable",
+      "method": "delivered_artifact_exclusion",
+      "evidence": [
+        ".security/risk-acceptance/evidence/2026-11-cargo-reachability.txt#locked-not-built-heapless (cargo tree --target all --all-features -e all prints nothing)"
+      ],
+      "producer": "manual review for issue #158 (cargo tree at a321585c37a7)",
+      "timestamp": "2026-11-20T17:00:00Z"
+    },
+    "pkg:cargo/heapless@0.7.17|RUSTSEC-2026-0579": {
+      "status": "unreachable",
+      "method": "delivered_artifact_exclusion",
+      "evidence": [
+        ".security/risk-acceptance/evidence/2026-11-cargo-reachability.txt#locked-not-built-heapless (cargo tree --target all --all-features -e all prints nothing)"
+      ],
+      "producer": "manual review for issue #158 (cargo tree at a321585c37a7)",
+      "timestamp": "2026-11-20T17:00:00Z"
+    },
+    "pkg:cargo/heapless@0.7.17|RUSTSEC-2026-0580": {
+      "status": "unreachable",
+      "method": "delivered_artifact_exclusion",
+      "evidence": [
+        ".security/risk-acceptance/evidence/2026-11-cargo-reachability.txt#locked-not-built-heapless (cargo tree --target all --all-features -e all prints nothing)"
+      ],
+      "producer": "manual review for issue #158 (cargo tree at a321585c37a7)",
+      "timestamp": "2026-11-20T17:00:00Z"
+    },
+    "pkg:cargo/heapless@0.7.17|RUSTSEC-2026-0581": {
+      "status": "unreachable",
+      "method": "delivered_artifact_exclusion",
+      "evidence": [
+        ".security/risk-acceptance/evidence/2026-11-cargo-reachability.txt#locked-not-built-heapless (cargo tree --target all --all-features -e all prints nothing)"
+      ],
+      "producer": "manual review for issue #158 (cargo tree at a321585c37a7)",
+      "timestamp": "2026-11-20T17:00:00Z"
+    },
+    "pkg:cargo/heapless@0.7.17|RUSTSEC-2026-0582": {
+      "status": "unreachable",
+      "method": "delivered_artifact_exclusion",
+      "evidence": [
+        ".security/risk-acceptance/evidence/2026-11-cargo-reachability.txt#locked-not-built-heapless (cargo tree --target all --all-features -e all prints nothing)"
+      ],
+      "producer": "manual review for issue #158 (cargo tree at a321585c37a7)",
+      "timestamp": "2026-11-20T17:00:00Z"
+    },
+    "pkg:cargo/heapless@0.8.0|RUSTSEC-2026-0574": {
+      "status": "unreachable",
+      "method": "delivered_artifact_exclusion",
+      "evidence": [
+        ".security/risk-acceptance/evidence/2026-11-cargo-reachability.txt#locked-not-built-heapless (cargo tree --target all --all-features -e all prints nothing)"
+      ],
+      "producer": "manual review for issue #158 (cargo tree at a321585c37a7)",
+      "timestamp": "2026-11-20T17:00:00Z"
+    },
+    "pkg:cargo/heapless@0.8.0|RUSTSEC-2026-0575": {
+      "status": "unreachable",
+      "method": "delivered_artifact_exclusion",
+      "evidence": [
+        ".security/risk-acceptance/evidence/2026-11-cargo-reachability.txt#locked-not-built-heapless (cargo tree --target all --all-features -e all prints nothing)"
+      ],
+      "producer": "manual review for issue #158 (cargo tree at a321585c37a7)",
+      "timestamp": "2026-11-20T17:00:00Z"
+    },
+    "pkg:cargo/heapless@0.8.0|RUSTSEC-2026-0576": {
+      "status": "unreachable",
+      "method": "delivered_artifact_exclusion",
+      "evidence": [
+        ".security/risk-acceptance/evidence/2026-11-cargo-reachability.txt#locked-not-built-heapless (cargo tree --target all --all-features -e all prints nothing)"
+      ],
+      "producer": "manual review for issue #158 (cargo tree at a321585c37a7)",
+      "timestamp": "2026-11-20T17:00:00Z"
+    },
+    "pkg:cargo/heapless@0.8.0|RUSTSEC-2026-0577": {
+      "status": "unreachable",
+      "method": "delivered_artifact_exclusion",
+      "evidence": [
+        ".security/risk-acceptance/evidence/2026-11-cargo-reachability.txt#locked-not-built-heapless (cargo tree --target all --all-features -e all prints nothing)"
+      ],
+      "producer": "manual review for issue #158 (cargo tree at a321585c37a7)",
+      "timestamp": "2026-11-20T17:00:00Z"
+    },
+    "pkg:cargo/heapless@0.8.0|RUSTSEC-2026-0578": {
+      "status": "unreachable",
+      "method": "delivered_artifact_exclusion",
+      "evidence": [
+        ".security/risk-acceptance/evidence/2026-11-cargo-reachability.txt#locked-not-built-heapless (cargo tree --target all --all-features -e all prints nothing)"
+      ],
+      "producer": "manual review for issue #158 (cargo tree at a321585c37a7)",
+      "timestamp": "2026-11-20T17:00:00Z"
+    },
+    "pkg:cargo/heapless@0.8.0|RUSTSEC-2026-0579": {
+      "status": "unreachable",
+      "method": "delivered_artifact_exclusion",
+      "evidence": [
+        ".security/risk-acceptance/evidence/2026-11-cargo-reachability.txt#locked-not-built-heapless (cargo tree --target all --all-features -e all prints nothing)"
+      ],
+      "producer": "manual review for issue #158 (cargo tree at a321585c37a7)",
+      "timestamp": "2026-11-20T17:00:00Z"
+    },
+    "pkg:cargo/heapless@0.8.0|RUSTSEC-2026-0580": {
+      "status": "unreachable",
+      "method": "delivered_artifact_exclusion",
+      "evidence": [
+        ".security/risk-acceptance/evidence/2026-11-cargo-reachability.txt#locked-not-built-heapless (cargo tree --target all --all-features -e all prints nothing)"
+      ],
+      "producer": "manual review for issue #158 (cargo tree at a321585c37a7)",
+      "timestamp": "2026-11-20T17:00:00Z"
+    },
+    "pkg:cargo/heapless@0.8.0|RUSTSEC-2026-0581": {
+      "status": "unreachable",
+      "method": "delivered_artifact_exclusion",
+      "evidence": [
+        ".security/risk-acceptance/evidence/2026-11-cargo-reachability.txt#locked-not-built-heapless (cargo tree --target all --all-features -e all prints nothing)"
+      ],
+      "producer": "manual review for issue #158 (cargo tree at a321585c37a7)",
+      "timestamp": "2026-11-20T17:00:00Z"
+    },
+    "pkg:cargo/heapless@0.8.0|RUSTSEC-2026-0582": {
+      "status": "unreachable",
+      "method": "delivered_artifact_exclusion",
+      "evidence": [
+        ".security/risk-acceptance/evidence/2026-11-cargo-reachability.txt#locked-not-built-heapless (cargo tree --target all --all-features -e all prints nothing)"
+      ],
+      "producer": "manual review for issue #158 (cargo tree at a321585c37a7)",
+      "timestamp": "2026-11-20T17:00:00Z"
     }
   }
 }
