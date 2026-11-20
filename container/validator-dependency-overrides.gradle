@@ -6,7 +6,39 @@
  * reported by the release scan. The container build applies this as a Gradle init script, then
  * runs the validator test suite and scans the resulting JAR before it can reach the runtime.
  */
+
+// Resolve from Google's Maven Central mirror first, then the original repositories. GitHub-hosted
+// runners are rate-limited by Maven Central on a cold cache, and the plugin portal answers plugin
+// dependencies with a redirect to Maven Central, so a cold build failed with "Could not find".
+// Strict dependency verification (validator-verification-metadata.xml) checks every POM and JAR
+// by SHA-256 whichever repository served it, so the mirror cannot change the bytes accepted.
+def mavenCentralMirror = 'https://maven-central.storage-download.googleapis.com/maven2/'
+
+// Plugin markers (`*.gradle.plugin`) and the axion-release plugin's Gradle module metadata are
+// published differently on the plugin portal, and the verification metadata records the portal's
+// copies, so those still come from the portal.
+beforeSettings { settings ->
+    settings.pluginManagement.repositories {
+        maven {
+            name = 'MavenCentralMirror'
+            url = mavenCentralMirror
+            content {
+                excludeModuleByRegex('.*', '.*\\.gradle\\.plugin')
+                excludeModule('pl.allegro.tech.build', 'axion-release-plugin')
+            }
+        }
+        gradlePluginPortal()
+    }
+}
+
 allprojects { project ->
+    project.repositories {
+        maven {
+            name = 'MavenCentralMirror'
+            url = mavenCentralMirror
+        }
+    }
+
     tasks.withType(org.gradle.api.tasks.bundling.AbstractArchiveTask).configureEach {
         preserveFileTimestamps = false
         reproducibleFileOrder = true
