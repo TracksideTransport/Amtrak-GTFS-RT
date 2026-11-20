@@ -43,8 +43,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   returns nothing logs `WARN primary realtime source failed; falling back` with the source, the
   fallback, and the error (timeout, connect, HTTP status, decode), with URLs removed. A fallback
   that also fails, or a chain with no fallback, is warned too. When the Amtrak source succeeds
-  again, one `INFO` line says it recovered; a healthy source logs nothing extra. The README no
-  longer claims that a fallback generation keeps the notices: its `alerts.pb` is empty. The bare
+  again, one `INFO` line says it recovered; a healthy source logs nothing extra. The bare
   `ASM data successfully downloaded` line each cycle is a `println!` in the pinned
   `amtrak-gtfs-rt` crate and still appears (#110).
 - **An Amtrak answer with no trains falls back.** With notices on, the cached station and
