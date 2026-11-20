@@ -43,6 +43,7 @@ pub mod advisories;
 mod advisories_live_tests;
 pub mod amtrak;
 pub mod asm;
+pub mod identity;
 pub mod tracks;
 
 #[derive(Clone, Debug)]

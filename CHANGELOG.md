@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Trip updates and vehicle positions carry a vehicle id.** A train's trip update and its
+  vehicle position now carry the same `VehicleDescriptor`: `vehicle.id` is the train's
+  per-train-day id, the entity id it already had (`20261119-172`), and `vehicle.label` is the
+  train number (`172`). Consumers can join a trip update to its vehicle position by `vehicle.id`,
+  and the MobilityData validator no longer reports W002 (`vehicle_id not populated`) on every
+  entity. The descriptor is set after the pinned `amtrak-gtfs-rt` crate encodes the feed, which
+  sets none; an entity whose id does not hold a service date and train number gets none rather
+  than an invented one. The offline fixture (`scripts/validate-feeds.sh --fixture`) now encodes its
+  train as that crate does and fails on W002 (#100).
+
 ### Changed
 
 - **The status page is recycled every 30 minutes, between poll cycles.** `BROWSER_MAX_AGE_SECS`
