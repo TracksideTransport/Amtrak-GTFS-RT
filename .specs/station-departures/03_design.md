@@ -75,6 +75,11 @@ IR source: [`diagrams/architecture.json`](diagrams/architecture.json).
 | `gtfs-realtime` + `prost` | crate source (registry) 0.2.0 / 0.14 | 0.2.0 / 0.14 | decode `FeedMessage` and read trip/stop/vehicle/alert fields | Decode via `prost::Message::decode`; join on `StopTimeUpdate.stop_id` (station code), `TripUpdate.trip`, `VehiclePosition.position`, `Alert.informed_entity[].trip` |
 | `reqwest` | already-direct dependency | 0.13 | fetch feed-set manifest + artifacts over HTTP | Reuse existing client; pinned to match `catenary` |
 
+> **Superseded (#122):** since #122, `chrono-tz` is a normal dependency of the service, not an
+> optional one gated by the `status` feature: the fallback source uses it to date a train by its
+> service day. The resolved graph and the licenses are unchanged. The records below are kept as
+> written.
+
 Provenance recorded so a later task can repeat the queries; documentation text is not copied here.
 The timezone decision was **consulted on Context7 `/chronotope/chrono-tz`** on 2026-08-17 (the
 runtime `FromStr` parse + `DateTime::from_timestamp(..).with_timezone(&tz)` conversion); the other

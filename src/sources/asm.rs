@@ -11,10 +11,11 @@
 //! its service date: the origin date, or the day after for a train whose local evening departure
 //! the schedule writes after midnight Eastern (see `service_day`). A train with no matching active
 //! trip is omitted, so every trip and stop id in the batch resolves against the static feed.
-//! Delays are the map's `variance` values, which are seconds. Positions are in mph, converted to metres per second. A train is
-//! identified as the Amtrak source identifies it ([`crate::sources::identity`]): entity id and
-//! `vehicle.id` `{YYYYMMDD}-{number}` from its origin date, `vehicle.label` the number, on the trip
-//! update and the vehicle position. The map's `name` is the route and is not published.
+//! Delays are the map's `variance` values, which are seconds. Positions are in mph, converted to
+//! metres per second. A train is identified as the Amtrak source identifies it
+//! ([`crate::sources::identity`]): entity id and `vehicle.id` `{YYYYMMDD}-{number}` from its
+//! service date, `vehicle.label` the number, on the trip update and the vehicle position. The
+//! map's `name` is the route and is not published.
 //!
 //! This is a clean-room client written from the endpoint's public JSON, not a copy of any other
 //! project's code. Credit and terms-of-use notes are in the README ("Fallback position source").
