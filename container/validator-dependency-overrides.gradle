@@ -27,6 +27,25 @@ beforeSettings { settings ->
                 excludeModule('pl.allegro.tech.build', 'axion-release-plugin')
             }
         }
+        // badass-jlink-plugin is hosted only on the plugin portal, but the portal answers a request
+        // for its Gradle module metadata with a redirect to Maven Central, which answers 404 when
+        // it is reachable and 429 when it rate-limits the runner; Gradle treats the 429 as fatal.
+        // Read this one plugin's POM from the portal and never ask for its module metadata.
+        // (verification-metadata records its .jar and .pom, not a .module.)
+        maven {
+            name = 'PluginPortalPomOnly'
+            url = 'https://plugins.gradle.org/m2/'
+            metadataSources {
+                mavenPom()
+                artifact()
+                // The POM carries Gradle's published-with-module-metadata marker; without this,
+                // Gradle follows it to the .module and the portal's redirect to Maven Central.
+                ignoreGradleMetadataRedirection()
+            }
+            content {
+                includeModule('org.beryx', 'badass-jlink-plugin')
+            }
+        }
         gradlePluginPortal()
     }
 }
