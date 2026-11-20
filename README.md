@@ -847,7 +847,7 @@ flowchart TD
   maps["maps.amtrak.com getTrainsData"] --> dec["Decrypt in the browser worker"]
   dec --> win["Stops from 10 min past to 30 min ahead"]
   win --> hot["Boarding stop with tracks within 12 min, no track yet"]
-  hot --> first["No document yet: every cycle, first"]
+  hot --> first["No document yet: first, 90s cooldown"]
   hot --> outer["Otherwise: 90s cooldown, 24 fetches max"]
   win --> outer
   first --> browser["One resident headless browser"]
@@ -895,9 +895,10 @@ fleet. A train is hot when a stop within about 12 minutes still has no track, co
 where riders can board (a static `pickup_type` other than 1, so not Route 128 or Back Bay on a
 Boston-bound train) at stations where a track has been published (a station in
 `AMTRAK_TRACKS_PLATFORMS` or `observed-platforms.txt`). A hot train with no status document yet
-is fetched every cycle, ahead of the rest. A hot train that has one, and every other train in the
-window, including one that has just left a stop, rotates with a 90-second cooldown, oldest fetch
-first, and a cycle makes at most 24 fetches. A track Amtrak has shown is kept until
+goes ahead of the rest. A boarding stop at a station where no track has been seen yet still keeps
+its train checked between full polls, so a fresh install polls Providence while it learns where
+Amtrak publishes tracks. Every train, hot or not, waits a 90-second cooldown after Amtrak answers
+for it, oldest fetch first, and a cycle makes at most 24 fetches. A track Amtrak has shown is kept until
 the stop's latest scheduled or predicted time plus `AMTRAK_TRACKS_RETAIN_GRACE_SECS` (default 15
 minutes), including when a later document drops the field after departure.
 

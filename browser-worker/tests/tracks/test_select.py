@@ -4,7 +4,7 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from worker.tracks.lead_time import LeadProfile, StationWindow
-from worker.tracks.select import choose_fetches, due_trains, is_hot
+from worker.tracks.select import choose_fetches, due_trains, is_hot, is_warm
 
 EASTERN = ZoneInfo("America/New_York")
 NOW = datetime(2026, 10, 17, 17, 0, tzinfo=EASTERN)
@@ -107,7 +107,7 @@ def test_a_stop_just_after_arrival_stays_due():
     assert due[0].soonest_secs == 5 * 60
 
 
-def test_hot_trains_are_fetched_every_cycle_and_the_outer_window_waits():
+def test_hot_trains_go_first_and_every_attempt_takes_the_cooldown():
     hot = _feature("167", "10/17/2026 4:25:00 PM", [_station("PVD", scharr="10/17/2026 17:06:00")])
     outer = _feature("66", "10/17/2026 3:00:00 PM", [_station("KIN", scharr="10/17/2026 17:25:00")])
     due = _due([hot, outer])
@@ -117,7 +117,13 @@ def test_hot_trains_are_fetched_every_cycle_and_the_outer_window_waits():
     again = choose_fetches(
         due, just_fetched, NOW + timedelta(seconds=30), hot_secs=12 * 60, cooldown_secs=90, max_fetches=24
     )
-    assert [train.train_number for train in again] == ["167"]
+    assert again == []
+    # A hot pick the browser could not run is not stamped, so it is taken again at once.
+    unfetched = {key: at for key, at in just_fetched.items() if key[0] == "66"}
+    retry = choose_fetches(
+        due, unfetched, NOW + timedelta(seconds=30), hot_secs=12 * 60, cooldown_secs=90, max_fetches=24
+    )
+    assert [train.train_number for train in retry] == ["167"]
     cooled = choose_fetches(
         due, just_fetched, NOW + timedelta(seconds=90), hot_secs=12 * 60, cooldown_secs=90, max_fetches=24
     )
@@ -406,3 +412,57 @@ def test_a_track_on_a_later_stop_outside_the_hot_window_does_not_keep_a_train_ho
     (due,) = due_trains(train, NOW, before=BEFORE, after=AFTER)
     assert not is_hot(due, {due.key: frozenset({"PVD"})}, 720)
     assert is_hot(due, {due.key: frozenset({"NHV"})}, 720)
+
+
+def test_hot_trains_rejected_last_cycle_wait_out_the_cooldown():
+    # 30 hot trains got a 404 or an empty answer 60 s ago: stamped, still no document. Within the
+    # cooldown they must not take every slot from a ready train that has not been fetched.
+    trains = {str(number): [("NYP", 60 + number * 10, True)] for number in range(1, 31)}
+    trains["66"] = [("NYP", 1500, True)]
+    due = due_trains(_fleet_trains(trains), NOW, before=BEFORE, after=AFTER)
+    fetched = {train.key: NOW.timestamp() - 60 for train in due if train.train_number != "66"}
+    picks = choose_fetches(due, fetched, NOW, hot_secs=720, cooldown_secs=90, max_fetches=24)
+    assert [train.train_number for train in picks] == ["66"]
+    later = choose_fetches(
+        due, fetched, NOW + timedelta(seconds=30), hot_secs=720, cooldown_secs=90, max_fetches=24
+    )
+    assert len(later) == 24
+    assert later[0].train_number == "1"
+
+
+def test_a_boarding_stop_at_a_station_not_yet_listed_is_warm_not_hot():
+    # A fresh install lists only the seeded stations. Providence, 8 minutes out, has no observed
+    # platform yet, so it cannot make the train hot, but it keeps the train in the hot checks.
+    seeded = ["NYP", "NWK", "NHV"]
+    (train,) = due_trains(
+        _fleet_trains({"172": [("PVD", 480, True)]}, track_stations=seeded),
+        NOW,
+        before=BEFORE,
+        after=AFTER,
+    )
+    assert not is_hot(train, {}, 720)
+    assert is_warm(train, {}, 720)
+    assert not is_warm(train, {train.key: frozenset({"PVD"})}, 720)
+    (far,) = due_trains(
+        _fleet_trains({"172": [("PVD", 1200, True)]}, track_stations=seeded),
+        NOW,
+        before=BEFORE,
+        after=AFTER,
+    )
+    assert not is_warm(far, {}, 720)
+    (deboard,) = due_trains(
+        _fleet_trains({"172": [("RTE", 480, False)]}, track_stations=seeded),
+        NOW,
+        before=BEFORE,
+        after=AFTER,
+    )
+    assert not is_warm(deboard, {}, 720)
+    # A listed station keeps the hot rule, and without a list every station is already hot.
+    (listed,) = due_trains(
+        _fleet_trains({"172": [("NHV", 480, True)]}, track_stations=seeded),
+        NOW,
+        before=BEFORE,
+        after=AFTER,
+    )
+    assert is_hot(listed, {}, 720)
+    assert not is_warm(listed, {}, 720)

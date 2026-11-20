@@ -60,16 +60,21 @@ they never share cookies or pages.
   stations where a track has been published count: the train list's `track_stations`, the
   stations in `AMTRAK_TRACKS_PLATFORMS` or `observed-platforms.txt`. A list without these fields
   (from an older service, or the map feed) counts every stop.
-- Each cycle takes, in order: hot trains with no document yet, soonest first, every cycle; hot
-  trains that have a document, once `TRACK_COOLDOWN_SECS` (default 90 seconds) has passed since
-  their last attempt, oldest first; then every other due train, including one that has just left
-  a stop, under the same cooldown, oldest first. Trains named in an early-refresh hint skip the
-  cooldown and go first within their group. A fetch Amtrak answered counts as an attempt, even a
-  rejected one; a pick the browser could not run does not. Each cycle fetches at most
-  `MAX_FETCHES_PER_CYCLE` trains (default 24).
+- A train is warm when a boarding stop inside its hot window, at a station not yet in
+  `track_stations`, has no track in its last document. On a fresh install only the seeded
+  stations are listed, so this keeps Providence or Washington checked while the service learns
+  where Amtrak publishes tracks. A warm train is not hot: it takes the cooldown like any other
+  train.
+- Each cycle takes, in order: hot trains with no document yet, soonest first; hot trains that
+  have a document, oldest attempt first; then every other due train, including a warm one or one
+  that has just left a stop, oldest attempt first. Every group waits `TRACK_COOLDOWN_SECS`
+  (default 90 seconds) after an attempt. Trains named in an early-refresh hint skip the cooldown
+  and go first within their group. A fetch Amtrak answered counts as an attempt, even a rejected
+  one; a pick the browser could not run does not, so it is taken again on the next cycle. Each
+  cycle fetches at most `MAX_FETCHES_PER_CYCLE` trains (default 24).
 - Full polls run every `AMTRAK_TRACKS_BASE_INTERVAL_SECS` (default 900). Between them, each
-  `POLL_INTERVAL_SECS` cycle fetches only hot trains and trains named in the service's early
-  refresh hints.
+  `POLL_INTERVAL_SECS` cycle fetches only hot and warm trains and trains named in the service's
+  early refresh hints.
 - Arizona stations use `America/Phoenix` (no daylight saving time), although the train feed
   labels them Mountain.
 - Image, font, stylesheet, and media requests are blocked, and so is every host outside
@@ -141,8 +146,8 @@ Tracks:
 | `AMTRAK_TRACKS_BASE_INTERVAL_SECS` | `900` | Seconds between full polls |
 | `TRACK_WINDOW_BEFORE_SECS` | `1800` | How far ahead a stop's ETA may be |
 | `TRACK_WINDOW_AFTER_SECS` | `600` | How recently a stop may have passed and still be fetched |
-| `TRACK_HOT_WINDOW_SECS` | `720` | Closest stop within this many seconds is fetched every cycle |
-| `TRACK_COOLDOWN_SECS` | `90` | Minimum gap before the same outer-window train is fetched again |
+| `TRACK_HOT_WINDOW_SECS` | `720` | A boarding stop within this many seconds that has no track makes the train hot (or warm) |
+| `TRACK_COOLDOWN_SECS` | `90` | Minimum gap before the same train is fetched again, unless a hint names it |
 | `MAX_FETCHES_PER_CYCLE` | `24` | Cap on status requests per cycle |
 | `AMTRAK_TRACKS_LEAD_TIME_FILE` | empty | `amtrak-station-lead-time/v1` profile; see [Station coverage](#station-coverage) |
 | `DOCUMENT_TTL_SECS` | `7200` | How long a fetched document stays in `/tracks.json` |

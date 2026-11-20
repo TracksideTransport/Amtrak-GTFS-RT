@@ -29,7 +29,7 @@ from ..browser import LAUNCH_ARGS, Lease, SharedBrowser, describe_error
 from .config import Config
 from .decrypt import DecryptError, decrypt_payload
 from .lead_time import LeadProfile
-from .select import FLEET_TRAINS_SCHEMA, DueTrain, choose_fetches, due_trains, is_hot
+from .select import FLEET_TRAINS_SCHEMA, DueTrain, choose_fetches, due_trains, is_hot, is_warm
 from .store import TrackStore
 
 logger = logging.getLogger(__name__)
@@ -339,12 +339,16 @@ async def poll_once(
     )
     early, early_stations = take_early_hints()
     if not full:
+        # Between full polls: hinted trains, hot trains, and warm ones (a boarding stop at a
+        # station with no track seen yet), which then take the cooldown like any ready train.
+        known = store.tracked()
         due = [
             train
             for train in due
             if train.train_number in early
             or train.upcoming & early_stations
-            or is_hot(train, store.tracked(), cfg.hot_window_secs)
+            or is_hot(train, known, cfg.hot_window_secs)
+            or is_warm(train, known, cfg.hot_window_secs)
         ]
     due_keys = {train.key for train in due}
     for key in [key for key in last_fetched if key not in due_keys]:

@@ -15,13 +15,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Providence, and after a restart none again until Route 128 was about 6 minutes away. A train
   whose remaining stops are deboard-only (Route 128 and Back Bay toward Boston) or at stations
   that never show a track also stayed hot until its last stop, taking a slot every cycle. Hot
-  trains with no document now go first every cycle; a hot train that already has one waits out
-  `TRACK_COOLDOWN_SECS` like every other train, oldest fetch first. A train is now hot only for a
-  stop inside the hot window where riders can board and Amtrak has published a track:
-  `fleet-trains.json` marks a stop with static `pickup_type` 1 `"boarding": false`, and lists the
-  stations with a configured or observed platform as `track_stations`. Both fields are optional
-  and the schema stays `amtrak-fleet-trains/v1`; a list without them counts every stop, as
-  before. A browser failure mid-cycle no longer marks the trains it left unfetched as attempted,
+  trains with no document now go first; every train, hot or not, waits out `TRACK_COOLDOWN_SECS`
+  after Amtrak answers for it (even with a 404 or an empty answer), oldest fetch first. A train is
+  now hot only for a stop inside the hot window where riders can board and Amtrak has published a
+  track: `fleet-trains.json` marks a stop with static `pickup_type` 1 `"boarding": false`, and
+  lists the stations with a configured or observed platform as `track_stations`. A boarding stop
+  inside the hot window at a station not yet listed (on a fresh install, everything but the seeded
+  New York, Newark, and New Haven) still keeps the train checked between full polls, under the
+  cooldown. Both fields are optional and the schema stays `amtrak-fleet-trains/v1`; a list without
+  them counts every stop, as before. A browser failure mid-cycle no longer marks the trains it left unfetched as attempted,
   so they go first on the next cycle. Each cycle also logs one INFO line naming every pick,
   whether it was hot or ready, and its outcome, for example `track poll picks: 172 hot stored, 86
   hot rejected (http 404), 95 hot browser unavailable (Error), 66 ready skipped (browser

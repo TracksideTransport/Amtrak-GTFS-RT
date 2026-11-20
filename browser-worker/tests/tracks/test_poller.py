@@ -672,3 +672,50 @@ def test_each_cycle_logs_its_picks_with_their_outcomes(caplog):
         "95 hot browser unavailable (Error), 66 ready skipped (browser unavailable)"
     ) in lines
     assert any(line.startswith("track poll due=5 picked=5 stored=1 ") for line in lines)
+
+
+def test_a_fresh_install_still_checks_a_boarding_stop_at_an_unobserved_station():
+    # track_stations holds only the seeded stations. Providence is 8 minutes out and has no
+    # observed platform yet; v0.8.0 fetched such a train every minute, so a hot check between
+    # full polls must still pick it once its cooldown has passed.
+    document = {
+        "schema": "amtrak-fleet-trains/v1",
+        "track_stations": ["NHV", "NWK", "NYP"],
+        "trains": [
+            {
+                "train_number": "172",
+                "service_date": "2026-10-17",
+                "stops": [{"code": "PVD", "times_unix": [int((NOW + timedelta(minutes=8)).timestamp())]}],
+            },
+            {
+                "train_number": "174",
+                "service_date": "2026-10-17",
+                "stops": [
+                    {"code": "RTE", "boarding": False,
+                     "times_unix": [int((NOW + timedelta(minutes=8)).timestamp())]}
+                ],
+            },
+        ],
+    }
+    fetched: list[str] = []
+
+    async def trains(_cfg):
+        return document
+
+    async def status(_cfg, train):
+        fetched.append(train.train_number)
+        raise StatusMiss("http 404")
+
+    last_fetched: dict = {}
+
+    def check(at):
+        fetched.clear()
+        asyncio.run(
+            poll_once(TrackStore(), Config(), last_fetched, now=at, trains_fetcher=trains,
+                      status_fetcher=status, full=False)
+        )
+        return list(fetched)
+
+    assert check(NOW) == ["172"]
+    assert check(NOW + timedelta(seconds=60)) == []
+    assert check(NOW + timedelta(seconds=90)) == ["172"]

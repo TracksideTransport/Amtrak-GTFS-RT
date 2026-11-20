@@ -5,10 +5,14 @@ station (Providence showed track 1 about eight minutes before train 167 arrived)
 publish earlier, and that value is already on the document once the train enters the window, so
 polling trains with a stop near its ETA collects both kinds. A train is hot when a stop where
 riders board, at a station where Amtrak publishes tracks, is inside the hot window and still has
-no track in its last document. A hot train with no document yet is fetched every cycle; one that
-has a document waits out the cooldown like the rest, so more hot trains than the per-cycle cap
-cannot starve the others. Every other due train, including one that has just left a stop, is
-rotated under that cooldown so a busy hour does not fetch every active train every minute.
+no track in its last document. A hot train with no document yet is fetched every cycle unless
+it was just tried; one that has a document waits out the cooldown like the rest, so more hot
+trains than the per-cycle cap cannot starve the others. A boarding stop inside the hot window at
+a station where no track has been seen yet makes a train warm: it is not hot, but it is checked
+between full polls under the cooldown, so a fresh install still polls Providence or Washington
+while it learns where Amtrak publishes tracks. Every other due train, including one that has
+just left a stop, is rotated under that cooldown so a busy hour does not fetch every active train
+every minute.
 """
 
 from __future__ import annotations
@@ -53,7 +57,8 @@ class DueTrain:
     in-window event is already past. ``upcoming`` holds the codes of the stations those future
     events belong to. ``track_stops`` are the upcoming stops that can make the train hot (see
     :func:`is_hot`): a stop where riders cannot board, or at a station not in the train list's
-    ``track_stations``, is left out.
+    ``track_stations``, is left out. ``unlisted_stops`` are the upcoming boarding stops at
+    stations not in ``track_stations``; they can make the train warm (see :func:`is_warm`).
     """
 
     train_number: str
@@ -62,6 +67,7 @@ class DueTrain:
     next_secs: float | None = None
     upcoming: frozenset[str] = frozenset()
     track_stops: tuple[TrackStop, ...] = ()
+    unlisted_stops: tuple[TrackStop, ...] = ()
 
     @property
     def key(self) -> tuple[str, str]:
@@ -98,6 +104,7 @@ def due_trains(
         ahead: list[float] = []
         upcoming: set[str] = set()
         track_stops: list[TrackStop] = []
+        unlisted_stops: list[TrackStop] = []
         for code, moments, boarding in stops:
             station_before = (
                 lead.before_secs(code, before_secs) if lead is not None else before_secs
@@ -115,13 +122,18 @@ def due_trains(
             if code is None:
                 continue
             upcoming.add(code)
-            if boarding and (track_stations is None or code in track_stations):
-                station_hot = (
-                    lead.hot_secs(code, default_hot)
-                    if lead is not None and default_hot is not None
-                    else None
-                )
-                track_stops.append(TrackStop(code, min(stop_ahead), station_hot))
+            if not boarding:
+                continue
+            station_hot = (
+                lead.hot_secs(code, default_hot)
+                if lead is not None and default_hot is not None
+                else None
+            )
+            stop = TrackStop(code, min(stop_ahead), station_hot)
+            if track_stations is None or code in track_stations:
+                track_stops.append(stop)
+            else:
+                unlisted_stops.append(stop)
         if not distances:
             continue
         train = DueTrain(
@@ -131,6 +143,7 @@ def due_trains(
             min(ahead) if ahead else None,
             frozenset(upcoming),
             tuple(track_stops),
+            tuple(unlisted_stops),
         )
         current = found.get(train.key)
         if current is None or train.soonest_secs < current.soonest_secs:
@@ -213,11 +226,24 @@ def is_hot(train: DueTrain, tracked: Mapping[tuple[str, str], frozenset[str]], h
     ``hot_secs``. Stops where riders cannot board, and stations where Amtrak has never published
     a track, are not track stops (see :class:`DueTrain`), so they never keep a train hot.
     """
-    known = tracked.get(train.key, frozenset())
+    return _awaits_track(train.track_stops, tracked.get(train.key, frozenset()), hot_secs)
+
+
+def is_warm(train: DueTrain, tracked: Mapping[tuple[str, str], frozenset[str]], hot_secs: float) -> bool:
+    """Whether a boarding stop at a station with no track seen yet is inside its hot window.
+
+    Such a station is not in the train list's ``track_stations`` (no configured or observed
+    platform), so it cannot make the train hot. It still keeps the train in the checks between
+    full polls, under the cooldown, until the station is observed or the stop has a track.
+    """
+    return _awaits_track(train.unlisted_stops, tracked.get(train.key, frozenset()), hot_secs)
+
+
+def _awaits_track(stops: tuple[TrackStop, ...], known: frozenset[str], hot_secs: float) -> bool:
     return any(
         stop.code not in known
         and stop.secs <= (hot_secs if stop.hot_secs is None else stop.hot_secs)
-        for stop in train.track_stops
+        for stop in stops
     )
 
 
@@ -239,11 +265,13 @@ def choose_fetches(
 ) -> list[DueTrain]:
     """Pick at most ``max_fetches`` trains, in this order.
 
-    1. Hot trains (see :func:`is_hot`) with no stored document, every cycle. One attempted within
-       ``cooldown_secs`` goes after the rest, then soonest track stop first.
+    1. Hot trains (see :func:`is_hot`) with no stored document, soonest track stop first. One
+       attempted within ``cooldown_secs`` (Amtrak answered, but with no usable document) waits;
+       a pick the browser could not run was never stamped, so it is taken again at once.
     2. Hot trains that have a document, once their cooldown has passed: oldest attempt first,
        then soonest track stop.
-    3. Every other due train once its cooldown has passed, oldest attempt first.
+    3. Every other due train once its cooldown has passed, oldest attempt first. A warm train
+       (see :func:`is_warm`) is one of these.
 
     ``tracked`` maps a train-day with a stored document to the station codes that already show a
     track in it. ``hinted`` train-days were named by an early-refresh hint. The service already
@@ -265,14 +293,14 @@ def choose_fetches(
     for train in due:
         if is_hot(train, tracked, hot_secs):
             if train.key not in tracked:
-                new_hot.append(train)
+                if cooled(train):
+                    new_hot.append(train)
             elif cooled(train):
                 stored_hot.append(train)
         elif cooled(train):
             ready.append(train)
     new_hot.sort(
         key=lambda train: (
-            not cooled(train),
             _hot_secs(train, hot_secs),
             train.train_number,
             train.service_date,
