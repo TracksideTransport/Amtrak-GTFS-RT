@@ -75,6 +75,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   on `asm-` entity ids or read `vehicle.label` as a route name must change; see "Consumer
   migration" in the README. Consumers that read the train number from `trip_short_name` are not
   affected (#122).
+- **`AMTRAK_FILTER_CAPITAL_CORRIDOR` applies to the fallback.** The filter wrapped only the
+  Amtrak source, so with it on, a generation built from `transitdocs-asm` still published Capitol
+  Corridor (route `84`) trip updates and vehicle positions. The fallback is now filtered the same
+  way.
 - **Observed tracks reach `static.zip` while the service runs.** A static snapshot built
   from the configured platforms alone no longer counts as current once a track is observed, so the
   rebuild downloads `GTFS.zip` in full instead of accepting a `304`. Before, observed platforms were
