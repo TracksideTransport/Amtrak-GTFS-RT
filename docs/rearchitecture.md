@@ -169,7 +169,7 @@ Environment variables in the root README (static URL, poll and refresh intervals
 
 Persistence and recovery: last-good generation on startup, atomic publish, static dedup, retention window (600s), count cap (20), byte budget (256 MiB). Readiness and liveness stay separate so Docker does not restart a process that is waiting for a first good generation.
 
-Validation: `./scripts/validate-feeds.sh` runs MobilityData's static validator and gtfs-realtime-validator. CI workflow `.github/workflows/validate-feeds.yml` runs that daily at 09:17 UTC, on pipeline pushes, and on demand. New realtime ERROR codes fail unless listed in `validation/baseline.json`. Current baseline codes are E003, E004, E011, E022, E025, E029, E035, E039, E041, E043, E049, mostly trains or stations that exist in the live feed and not in the published schedule. Static ERROR count is gated at zero. `scripts/test-container.sh` is the image smoke test. Release gates (weekly Monday 08:41 UTC, plus image-input PRs) scan the service image.
+Validation: `./scripts/validate-feeds.sh` runs MobilityData's static validator and gtfs-realtime-validator. CI workflow `.github/workflows/validate-feeds.yml` runs that daily at 09:17 UTC, on pipeline pushes, and on demand. New realtime ERROR codes fail unless listed in `validation/baseline.json`. Current baseline codes are E022, E025, E029: upstream estimate ordering and vehicle positions far from the trip shape. Static ERROR count is gated at zero. `scripts/test-container.sh` is the image smoke test. Release gates (weekly Monday 08:41 UTC, plus image-input PRs) scan the service image.
 
 ## `piemadd/amtrak` compared with this repo
 

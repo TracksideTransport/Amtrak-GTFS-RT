@@ -15,70 +15,22 @@
   "realtime": {
     "allowed_errors": [
       {
-        "code": "E003",
-        "upstream_cause": "Amtrak operates extra sections and trains absent from the published schedule.",
-        "owner": "amtrak-gtfs-rt maintainers",
-        "review_on": "2026-12-05"
-      },
-      {
-        "code": "E004",
-        "upstream_cause": "Realtime route identifiers accompany trips absent from the published schedule.",
-        "owner": "amtrak-gtfs-rt maintainers",
-        "review_on": "2026-12-05"
-      },
-      {
-        "code": "E011",
-        "upstream_cause": "Live data references stations missing from the static feed.",
-        "owner": "amtrak-gtfs-rt maintainers",
-        "review_on": "2026-12-05"
-      },
-      {
         "code": "E022",
         "upstream_cause": "Upstream Amtrak estimates are not always temporally increasing.",
         "owner": "amtrak-gtfs-rt maintainers",
-        "review_on": "2026-12-05"
+        "review_on": "2026-12-31"
       },
       {
         "code": "E025",
         "upstream_cause": "Upstream Amtrak estimates can place departure before arrival.",
         "owner": "amtrak-gtfs-rt maintainers",
-        "review_on": "2026-12-05"
+        "review_on": "2026-12-31"
       },
       {
         "code": "E029",
-        "upstream_cause": "Vehicle coordinates can be far from the published trip shape.",
+        "upstream_cause": "Vehicle coordinates can be far from the published trip shape. Observed in the 2026-11-18 live run: trip-end positions 25 m from the first stop (Pacific Surfliner 595) and 2.1 km from the last stop (Texas Eagle 21), which is MobilityData/gtfs-realtime-validator#72; a Capitol Corridor 548 position 29 m from Suisun-Fairfield where Amtrak shape 59 passes more than 200 m from that station; and City of New Orleans 58 10.6 km from Memphis on the Arkansas side.",
         "owner": "amtrak-gtfs-rt maintainers",
-        "review_on": "2026-12-05"
-      },
-      {
-        "code": "E035",
-        "upstream_cause": "Upstream trip and route matching can disagree with the static schedule.",
-        "owner": "amtrak-gtfs-rt maintainers",
-        "review_on": "2026-12-05"
-      },
-      {
-        "code": "E039",
-        "upstream_cause": "The legacy transform retained deletion markers in a FULL_DATASET feed. Re-check after three-container deploy.",
-        "owner": "amtrak-gtfs-rt maintainers",
-        "review_on": "2026-12-05"
-      },
-      {
-        "code": "E041",
-        "upstream_cause": "The legacy transform emitted trains with no remaining predicted stops. Re-check after three-container deploy.",
-        "owner": "amtrak-gtfs-rt maintainers",
-        "review_on": "2026-12-05"
-      },
-      {
-        "code": "E043",
-        "upstream_cause": "Some upstream stop updates omit both arrival and departure predictions.",
-        "owner": "amtrak-gtfs-rt maintainers",
-        "review_on": "2026-12-05"
-      },
-      {
-        "code": "E049",
-        "upstream_cause": "The legacy transform omitted explicit feed incrementality. Re-check after three-container deploy.",
-        "owner": "amtrak-gtfs-rt maintainers",
-        "review_on": "2026-12-05"
+        "review_on": "2026-12-31"
       }
     ]
   }
