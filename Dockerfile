@@ -96,10 +96,21 @@ RUN --mount=type=cache,target=/root/.gradle \
     git add --all && \
     git commit --quiet --message 'pinned MobilityData v8.0.1 source' && \
     git tag v8.0.1 && \
-    ./gradlew --no-daemon \
-      --dependency-verification=strict \
-      --init-script /opt/amtrak/validator-dependency-overrides.gradle \
-      test :cli:shadowJar && \
+    # Maven Central and the Gradle plugin portal sometimes answer a cold cache with errors that
+    # Gradle reports as "Could not find". Retry the build up to three times; later attempts
+    # refresh dependencies so a cached miss is not reused. Strict verification and the JAR digest
+    # below still decide which bytes are accepted.
+    attempt=1 && \
+    until ./gradlew --no-daemon \
+        --dependency-verification=strict \
+        --init-script /opt/amtrak/validator-dependency-overrides.gradle \
+        $( [ "$attempt" -gt 1 ] && echo --refresh-dependencies ) \
+        test :cli:shadowJar; do \
+      if [ "$attempt" -ge 3 ]; then echo "validator build failed after $attempt attempts" >&2; exit 1; fi; \
+      echo "validator build attempt $attempt failed; retrying in $((attempt * 30))s" >&2; \
+      sleep $((attempt * 30)); \
+      attempt=$((attempt + 1)); \
+    done && \
     echo "30de704a8fbd0a81e119f3afa45eaa158fd224275659bc4d3685b3156c443b64  cli/build/libs/gtfs-validator-8.0.1-cli.jar" \
       | sha256sum --check --strict && \
     mkdir -p /out && \
