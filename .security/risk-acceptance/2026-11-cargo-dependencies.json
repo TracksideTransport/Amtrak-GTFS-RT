@@ -54,7 +54,7 @@
       "approval": "Approved 2026-11-18 by the repository owner, who replied \"approve\" in conversation to this exact sentence: I explicitly accept the documented sixteen-warning Cargo dependency risk in .security/risk-acceptance/2026-11-cargo-dependencies.md through 2027-02-12."
     },
     "RUSTSEC-2026-0543": {
-      "mitigation": "chrono 0.4.45 is linked through the amtrak-gtfs-rt (catenary) crate for time arithmetic. The advisory is an unmaintained notice with no vulnerability claim and no fix, and no maintained same-chain replacement exists. Controls and review triggers are in 2026-11-cargo-dependencies.md.",
+      "mitigation": "chrono 0.4.45 is linked by this crate and by gtfs-structures 0.46.1 for time arithmetic (the catenary crate dropped its direct use in 0.10, #171). The advisory is an unmaintained notice with no vulnerability claim and no fix; gtfs-structures keeps chrono in the build regardless of this crate. Controls and review triggers are in 2026-11-cargo-dependencies.md.",
       "approval": "Approved 2026-11-18 by the repository owner, who replied \"approve\" in conversation to this exact sentence: I explicitly accept the documented sixteen-warning Cargo dependency risk in .security/risk-acceptance/2026-11-cargo-dependencies.md through 2027-02-12."
     },
     "RUSTSEC-2026-0545": {
@@ -62,7 +62,7 @@
       "approval": "Approved 2026-11-18 by the repository owner, who replied \"approve\" in conversation to this exact sentence: I explicitly accept the documented sixteen-warning Cargo dependency risk in .security/risk-acceptance/2026-11-cargo-dependencies.md through 2027-02-12."
     },
     "RUSTSEC-2026-0555": {
-      "mitigation": "chrono-tz 0.10.4 is linked through the amtrak-gtfs-rt (catenary) crate for time-zone tables. The advisory is an unmaintained notice with no vulnerability claim and no fix, and no maintained same-chain replacement exists. Controls and review triggers are in 2026-11-cargo-dependencies.md.",
+      "mitigation": "chrono-tz 0.10.4 is linked only by this crate, for the fallback source's and the status CLI's time-zone tables (the catenary crate moved to jiff in 0.10, #171). The advisory is an unmaintained notice with no vulnerability claim and no fix. jiff, now in the build through the catenary crate, could replace this use; until then this acceptance applies. Controls and review triggers are in 2026-11-cargo-dependencies.md.",
       "approval": "Approved 2026-11-18 by the repository owner, who replied \"approve\" in conversation to this exact sentence: I explicitly accept the documented sixteen-warning Cargo dependency risk in .security/risk-acceptance/2026-11-cargo-dependencies.md through 2027-02-12."
     },
     "RUSTSEC-2026-0574": {

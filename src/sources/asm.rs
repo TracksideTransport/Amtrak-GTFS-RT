@@ -468,7 +468,16 @@ mod tests {
             // An Eastern origin: both dates are the departure's own date.
             (172, "11/17/2026 6:00:00 AM", 'E', "20261117-172"),
         ] {
-            let origin = amtrak_gtfs_rt::origin_departure(origin_text, zone);
+            // The crate returns a `jiff::Timestamp` since 0.10; this crate reasons in chrono.
+            let origin = chrono::DateTime::from_timestamp(
+                amtrak_gtfs_rt::origin_departure(origin_text, zone).as_second(),
+                0,
+            )
+            .unwrap();
+            let origin_zone = match zone {
+                'P' => chrono_tz::America::Los_Angeles,
+                _ => chrono_tz::America::New_York,
+            };
             let primary_date = origin
                 .with_timezone(&chrono_tz::America::New_York)
                 .date_naive()
@@ -485,7 +494,11 @@ mod tests {
             };
             identify(&mut primary);
 
-            let origin_date = origin.date_naive().format("%Y-%m-%d").to_string();
+            let origin_date = origin
+                .with_timezone(&origin_zone)
+                .date_naive()
+                .format("%Y-%m-%d")
+                .to_string();
             let asm = train(number, json!({"origin_date": origin_date, "stops": []}));
             let fallback = batch_from_map(&json!([asm]), &eastern_gtfs(), NOW);
             assert_eq!(fallback.trip_updates.entity.len(), 1, "{number}");

@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **The catenary crate is updated from 0.9.1 (`f3a83db`) to 0.10.1 (`dd6f9ef`)** (#171). It
+  matches each Amtrak train to its static trip by scheduled origin departure and GTFS service day,
+  and respects calendar removals. Compared with 0.9.1 on the same live data and static feed
+  (2026-11-20, 137 trains):
+  - **`start_date` and the entity id use the trip's GTFS service day.** A train that runs past
+    midnight Eastern on a trip that began the day before (for example 448, Chicago to Boston,
+    seen from Albany) now carries the earlier date: `20261119-448`, not `20261120-448`. The
+    fallback source also dates a train by its trip's GTFS service day.
+  - **`route_id` comes from the matched trip.** Trains 486 (Valley Flyer), 63 and 64 (Maple Leaf)
+    were published with another route's id, and the feed dropped them for the mismatch. They are
+    now published.
+  - **More trains are matched.** 2 (Sunset Limited) now matches its trip. In that sample the
+    published feed went from 127 to 130 trains.
+  - **Known regression: Amtrak Cascades trains from Vancouver BC.** 0.10.1 reads Amtrak's `VAC`
+    times as Pacific, but Amtrak reports them in Mountain time, which matches the static
+    schedule. So the trains miss their trip by an hour and are left out (train 517 in the
+    sample).
+  - **Gold Runner trains are still left out.** 0.9.1 gave them trip ids such as `701` that are not
+    in the static feed, and the feed dropped them. 0.10.1 gives them no trip id.
+- **The catenary crate logs more per unmatched train.** It writes `Amtrak schedule match failed`
+  diagnostics to stderr and `Possible trips for this train` lines to stdout. These lines come
+  from the dependency, not this service.
+
 ## [0.9.0] - 2026-11-20
 
 One vehicle identity for a train across both realtime sources, explicit schedule relationships,

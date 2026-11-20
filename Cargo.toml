@@ -32,8 +32,8 @@ csv = "1.4"
 # resolved at this version through gtfs-structures; previously only a dev-dependency.
 zip = { version = "6.0", default-features = false, features = ["deflate"] }
 # Station local time with DST: the fallback source dates a train by its local departure at the
-# origin, and the status CLI renders per-station times. Already linked into the service through
-# `amtrak-gtfs-rt`, which dates the primary source's trains with it, so it adds no crate.
+# origin, and the status CLI renders per-station times. Since 0.10 the catenary crate dates trains
+# with `jiff` instead, so `chrono-tz` is this crate's own (`chrono` also comes via gtfs-structures).
 chrono-tz = "0.10"
 chrono = "0.4"
 # HTML parsing for the best-effort Service Alerts & Notices advisory scraper and the Hartford Line
