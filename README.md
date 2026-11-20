@@ -846,9 +846,11 @@ track change.
 flowchart TD
   maps["maps.amtrak.com getTrainsData"] --> dec["Decrypt in the browser worker"]
   dec --> win["Stops from 10 min past to 30 min ahead"]
-  win --> hot["Next stop within 12 min, no track yet: every cycle"]
-  win --> outer["Otherwise: 90s cooldown, 24 fetches max"]
-  hot --> browser["One resident headless browser"]
+  win --> hot["Boarding stop with tracks within 12 min, no track yet"]
+  hot --> first["No document yet: every cycle, first"]
+  hot --> outer["Otherwise: 90s cooldown, 24 fetches max"]
+  win --> outer
+  first --> browser["One resident headless browser"]
   outer --> browser
   browser --> status["Status JSON for that train-day"]
   status --> snap["/tracks.json"]
@@ -889,9 +891,13 @@ On 2026-10-17 the app showed track 1 at Providence for train 167 about ten minut
 (`arrival.track.number` `1`, `asOf` 16:57, scheduled 17:06). Some stations publish hours earlier,
 and that value is already on the document once the train is near the stop, so the worker polls
 trains with a stop inside a 30-minute lookahead and a 10-minute lookback instead of the whole
-fleet. A train whose next stop is within about 12 minutes and still has no track is fetched every
-cycle; every other train in the window, including one that has just left a stop, rotates with a
-90-second cooldown, and a cycle makes at most 24 fetches. A track Amtrak has shown is kept until
+fleet. A train is hot when a stop within about 12 minutes still has no track, counting only stops
+where riders can board (a static `pickup_type` other than 1, so not Route 128 or Back Bay on a
+Boston-bound train) at stations where a track has been published (a station in
+`AMTRAK_TRACKS_PLATFORMS` or `observed-platforms.txt`). A hot train with no status document yet
+is fetched every cycle, ahead of the rest. A hot train that has one, and every other train in the
+window, including one that has just left a stop, rotates with a 90-second cooldown, oldest fetch
+first, and a cycle makes at most 24 fetches. A track Amtrak has shown is kept until
 the stop's latest scheduled or predicted time plus `AMTRAK_TRACKS_RETAIN_GRACE_SECS` (default 15
 minutes), including when a later document drops the field after departure.
 

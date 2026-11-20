@@ -53,12 +53,20 @@ they never share cookies or pages.
   stop between `TRACK_WINDOW_AFTER_SECS` in the past and `TRACK_WINDOW_BEFORE_SECS` in the future
   (default 10 minutes back and 30 minutes ahead). An estimated time replaces the scheduled time.
   Bus stops are ignored.
-- A train is hot when its next stop is inside `TRACK_HOT_WINDOW_SECS` (default 12 minutes) and
-  one of its upcoming stops in the window has no track in its last document. Hot trains are
-  fetched every cycle, soonest first. Every other due train, including one that has just left a
-  stop, is rotated, and a train attempted within `TRACK_COOLDOWN_SECS` (default 90 seconds)
-  waits; a failed attempt counts. Each cycle fetches at most `MAX_FETCHES_PER_CYCLE` trains
-  (default 24).
+- A train is hot when one of its upcoming stops is inside `TRACK_HOT_WINDOW_SECS` (default 12
+  minutes, or the station's own hot window from a lead-time profile) and has no track in its last
+  document. Only stops where riders can board count: the train list marks a stop with static
+  `pickup_type` 1 `"boarding": false` (Route 128 and Back Bay on Boston-bound trains). Only
+  stations where a track has been published count: the train list's `track_stations`, the
+  stations in `AMTRAK_TRACKS_PLATFORMS` or `observed-platforms.txt`. A list without these fields
+  (from an older service, or the map feed) counts every stop.
+- Each cycle takes, in order: hot trains with no document yet, soonest first, every cycle; hot
+  trains that have a document, once `TRACK_COOLDOWN_SECS` (default 90 seconds) has passed since
+  their last attempt, oldest first; then every other due train, including one that has just left
+  a stop, under the same cooldown, oldest first. Trains named in an early-refresh hint skip the
+  cooldown and go first within their group. A fetch Amtrak answered counts as an attempt, even a
+  rejected one; a pick the browser could not run does not. Each cycle fetches at most
+  `MAX_FETCHES_PER_CYCLE` trains (default 24).
 - Full polls run every `AMTRAK_TRACKS_BASE_INTERVAL_SECS` (default 900). Between them, each
   `POLL_INTERVAL_SECS` cycle fetches only hot trains and trains named in the service's early
   refresh hints.
@@ -69,9 +77,11 @@ they never share cookies or pages.
   status page is recycled every `BROWSER_MAX_AGE_SECS`.
 - A browser failure (crash, launch failure, or a hung fetch) ends that cycle's fetches. The next
   launch waits 1 minute, doubling up to `RELAUNCH_BACKOFF_MAX_SECS`, and the wait resets after a
-  successful fetch.
+  successful fetch. The trains the cycle did not fetch keep their place and go first next time.
 - Each cycle logs `due=`, `picked=`, `stored=`, and `rejected=` with the reason per train (for
-  example `{'http 403': 3}`), so an Akamai block is visible in the logs.
+  example `{'http 403': 3}`), so an Akamai block is visible in the logs. A line before it names
+  every pick, whether it was hot or ready, and its outcome, for example
+  `track poll picks: 172 hot stored, 86 hot rejected (http 404), 95 hot browser unavailable (Error), 66 ready skipped (browser unavailable)`.
 - `/tracks.json` is the latest documents (`200`), each with `fetchedAt`, the time it was read
   from Amtrak. It is `503` when no poll has succeeded or the last success is older than
   `MAX_STALE_SECS`. A poll succeeds only when it had nothing to fetch or stored at least one
