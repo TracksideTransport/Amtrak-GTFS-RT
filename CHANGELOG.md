@@ -66,6 +66,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   documents are pruned every cycle, not only when `/tracks.json` is read. This fixes the cause
   found for #118; confirmation that a built image stays under 1 GiB through 24 hours on defaults,
   notices peaks included, is still pending (#118).
+- **The fallback names a train as the Amtrak source does.** A generation built from
+  `transitdocs-asm` gave every vehicle its route name as `vehicle.label` (`Northeast Regional`),
+  put the bare train number in `vehicle.id`, and used entity ids such as `asm-172-20261119`, so
+  a train's identity changed whenever the source did. The fallback now uses the Amtrak source's
+  scheme: entity id and `vehicle.id` `20261119-172` (origin date and train number) and
+  `vehicle.label` `172`, on the trip update as well as the vehicle position. Consumers that keyed
+  on `asm-` entity ids or read `vehicle.label` as a route name must change; see "Consumer
+  migration" in the README. Consumers that read the train number from `trip_short_name` are not
+  affected (#122).
 - **Observed tracks reach `static.zip` while the service runs.** A static snapshot built
   from the configured platforms alone no longer counts as current once a track is observed, so the
   rebuild downloads `GTFS.zip` in full instead of accepting a `304`. Before, observed platforms were

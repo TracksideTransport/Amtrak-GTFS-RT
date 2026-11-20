@@ -10,20 +10,22 @@
 //! `trip_short_name` (the train number) and the service calendar on its origin date, exactly as
 //! Amtrak's own GTFS names its trips. A train with no matching active trip is omitted, so every
 //! trip and stop id in the batch resolves against the static feed. Delays are the map's `variance`
-//! values, which are seconds. Positions are in mph, converted to metres per second.
+//! values, which are seconds. Positions are in mph, converted to metres per second. A train is
+//! identified as the Amtrak source identifies it ([`crate::sources::identity`]): entity id and
+//! `vehicle.id` `{YYYYMMDD}-{number}` from its origin date, `vehicle.label` the number, on the trip
+//! update and the vehicle position. The map's `name` is the route and is not published.
 //!
 //! This is a clean-room client written from the endpoint's public JSON, not a copy of any other
 //! project's code. Credit and terms-of-use notes are in the README ("Fallback position source").
 
-use crate::sources::{RtBatch, RtSource, SourceError};
+use crate::sources::{identity, RtBatch, RtSource, SourceError};
 use async_trait::async_trait;
 use chrono::NaiveDate;
 use gtfs_realtime::trip_update::{
     stop_time_update::ScheduleRelationship, StopTimeEvent, StopTimeUpdate,
 };
 use gtfs_realtime::{
-    FeedEntity, FeedMessage, Position, TripDescriptor, TripUpdate, VehicleDescriptor,
-    VehiclePosition,
+    FeedEntity, FeedMessage, Position, TripDescriptor, TripUpdate, VehiclePosition,
 };
 use gtfs_structures::{Exception, Gtfs, Trip};
 use serde_json::Value;
@@ -126,6 +128,8 @@ fn entity_for_train(train: &Value, gtfs: &Gtfs, now_unix: u64) -> Option<FeedEnt
     }
     let trip = trip_for(gtfs, &number, date)?;
     let start_date = date.format("%Y%m%d").to_string();
+    // The Amtrak source's identity (#122): the map's `name` is the route, not the train.
+    let identified = identity::descriptor(&start_date, &number);
     let descriptor = TripDescriptor {
         trip_id: Some(trip.id.clone()),
         route_id: Some(trip.route_id.clone()),
@@ -137,14 +141,7 @@ fn entity_for_train(train: &Value, gtfs: &Gtfs, now_unix: u64) -> Option<FeedEnt
         let longitude = location.get("longitude")?.as_f64()? as f32;
         Some(VehiclePosition {
             trip: Some(descriptor.clone()),
-            vehicle: Some(VehicleDescriptor {
-                id: Some(number.clone()),
-                label: train
-                    .get("name")
-                    .and_then(Value::as_str)
-                    .map(str::to_string),
-                ..Default::default()
-            }),
+            vehicle: Some(identified.clone()),
             position: Some(Position {
                 latitude,
                 longitude,
@@ -176,9 +173,10 @@ fn entity_for_train(train: &Value, gtfs: &Gtfs, now_unix: u64) -> Option<FeedEnt
         return None;
     }
     Some(FeedEntity {
-        id: format!("asm-{number}-{start_date}"),
+        id: identity::train_day_id(&start_date, &number),
         trip_update: Some(TripUpdate {
             trip: descriptor,
+            vehicle: Some(identified),
             stop_time_update: stop_updates,
             timestamp: Some(updated),
             ..Default::default()
@@ -307,7 +305,8 @@ mod tests {
         let batch = batch_from_map(&json!([train(785, json!({}))]), &gtfs(), NOW);
         assert_eq!(batch.trip_updates.entity.len(), 1);
         let entity = &batch.trip_updates.entity[0];
-        assert_eq!(entity.id, "asm-785-20261117");
+        // #122: the Amtrak source's id scheme, `{start_date}-{number}`.
+        assert_eq!(entity.id, "20261117-785");
         let update = entity.trip_update.as_ref().unwrap();
         assert_eq!(update.trip.trip_id.as_deref(), Some("t785"));
         assert_eq!(update.trip.route_id.as_deref(), Some("r"));
@@ -337,10 +336,57 @@ mod tests {
             (position.speed.unwrap() - 26.8224).abs() < 1e-3,
             "mph to m/s"
         );
-        assert_eq!(vehicle.vehicle.as_ref().unwrap().id.as_deref(), Some("785"));
         assert_eq!(vehicle.timestamp, Some(1_000_000));
         // Both products carry the same entity, as the primary source's unified feed does.
         assert_eq!(batch.vehicle_positions.entity.len(), 1);
+    }
+
+    /// #122: the trip update and the vehicle position carry the Amtrak source's identity, the
+    /// per-train-day id and the train number, never the route name the map calls `name`.
+    #[test]
+    fn both_products_carry_the_train_day_id_and_the_number_not_the_route_name() {
+        let batch = batch_from_map(&json!([train(785, json!({}))]), &gtfs(), NOW);
+        for entity in [
+            &batch.trip_updates.entity[0],
+            &batch.vehicle_positions.entity[0],
+        ] {
+            for vehicle in [
+                entity.trip_update.as_ref().unwrap().vehicle.as_ref(),
+                entity.vehicle.as_ref().unwrap().vehicle.as_ref(),
+            ] {
+                let vehicle = vehicle.expect("a vehicle descriptor");
+                assert_eq!(vehicle.id.as_deref(), Some("20261117-785"));
+                assert_eq!(vehicle.label.as_deref(), Some("785"));
+            }
+        }
+    }
+
+    /// #122: one train has the same entity id and descriptor whichever source built the
+    /// generation. The primary's entity is shaped as the crate encodes it.
+    #[test]
+    fn the_fallback_and_the_primary_identify_a_train_the_same_way() {
+        use crate::sources::identity::identify;
+        let fallback = batch_from_map(&json!([train(785, json!({}))]), &gtfs(), NOW);
+        let mut primary = FeedMessage {
+            entity: vec![FeedEntity {
+                id: "20261117-785".into(),
+                trip_update: Some(TripUpdate::default()),
+                vehicle: Some(VehiclePosition::default()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        identify(&mut primary);
+        let (left, right) = (&fallback.vehicle_positions.entity[0], &primary.entity[0]);
+        assert_eq!(left.id, right.id);
+        assert_eq!(
+            left.vehicle.as_ref().unwrap().vehicle,
+            right.vehicle.as_ref().unwrap().vehicle
+        );
+        assert_eq!(
+            left.trip_update.as_ref().unwrap().vehicle,
+            right.trip_update.as_ref().unwrap().vehicle
+        );
     }
 
     #[test]
@@ -364,7 +410,7 @@ mod tests {
             .iter()
             .map(|e| e.id.clone())
             .collect();
-        assert_eq!(ids, vec!["asm-785-20261117", "asm-790-20261117"]);
+        assert_eq!(ids, vec!["20261117-785", "20261117-790"]);
     }
 
     #[test]
@@ -400,6 +446,16 @@ mod tests {
         let batch = batch_from_map(&json!([one]), &gtfs(), NOW);
         let entity = &batch.trip_updates.entity[0];
         assert!(entity.vehicle.is_none());
+        // The trip update still names its train.
+        let named = entity
+            .trip_update
+            .as_ref()
+            .unwrap()
+            .vehicle
+            .as_ref()
+            .unwrap();
+        assert_eq!(named.id.as_deref(), Some("20261117-785"));
+        assert_eq!(named.label.as_deref(), Some("785"));
         let stops = &entity.trip_update.as_ref().unwrap().stop_time_update;
         assert_eq!(
             stops.len(),
