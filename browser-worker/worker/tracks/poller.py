@@ -20,6 +20,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import time
 import urllib.request
 from collections import Counter
@@ -44,6 +45,7 @@ _FIRST_PARTY = "amtrak.com"
 # as ``text/plain``. ``*/*`` is what that endpoint accepts. The www.amtrak.com status document
 # is JSON, so the in-page fetch below still asks for ``application/json``.
 TRAINS_ACCEPT = "*/*"
+STATUS_PREFIX = "https://www.amtrak.com/dotcom/travel-service/statuses/"
 _RELAUNCH_BACKOFF_MIN_SECS = 60
 _FETCH_JS = """async ([url, timeoutMs]) => {
   const controller = new AbortController();
@@ -111,10 +113,21 @@ def should_abort(cfg: Config, resource_type: str, url: str) -> bool:
 
 def status_url(train_number: str, service_date: str) -> str:
     """Amtrak train-status URL for one train-day."""
-    return (
-        "https://www.amtrak.com/dotcom/travel-service/statuses/"
-        f"{train_number}?service-date={service_date}"
-    )
+    return f"{STATUS_PREFIX}{train_number}?service-date={service_date}"
+
+
+def intercepted_urls() -> re.Pattern[str]:
+    """The status context's route pattern: every URL except the status documents themselves.
+
+    Playwright keeps a ``Request``, a ``Route``, and a ``Response`` object, in its driver and in
+    this process, for every request a context routes, until the page that made it closes (past
+    10,000 of one kind it drops the oldest). The resident page makes up to
+    ``MAX_FETCHES_PER_CYCLE`` status fetches a minute and lives for hours, so routing them grew the
+    worker by tens of MiB an hour (#118). A status fetch is a first-party ``fetch``, which
+    :func:`should_abort` never aborts, so leaving it unrouted changes no routing decision. The
+    driver rebuilds the pattern as a JavaScript ``RegExp``, so it stays a plain lookahead.
+    """
+    return re.compile("^(?!" + re.escape(STATUS_PREFIX) + ")")
 
 
 def load_trains(cfg: Config) -> dict:
@@ -223,7 +236,12 @@ class ResidentBrowser:
         return document_from_eval(raw)
 
     async def close(self) -> None:
-        """Close the status page and return the browser lease. The next fetch opens a new one."""
+        """Close the status page and return the browser lease. The next fetch opens a new one.
+
+        A context that does not close in time takes its browser down with it, even while the
+        notices source holds that browser: left open, its page and renderer memory would last as
+        long as the browser does.
+        """
         context, lease = self._context, self._lease
         self._page = None
         self._context = None
@@ -231,7 +249,13 @@ class ResidentBrowser:
         if context is not None:
             try:
                 await asyncio.wait_for(context.close(), self._cfg.fetch_timeout_secs)
-            except Exception:  # noqa: BLE001 — the browser may already be gone
+            except Exception as error:  # noqa: BLE001 — a hung close, or the browser is gone
+                if lease is not None and await self._shared.discard(lease):
+                    logger.warning(
+                        "status context did not close (%s); closed the browser",
+                        describe_error(error),
+                    )
+                    return
                 logger.debug("status context close failed", exc_info=True)
         if lease is not None:
             await self._shared.release(lease)
@@ -281,7 +305,7 @@ class ResidentBrowser:
                 else:
                     await route.continue_()
 
-            await context.route("**/*", _route)
+            await context.route(intercepted_urls(), _route)
         page = await context.new_page()
         # domcontentloaded lets the site's first-party scripts set their cookies before the
         # first status call; "commit" returned before they ran.
@@ -334,8 +358,8 @@ async def poll_once(
     backoff) and every pick after a browser failure are not stamped. A hot one is retried as soon
     as the browser is back; a ready one is left out of the cycles between full polls unless it is
     warm or hinted, so it waits for the next full poll. ``last_fetched`` is pruned to the trains
-    still due. One INFO line names each pick, whether it was hot or ready, and its outcome; a
-    second gives the cycle's totals.
+    still due, and ``store`` to documents younger than ``DOCUMENT_TTL_SECS``. One INFO line names
+    each pick, whether it was hot or ready, and its outcome; a second gives the cycle's totals.
     """
     geojson = await trains_fetcher(cfg)
     profile = LeadProfile.load(
@@ -410,6 +434,7 @@ async def poll_once(
         store.put(train.train_number, train.service_date, document, now.timestamp())
         stored += 1
         outcomes.append(f"{train.train_number} {kind} stored")
+    store.prune(now.timestamp(), cfg.document_ttl_secs)
     succeeded = not picks or stored > 0
     if succeeded:
         store.mark_success(now.timestamp())

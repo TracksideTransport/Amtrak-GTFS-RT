@@ -31,6 +31,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   also logs one INFO line naming every pick, whether it was hot or ready, and its outcome, for
   example `track poll picks: 172 hot stored, 86 hot rejected (http 404), 95 hot browser
   unavailable (Error), 66 ready skipped (browser unavailable)` (#120).
+- **The browser worker no longer grows with every status fetch.** The status page routed every
+  request, its own status fetches included, and Playwright keeps a request, a route, and a
+  response object, in the worker and in its Node driver, for each routed request until the page
+  closes. At up to 24 fetches a minute that grew the worker by about 40 MiB an hour and the driver
+  with it, until the page was recycled six hours later. Status fetches are now left out of the
+  route (they were never blocked), so a fetch leaves nothing behind. A status context that will not
+  close now closes its browser rather than staying open beside a notices cycle, and stored status
+  documents are pruned every cycle, not only when `/tracks.json` is read (#118).
 - **Observed tracks reach `static.zip` while the service runs.** A static snapshot built
   from the configured platforms alone no longer counts as current once a track is observed, so the
   rebuild downloads `GTFS.zip` in full instead of accepting a `304`. Before, observed platforms were
