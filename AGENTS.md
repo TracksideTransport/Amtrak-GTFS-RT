@@ -230,7 +230,9 @@ When you create or triage an issue, fill in every field GitHub offers where it f
 - Projects and milestone: the repo has no milestones and no repo-level project. Do not add issues to the owner's user-level projects, which belong to other work.
 - Relationships: read the other open issues first. Use a parent or sub-issue for real containment, blocked by or blocking for real ordering, and relates to for issues that share an area (for example a release-gate issue and a dependency-audit issue). Set them through the GraphQL mutations `addSubIssue`, `addBlockedBy`, and `addRelatesTo`.
 - Development: link the pull request with a closing keyword (`Closes #N`) in its body.
-- Security alert: Dependabot alerts are disabled on this repo. Do not link one, and do not enable the setting without asking.
+- Security alert: Dependabot alerts and security updates are enabled on this repo. When an issue is about a vulnerability, link the matching Dependabot alert.
+
+Dependabot (`.github/dependabot.yml`) opens weekly version-update pull requests for Cargo, the browser worker's pip requirements, GitHub Actions, and the Docker base images, with minor and patch updates grouped per ecosystem and no labels. Treat them like any other pull request: the required checks must pass. A pull request that changes `Cargo.lock` is a dependency change, so run the dependency audit on it, and regenerate `THIRD_PARTY_LICENSES.html` before the next release (`scripts/check-release-metadata.sh` checks it at release time). A Playwright update in `browser-worker/requirements.txt` also changes the Chromium build and the Node runtime inside the image, so let the release-gates image build and vulnerability gate run on it.
 
 ## Cursor Cloud specific instructions
 
