@@ -30,7 +30,7 @@ sha2 = "0.10.9"
 csv = "1.4"
 # Rewrites the static ZIP (copying untouched entries raw) when platform stops are added. Already
 # resolved at this version through gtfs-structures; previously only a dev-dependency.
-zip = { version = "6.0", default-features = false, features = ["deflate"] }
+zip = { version = "9.0", default-features = false, features = ["deflate"] }
 # Consumer-only (station & train status): per-station local-time rendering with DST. Optional so
 # the released service binary and container link no additional code. Already in the resolved graph.
 chrono-tz = { version = "0.10", optional = true }
