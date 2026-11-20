@@ -64,7 +64,7 @@ RUN --mount=type=bind,source=Cargo.toml,target=Cargo.toml \
 # -------------------------------------------------------------------------------------------------
 # Stage 2 — validator source, test, reproducibility, and digest gate
 # -------------------------------------------------------------------------------------------------
-FROM eclipse-temurin:17-jdk@sha256:f9b295135b39ed8c650c713c6116600dd4c39ac5f3883f566d96fdec917ce3b2 AS validator
+FROM eclipse-temurin:24-jdk@sha256:7493205ffe6caa8074fa8a06a276bb1c5ac41d3dd0fd43a0db66d7f776e80b3e AS validator
 
 RUN apt-get update && \
     apt-get install --yes --no-install-recommends git && \
@@ -139,7 +139,7 @@ RUN grep -q 'Apache License' /build/validator/LICENSE && \
 # Pinned separately from the validator stage: this JDK's runtime ships in the image, so it tracks
 # Temurin's security releases (17.0.21 here; 17.0.19 has fixable High advisories), while the
 # validator stage keeps the JDK its reproducible JAR digest was measured with.
-FROM eclipse-temurin:17-jdk@sha256:5465815640e10433422217335e15a523a3e57021a1f2ae0fc3849380d237979f AS jre
+FROM eclipse-temurin:24-jdk@sha256:7493205ffe6caa8074fa8a06a276bb1c5ac41d3dd0fd43a0db66d7f776e80b3e AS jre
 
 RUN apt-get update && \
     apt-get install --yes --no-install-recommends binutils && \
