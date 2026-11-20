@@ -164,7 +164,7 @@ Rust in this crate is edition 2021. Format with rustfmt defaults; there is no `r
 
 - New behavior needs an offline test. Config goes through `from_map`. HTTP tests drive the axum router with an injected peer and clock. Source tests use `sources::mock`.
 - Tests that hit the network stay `#[ignore]` with a reason. Run them with `cargo test -- --ignored` or `--include-ignored`. Do not un-ignore them to make CI call Amtrak.
-- Ignored today: `sources::amtrak::live_fetch_returns_batch`, the orchestrator live candidate, `sources::advisories_live_tests`, `status::live_tests` (both need live Amtrak), and the manual `static_augment::augment_file` (needs `AUGMENT_IN`).
+- Ignored today: `sources::amtrak::tests::live_fetch_returns_batch`, `orchestrator::tests::live_candidate_builds_and_passes_semantic_validation`, and `sources::asm::tests::live_map_resolves_against_the_static_feed` (these three run in the scheduled live job, `scripts/test-live-amtrak.sh`); `sources::advisories_live_tests::advisories_live_resolve_scoped` (needs the browser worker, so it stays out of that job); `status::live_tests` (the `status` feature, not in the `--lib` list); and the manual `static_augment::tests::augment_file` (needs `AUGMENT_IN`).
 - Browser worker tests stay offline: no browser, no Amtrak, no RailData. `tests/test_browser.py` drives the shared browser against fakes.
 - `scripts/test-release-controls.sh` is the deterministic release-control suite. It uses local git fixtures only.
 - A feed change that can produce a new MobilityData ERROR code needs a real fix or a `validation/baseline.json` entry that records the cause. Do not gate on occurrence counts; those follow how many trains are running. Amtrak's static GTFS is gated at zero ERROR notices.
