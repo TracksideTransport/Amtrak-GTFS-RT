@@ -16,7 +16,7 @@ RUN xcaddy build v2.11.7 \
       --replace github.com/klauspost/compress=github.com/klauspost/compress@v1.20.2 \
     && ./caddy list-modules | grep -q '^http.handlers.rate_limit$'
 
-FROM caddy:2.11.8-alpine@sha256:f6228111e5fafa1a5238258d0858e103f10599b8d1659a146e7726681a002bb9
+FROM caddy:2.11.9-alpine@sha256:003a97808e781aa9f7e75cc2f43d34d461099031faf5e20faefb9f61126836f0
 
 USER root
 # Alpine packages in the pinned tag can lag security updates. The release gate fails a
