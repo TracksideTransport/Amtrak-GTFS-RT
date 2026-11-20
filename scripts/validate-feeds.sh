@@ -23,8 +23,9 @@
 # builds one generation from mocks and a small static GTFS with platform and gate stops, and both
 # validators must report zero ERROR notices (an empty baseline, through the same ratchet). Its
 # train carries a vehicle id, so the realtime validator must not report W002 (vehicle_id not
-# populated) on trip updates or vehicle positions either. It is the pull-request check; the live
-# pass stays daily because it depends on Amtrak being up.
+# populated) on trip updates or vehicle positions either, nor W009 (schedule_relationship not
+# populated) on any of the three feeds. It is the pull-request check; the live pass stays daily
+# because it depends on Amtrak being up.
 #
 # The --tracks pass validates the platform stops added to static.zip and any
 # stamped assigned_stop_id values. It deliberately runs without RailData
@@ -450,6 +451,17 @@ if [ "$MODE" = "fixture" ]; then
     if jq -e 'any(.[]; .errorMessage.validationRule.errorId == "W002")' \
       "$REPORT_DIR/rt/$feed/$feed.pb.results.json" >/dev/null; then
       fail "fixture $feed: W002, vehicle_id not populated"
+    fi
+  done
+fi
+
+# #101: the builder writes SCHEDULED wherever a trip or stop time update leaves it unset, and the
+# fixture's train, like the crate's, sets none, so a W009 means a trip or stop lost it.
+if [ "$MODE" = "fixture" ]; then
+  for feed in trip-updates vehicle-positions alerts; do
+    if jq -e 'any(.[]; .errorMessage.validationRule.errorId == "W009")' \
+      "$REPORT_DIR/rt/$feed/$feed.pb.results.json" >/dev/null; then
+      fail "fixture $feed: W009, schedule_relationship not populated"
     fi
   done
 fi

@@ -18,6 +18,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sets none; an entity whose id does not hold a service date and train number gets none rather
   than an invented one. The offline fixture (`scripts/validate-feeds.sh --fixture`) now encodes its
   train as that crate does and fails on W002 (#100).
+- **Every trip and stop time update says it is scheduled.** Trip updates, their stop time updates,
+  vehicle positions, and the `trip` in an alert's informed entity now carry
+  `schedule_relationship: SCHEDULED` where they carried none, from the Amtrak source and the
+  TransitDocs ASM fallback alike. GTFS-Realtime already read an absent value as `SCHEDULED`, so
+  the meaning is unchanged, but the best practices ask for it to be explicit, and the MobilityData
+  validator no longer reports W009 (`schedule_relationship not populated`) on all three feeds.
+  Values the service already set are kept: `SKIPPED` on a canceled stop, `NO_DATA`, and a
+  `CANCELED` or `DELETED` trip. The offline fixture now carries a train-status alert informed by
+  its trip, as the crate builds one, and fails on W009 (#101).
 
 ### Changed
 

@@ -678,6 +678,36 @@ mod tests {
             "every trip and stop id resolves"
         );
         assert_eq!(rate.vehicle_positions_matched, 2);
+
+        // #101: the fallback's trips and stops are explicitly SCHEDULED, and its canceled stop
+        // keeps SKIPPED.
+        use gtfs_realtime::trip_descriptor::ScheduleRelationship as Trip;
+        let scheduled = Some(Trip::Scheduled as i32);
+        let train = candidate
+            .trip_updates
+            .entity
+            .iter()
+            .find(|entity| entity.id.ends_with("-785"))
+            .and_then(|entity| entity.trip_update.as_ref())
+            .unwrap();
+        assert_eq!(train.trip.schedule_relationship, scheduled);
+        let stops: Vec<_> = train
+            .stop_time_update
+            .iter()
+            .map(|stop| (stop.stop_id.as_deref().unwrap(), stop.schedule_relationship))
+            .collect();
+        assert_eq!(
+            stops,
+            vec![
+                ("SAN", Some(ScheduleRelationship::Scheduled as i32)),
+                ("GTA", Some(ScheduleRelationship::Scheduled as i32)),
+                ("SBA", Some(ScheduleRelationship::Skipped as i32)),
+            ]
+        );
+        for entity in &candidate.vehicle_positions.entity {
+            let trip = entity.vehicle.as_ref().unwrap().trip.as_ref().unwrap();
+            assert_eq!(trip.schedule_relationship, scheduled, "{}", entity.id);
+        }
         server.abort();
     }
 
