@@ -636,7 +636,8 @@ pub async fn run_combined() -> Result<(), FatalError> {
         fleet_trains::WithFleetTrainsFile::new(
             StoreGenerationCommitter::new(config.output_dir.clone(), store.clone()),
             train_list,
-        ),
+        )
+        .with_track_stations(platforms.clone()),
         base_url.clone(),
     ));
     let banner = endpoints::startup_banner(
@@ -1103,15 +1104,23 @@ mod tests {
             "a refused generation must not move the list"
         );
 
+        // Configured and observed platforms both make a station one where tracks are published.
+        let platforms = crate::static_augment::SharedPlatforms::new(
+            crate::static_augment::PlatformTable::parse("NYP=1-2").unwrap(),
+            None,
+        );
+        platforms.observe("PVD", "1");
         let committer = fleet_trains::WithFleetTrainsFile::new(
             StoreGenerationCommitter::new(output.clone(), store.clone()),
             Some(list.clone()),
-        );
+        )
+        .with_track_stations(Some(platforms));
         committer.publish(candidate(1_786_588_801)).await.unwrap();
         committer.publish(candidate(1_786_588_802)).await.unwrap();
         let body: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&list).unwrap()).unwrap();
         assert_eq!(body["schema"], "amtrak-fleet-trains/v1");
+        assert_eq!(body["track_stations"], serde_json::json!(["NYP", "PVD"]));
         let names: Vec<String> = std::fs::read_dir(list.parent().unwrap())
             .unwrap()
             .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
