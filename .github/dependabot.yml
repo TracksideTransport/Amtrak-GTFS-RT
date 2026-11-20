@@ -1,8 +1,8 @@
 # Dependabot version updates. Security updates are enabled in the repository settings and use the
 # same per-ecosystem options below (labels, grouping) when they open pull requests.
 #
-# - labels: [] stops Dependabot creating its default `dependencies` and ecosystem labels; this
-#   repository uses only its existing labels (see AGENTS.md, "GitHub issues").
+# - Pull requests carry Dependabot's default labels: `dependencies` and the ecosystem (`rust`,
+#   `python`, `github_actions`, `docker`). An empty `labels` list did not stop it creating them.
 # - Cargo and pip are checked weekly; GitHub Actions and the Docker base images, which change
 #   often and rarely matter between releases, monthly.
 # - Minor and patch updates are grouped into one pull request per ecosystem; major updates arrive
@@ -25,7 +25,6 @@ updates:
     schedule:
       interval: "weekly"
     open-pull-requests-limit: 5
-    labels: []
     cooldown:
       default-days: 7
       semver-patch-days: 3
@@ -44,7 +43,6 @@ updates:
     schedule:
       interval: "weekly"
     open-pull-requests-limit: 5
-    labels: []
     cooldown:
       default-days: 7
       semver-patch-days: 3
@@ -64,7 +62,6 @@ updates:
     schedule:
       interval: "monthly"
     open-pull-requests-limit: 5
-    labels: []
     cooldown:
       default-days: 7
     groups:
@@ -80,10 +77,22 @@ updates:
     directories:
       - "/"
       - "/proxy"
+    # Runtime upgrades of the base images are deliberate changes, not routine updates: Python
+    # (the worker, Playwright, and cryptography wheels) and Rust (AGENTS.md pins the release
+    # image's toolchain) get only patch tags and digest refreshes. eclipse-temurin is ignored
+    # entirely: the validator stage must keep the exact JDK its reproducible JAR digest was
+    # measured with, so even a 17-jdk digest refresh would fail the JAR digest check, and
+    # Dependabot cannot tell that stage from the JRE stage. JRE security fixes still surface
+    # through the release vulnerability gate, which fails on any fixable High or Critical match.
+    ignore:
+      - dependency-name: "python"
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
+      - dependency-name: "rust"
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
+      - dependency-name: "eclipse-temurin"
     schedule:
       interval: "monthly"
     open-pull-requests-limit: 5
-    labels: []
     cooldown:
       default-days: 7
     groups:
