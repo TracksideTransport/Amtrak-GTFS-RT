@@ -180,12 +180,37 @@ turning sources off. To upgrade, download the newer release's `docker-compose.ym
 | `/v1/generations/{id}/official-static.zip` | controlled | `application/zip` | Amtrak's static GTFS for that generation, byte for byte |
 | `/v1/generations/{id}/platform-addon.zip` | controlled | `application/zip` | Overlay that rebuilds `static.zip` from the official zip |
 | `/v1/generations/{id}/{trip-updates,vehicle-positions,alerts}.pb` | controlled | `application/x-protobuf` | One GTFS-Realtime product from exactly generation `{id}` |
+| `/v1/current/{static.zip,official-static.zip,platform-addon.zip,trip-updates.pb,vehicle-positions.pb,alerts.pb}` | controlled | as the generation file | The same file from whichever generation is current when the request arrives, with an `X-Generation-Id` header; see [Fixed URLs](#fixed-urls) |
 
 > [!IMPORTANT]
-> Fetch `/v1/feed-set.json` first and then use only the URLs it returns. Do not construct
-> generation URLs or substitute a newer ID between artifact requests. Every realtime header is
-> stamped with the manifest's static version and generation timestamp, so the artifacts of
-> one manifest always belong together.
+> When you need one consistent set of files, fetch `/v1/feed-set.json` first and then use only
+> the URLs it returns. Do not construct generation URLs or substitute a newer ID between artifact
+> requests. Every realtime header is stamped with the manifest's static version and generation
+> timestamp, so the artifacts of one manifest always belong together.
+
+### Fixed URLs
+
+Apps and routing backends that are configured once with fixed feed URLs can use
+`/v1/current/{artifact}` instead of the manifest. Each request returns that file from whichever
+generation is current when it arrives:
+
+```text
+http://127.0.0.1:8090/v1/current/static.zip
+http://127.0.0.1:8090/v1/current/trip-updates.pb
+http://127.0.0.1:8090/v1/current/vehicle-positions.pb
+http://127.0.0.1:8090/v1/current/alerts.pb
+```
+
+- **Same bytes and headers.** A response carries the same `ETag`, `Last-Modified` and
+  `Cache-Control` as that generation's own URL, so polling with `If-None-Match` gets `304` while
+  the file is unchanged.
+- **`X-Generation-Id` names the generation** the response came from.
+- **Separate requests can straddle a new generation.** `static.zip` changes about once a day, and
+  a new realtime generation is published every cycle. To check that files belong together,
+  compare `X-Generation-Id`, or each realtime header's `feed_version` and `timestamp`. A client
+  that needs one consistent set reads `feed-set.json` instead.
+- **Stale data is still served.** A current generation that is older than the readiness limit is
+  still served; `/readyz` is the health signal.
 
 **Match rate (additive).** `/v1/feed-set.json` also carries `match_rate` for a generation this
 process built: `trip_updates` and `vehicle_positions`, each with `emitted` (distinct entities the

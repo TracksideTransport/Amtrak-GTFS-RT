@@ -4,7 +4,7 @@ Instructions for coding agents working in this repository.
 
 ## Project
 
-Amtrak GTFS-RT (AGPL-3.0-only) publishes live GTFS-Realtime for Amtrak — TripUpdates, VehiclePositions, and Alerts — plus the static GTFS those feeds bind to. Consumers start at `GET /v1/feed-set.json` and then fetch only the four immutable URLs in that manifest.
+Amtrak GTFS-RT (AGPL-3.0-only) publishes live GTFS-Realtime for Amtrak — TripUpdates, VehiclePositions, and Alerts — plus the static GTFS those feeds bind to. Consumers that need one consistent set start at `GET /v1/feed-set.json` and then fetch only the immutable URLs in that manifest. Consumers configured with fixed URLs use `/v1/current/{artifact}`, which serves the generation current at each request and names it in `X-Generation-Id` (#111).
 
 The target is **one container**, specified in [docs/one-container.md](docs/one-container.md). One image, `ghcr.io/sohampatwardhan/amtrak-gtfs-rt`, serves the manifest, the static ZIPs, and all three GTFS-Realtime feeds. It includes the helpers they need: one browser worker and the Java validator. Each optional source has an on/off environment flag. That document supersedes the three-container design in `docs/rearchitecture.md`. The three-container roles are gone: combined mode (`run_combined`) is the only mode, and a leftover `AMTRAK_ROLE` other than unset or `combined` refuses to start. Do not reintroduce roles, shared-volume fleet or contribution snapshots, or per-feed images. New work follows the implementation plan in `docs/one-container.md`. Do not add a reverse proxy beyond the optional Caddy profile unless the owner asks for one.
 
@@ -74,6 +74,7 @@ HTTP contract. Do not add other feed URLs.
 | `/v1/generations/{id}/official-static.zip` | controlled | Amtrak's static GTFS, byte for byte |
 | `/v1/generations/{id}/platform-addon.zip` | controlled | Overlay (`addon.txt` plus changed GTFS files) that rebuilds `static.zip` |
 | `/v1/generations/{id}/{trip-updates,vehicle-positions,alerts}.pb` | controlled | One GTFS-Realtime product, `application/x-protobuf` |
+| `/v1/current/{static.zip,official-static.zip,platform-addon.zip,trip-updates.pb,vehicle-positions.pb,alerts.pb}` | controlled | The same file from whichever generation is current, with the same `ETag`/`304` handling and an `X-Generation-Id` header; a stale current generation is still served |
 
 `static.zip` remains the single file existing consumers load. It is the official download with the dangling-stop repair and platform stops applied. Consumers who want the pieces unzip `official-static.zip` and replace each name on the add-on's `files=` line. The Java validator is in the one image, and the `amtrak-gtfs-rt` service serves the public URLs. Each GitHub Release attaches `docker-compose.yml`, which runs the released image from an empty directory, so keep that file working without a checkout: only `--build` and the `proxy` profile may need the repository. An optional Caddy proxy is the Compose `proxy` profile and is off by default. Do not assume nginx or Tailscale Serve is in front.
 
