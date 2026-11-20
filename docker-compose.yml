@@ -45,7 +45,7 @@ services:
       target: runtime
       args:
         BROWSER_BUNDLE: ${FETCHER_BROWSER_BUNDLE:-headless-shell}
-    image: ghcr.io/sohampatwardhan/amtrak-gtfs-rt:${AMTRAK_IMAGE_TAG:-0.8.0}
+    image: ghcr.io/sohampatwardhan/amtrak-gtfs-rt:${AMTRAK_IMAGE_TAG:-0.9.0}
     restart: unless-stopped
     environment:
       AMTRAK_TRACKS: ${AMTRAK_TRACKS:-on}
@@ -83,7 +83,7 @@ services:
     profiles: ["proxy"]
     build:
       context: proxy
-    image: amtrak-gtfs-rt-proxy:${AMTRAK_IMAGE_TAG:-0.8.0}
+    image: amtrak-gtfs-rt-proxy:${AMTRAK_IMAGE_TAG:-0.9.0}
     restart: unless-stopped
     depends_on:
       - amtrak-gtfs-rt

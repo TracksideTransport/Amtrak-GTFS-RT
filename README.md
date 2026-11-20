@@ -115,7 +115,7 @@ Java, or checkout is needed. With Docker Engine and the Compose plugin:
 
 ```bash
 mkdir amtrak-gtfs-rt && cd amtrak-gtfs-rt
-curl -fsSLO https://github.com/sohampatwardhan/Amtrak-GTFS-RT/releases/download/v0.8.0/docker-compose.yml
+curl -fsSLO https://github.com/sohampatwardhan/Amtrak-GTFS-RT/releases/download/v0.9.0/docker-compose.yml
 docker compose pull
 docker compose up -d
 curl -fsS http://127.0.0.1:8090/v1/feed-set.json   # once the first generation is published
@@ -129,7 +129,7 @@ works without credentials. Without Compose, the image alone does the same with n
 ```bash
 docker run -d --name amtrak-gtfs-rt --restart unless-stopped \
   -p 127.0.0.1:8090:8080 -v amtrak-data:/data \
-  ghcr.io/sohampatwardhan/amtrak-gtfs-rt:0.8.0
+  ghcr.io/sohampatwardhan/amtrak-gtfs-rt:0.9.0
 ```
 
 The first generation appears once the static feed has downloaded and passed validation; until
@@ -145,17 +145,17 @@ turning sources off. To upgrade, download the newer release's `docker-compose.ym
   train CLI, root-level Compose and Bake packaging for the one image, and live track and platform
   assignments (on by default; `AMTRAK_TRACKS=off` turns them off). Changes merged after a release are
   listed under **Unreleased** in [CHANGELOG.md](CHANGELOG.md).
-- **Releases:** `v0.8.0` (2026-11-18) is the current release and the first release of the one
-  image. A release is complete when its GitHub Release carries `image-release.txt` with the tag,
-  revisions, manifest digest, and both platform digests; until a newer release completes,
-  `v0.8.0` stays the stable image. `v0.7.0` and
+- **Releases:** `v0.9.0` is the newest release; `v0.8.0` was the first release of the one image.
+  A release is complete when its GitHub Release carries `image-release.txt` with the tag,
+  revisions, manifest digest, and both platform digests; until then, `v0.8.0` (2026-11-18) stays
+  the stable image. `v0.7.0` and
   `v0.7.1` also published `amtrak-gtfs-rt-track-fetcher` and `amtrak-gtfs-rt-advisory-fetcher`.
   Those two are deprecated and get no further releases: from `v0.8.0` the release publishes only
   `amtrak-gtfs-rt`, which contains the browser worker. Pull the version tag, and pin the manifest
   digest from that release's `image-release.txt`:
 
   ```bash
-  docker pull ghcr.io/sohampatwardhan/amtrak-gtfs-rt:0.8.0
+  docker pull ghcr.io/sohampatwardhan/amtrak-gtfs-rt:0.9.0
   docker pull ghcr.io/sohampatwardhan/amtrak-gtfs-rt@sha256:<release-manifest-digest>
   ```
 
@@ -306,13 +306,13 @@ Versioned releases are published for `linux/amd64` and `linux/arm64` at
 without a registry login:
 
 ```bash
-docker pull ghcr.io/sohampatwardhan/amtrak-gtfs-rt:0.8.0
+docker pull ghcr.io/sohampatwardhan/amtrak-gtfs-rt:0.9.0
 ```
 
 `amtrak-gtfs-rt` is the only package this repository publishes. From `v0.8.0` it is one image,
 built from the root `Dockerfile`, that contains the service, the browser worker, and the
-validator, so there is nothing else to pull. Each release pushes the version tag (`0.8.0`), a
-minor tag (`0.8`), and `latest`; `docker compose pull` fetches the version the Compose file names,
+validator, so there is nothing else to pull. Each release pushes the version tag (`0.9.0`), a
+minor tag (`0.9`), and `latest`; `docker compose pull` fetches the version the Compose file names,
 and `image-release.txt` records the manifest digest and both platform digests.
 
 > [!WARNING]
@@ -351,7 +351,7 @@ It is about 1 GB uncompressed on linux/arm64, most of it Chromium.
 
 ```bash
 docker run -d -p 127.0.0.1:8090:8080 -v amtrak-data:/data \
-  ghcr.io/sohampatwardhan/amtrak-gtfs-rt:0.8.0
+  ghcr.io/sohampatwardhan/amtrak-gtfs-rt:0.9.0
 curl -fsS http://127.0.0.1:8090/v1/feed-set.json
 ```
 
@@ -371,7 +371,7 @@ gateway; list their exact IPs beside the keyword (`gateway,172.31.240.10`).
 >
 > ```bash
 > docker run -d --network host -e AMTRAK_BIND_ADDR=127.0.0.1:8080 -e AMTRAK_ALLOWED_PEER_IPS= \
->   -v amtrak-data:/data ghcr.io/sohampatwardhan/amtrak-gtfs-rt:0.8.0
+>   -v amtrak-data:/data ghcr.io/sohampatwardhan/amtrak-gtfs-rt:0.9.0
 > ```
 
 Turn browser sources off with their flags (`-e AMTRAK_TRACKS_AMTRAK=off -e AMTRAK_ADVISORIES=off`).
@@ -656,7 +656,7 @@ release:
 
 ```bash
 docker compose up -d --build                         # build from this checkout
-AMTRAK_IMAGE_TAG=local docker compose up -d --build  # ...tagged :local instead of :0.8.0
+AMTRAK_IMAGE_TAG=local docker compose up -d --build  # ...tagged :local instead of :0.9.0
 ```
 
 ```mermaid
@@ -722,7 +722,7 @@ Without Compose, run the image by itself (no hardening defaults, every source on
 
 ```bash
 docker run -d -p 127.0.0.1:8090:8080 -v amtrak-data:/data \
-  ghcr.io/sohampatwardhan/amtrak-gtfs-rt:0.8.0
+  ghcr.io/sohampatwardhan/amtrak-gtfs-rt:0.9.0
 ```
 
 ### Upgrading from the three-container layout
@@ -1242,7 +1242,7 @@ unauthorized peer, unknown immutable generation or artifact, and no current or f
 respectively. Rollback uses the preceding service binary and retained generation directory; it
 never rewrites immutable artifacts.
 
-**Vehicle identity (#100, #122, unreleased).** Every trip update and vehicle position whose id
+**Vehicle identity (#100, #122, 0.9.0).** Every trip update and vehicle position whose id
 holds a date and number now carries a `VehicleDescriptor`, from either source: `vehicle.id` is the
 train's per-train-day id, the same string as its entity id (`20261119-172`), and `vehicle.label`
 is the train number (`172`). Join a trip update to its vehicle position by `vehicle.id`. Generations built by the `transitdocs-asm`
