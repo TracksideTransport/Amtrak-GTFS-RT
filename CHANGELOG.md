@@ -46,11 +46,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   again, one `INFO` line says it recovered; a healthy source logs nothing extra. The bare
   `ASM data successfully downloaded` line each cycle is a `println!` in the pinned
   `amtrak-gtfs-rt` crate and still appears (#110).
-- **An Amtrak answer with no trains falls back.** With notices on, the cached station and
-  passenger notices were added to whatever the Amtrak source returned, so an answer with no trains
-  still counted as a batch: the chain did not fall back to `transitdocs-asm`, nothing was warned,
-  and the generation published notices and no trains. Notices are now added only to a batch that
-  has something in it (#110).
+- **An Amtrak answer with no trains falls back.** An answer with no trip updates and no vehicle
+  positions still counted as a batch when it carried alerts: the Amtrak crate adds its Pacific
+  Surfliner advisories even when it returns no trains, and with notices on the cached station and
+  passenger notices were added too. The chain did not fall back to `transitdocs-asm`, nothing was
+  warned, and the generation published alerts and no trains. Such an answer now counts as empty,
+  and notices are added only to a batch that has something in it, so the fallback takes over and
+  publishes the notices. When the fallback is also empty or switched off, no new generation is
+  published: the last one keeps serving, and `/readyz` returns `503` once it is 300 s old (#110).
 - **Notices survive a fallback generation.** A generation built from `transitdocs-asm` published
   no station or passenger notices, so they vanished from `alerts.pb` for that cycle. The fallback
   now shares the Amtrak source's notices cache, so it publishes the same notices without another
