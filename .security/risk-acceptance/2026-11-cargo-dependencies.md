@@ -53,8 +53,8 @@ entry that no target builds and carries no advisory; it is noted here, not accep
 |---|---|---:|---|---|---|
 | `atomic-polyfill 1.0.3` | `RUSTSEC-2023-0089` | Unknown | None; unmaintained | lockfile only: `geo-types → rstar (old) → heapless 0.7.17 → atomic-polyfill` | Not built in any target or feature set (`locked-not-built`) |
 | `derivative 2.2.0` | `RUSTSEC-2024-0388` | Unknown | None; unmaintained | `gtfs-structures → derivative` (proc-macro) | Compile-time only (`build-time-only`) |
-| `chrono 0.4.45` | `RUSTSEC-2026-0543` | Unknown | None; unmaintained | `amtrak-gtfs-rt → chrono` (also used by the optional `amtrak-status` CLI behind the `status` feature) | Linked into the service through the catenary crate for time arithmetic; an unmaintained notice with no vulnerability claim (`chrono-linked`) |
-| `chrono-tz 0.10.4` | `RUSTSEC-2026-0555` | Unknown | None; unmaintained | `amtrak-gtfs-rt → chrono-tz` | Linked through the catenary crate for time-zone tables; no vulnerability claim (`chrono-linked`) |
+| `chrono 0.4.45` | `RUSTSEC-2026-0543` | Unknown | None; unmaintained | this crate and `gtfs-structures → chrono` (the catenary crate dropped its direct use in 0.10, #171) | Linked into the service for time arithmetic; an unmaintained notice with no vulnerability claim (`chrono-linked`) |
+| `chrono-tz 0.10.4` | `RUSTSEC-2026-0555` | Unknown | None; unmaintained | this crate `→ chrono-tz` (the catenary crate moved to `jiff` in 0.10, #171) | Linked for the fallback source's and the status CLI's time-zone tables; no vulnerability claim (`chrono-linked`) |
 | `fxhash 0.2.1` | `RUSTSEC-2025-0057` | Unknown | None; unmaintained | `amtrak-gtfs-rt → scraper 0.22 → selectors 0.26 → fxhash` (since #151 the service's own `scraper` 0.29 does not reach it) | **Reachable** from HTML parsers (`fxhash-reachable`) |
 | `gcc 0.3.55` | `RUSTSEC-2025-0121` | Unknown | None; deprecated | `amtrak-gtfs-rt → rust-crypto → gcc` (build-dependency) | Build script only (`build-time-only`) |
 | `rust-crypto 0.2.36` | `RUSTSEC-2016-0005` | Unknown | No released safe version | `amtrak-gtfs-rt → rust-crypto` | Never referenced; 0 symbols in release binary (`rust-crypto-unreferenced`) |
@@ -96,6 +96,8 @@ Conditions:
 
 Approval: approved 2026-11-20 by the repository owner, who replied "approve" in conversation to
 the proposal to accept these 27 records as `locked-not-built` on the terms above.
+
+Also corrected on 2026-11-20: the `chrono` and `chrono-tz` rows' paths. The catenary crate 0.10.1 (#171) dates trains with `jiff`, so `chrono-tz` is now linked only by this crate and `chrono` by this crate and `gtfs-structures`. Both stay linked, and both acceptances are unchanged.
 
 Also corrected on 2026-11-20: the `fxhash` row's path. #151 moved this crate's own `scraper` to
 0.29, which does not depend on `fxhash`. `fxhash` is still linked through the catenary crate's
