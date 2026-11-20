@@ -585,3 +585,196 @@ def test_station_hint_picks_due_trains_stopping_there(tmp_path, monkeypatch):
                   status_fetcher=status, full=False)
     )
     assert fetched == ["163"]
+
+
+def _hot_fleet(*numbers):
+    """Fleet trains whose next stop, Providence, is inside the hot window, in train order."""
+    return {
+        "schema": "amtrak-fleet-trains/v1",
+        "trains": [
+            {
+                "train_number": number,
+                "service_date": "2026-10-17",
+                "stops": [
+                    {"code": "PVD", "times_unix": [int((NOW + timedelta(seconds=60 + 10 * index)).timestamp())]}
+                ],
+            }
+            for index, number in enumerate(numbers)
+        ],
+    }
+
+
+def test_a_browser_failure_leaves_later_picks_unstamped_and_first_next_cycle():
+    # #120: 24 picked, 3 stored, then the browser failed. The other 21 were stamped as attempted,
+    # so the next cycle went back to the trains that already had documents.
+    store = TrackStore()
+    last_fetched: dict = {}
+    calls: list[str] = []
+    numbers = [str(number) for number in range(1, 7)]
+
+    async def trains(_cfg):
+        return _hot_fleet(*numbers)
+
+    async def fourth_fails(_cfg, train: DueTrain):
+        calls.append(train.train_number)
+        if len(calls) == 4:
+            raise BrowserUnavailable("Error")
+        return {"data": []}
+
+    cfg = Config(max_fetches_per_cycle=4, hot_window_secs=720, cooldown_secs=90)
+    asyncio.run(
+        poll_once(store, cfg, last_fetched, now=NOW, trains_fetcher=trains, status_fetcher=fourth_fails)
+    )
+    assert calls == ["1", "2", "3", "4"]
+    assert set(last_fetched) == {("1", "2026-10-17"), ("2", "2026-10-17"), ("3", "2026-10-17")}
+
+    calls.clear()
+
+    async def answers(_cfg, train: DueTrain):
+        calls.append(train.train_number)
+        return {"data": []}
+
+    later = NOW + timedelta(seconds=60)
+    asyncio.run(
+        poll_once(store, cfg, last_fetched, now=later, trains_fetcher=trains, status_fetcher=answers)
+    )
+    assert calls == ["4", "5", "6"]
+
+
+def test_a_pick_whose_own_fetch_failed_takes_the_cooldown_and_later_picks_go_first():
+    # A status fetch that times out or is refused inside the page surfaces as BrowserUnavailable.
+    # If that failure is specific to one train, leaving it unstamped put it first after every
+    # relaunch, where it killed the browser again and starved every other train.
+    store = TrackStore()
+    last_fetched: dict = {}
+    calls: list[str] = []
+    numbers = [str(number) for number in range(1, 5)]
+
+    async def trains(_cfg):
+        return _hot_fleet(*numbers)
+
+    async def second_fails_in_page(_cfg, train: DueTrain):
+        calls.append(train.train_number)
+        if train.train_number == "2":
+            raise BrowserUnavailable("TimeoutError", attempted=True)
+        return {"data": []}
+
+    cfg = Config(max_fetches_per_cycle=4, hot_window_secs=720, cooldown_secs=90)
+    asyncio.run(
+        poll_once(store, cfg, last_fetched, now=NOW, trains_fetcher=trains,
+                  status_fetcher=second_fails_in_page)
+    )
+    assert calls == ["1", "2"]
+    assert set(last_fetched) == {("1", "2026-10-17"), ("2", "2026-10-17")}
+
+    calls.clear()
+    later = NOW + timedelta(seconds=60)
+    asyncio.run(
+        poll_once(store, cfg, last_fetched, now=later, trains_fetcher=trains,
+                  status_fetcher=second_fails_in_page)
+    )
+    assert calls == ["3", "4"], "the failed pick waits out its cooldown"
+
+
+def test_only_a_failed_in_page_fetch_counts_as_an_attempt():
+    cfg = Config(relaunch_backoff_max_secs=150, browser_max_age_secs=3_600)
+    clock = [1_000.0]
+    browser = ResidentBrowser(cfg, monotonic=lambda: clock[0])
+    train = DueTrain("167", "2026-10-17", 60.0)
+
+    async def failed_launch():
+        raise RuntimeError("launch")
+
+    browser._launch = failed_launch
+    with pytest.raises(BrowserUnavailable) as launch:
+        asyncio.run(browser.fetch(cfg, train))
+    assert launch.value.attempted is False
+    with pytest.raises(BrowserUnavailable, match="backoff") as backoff:
+        asyncio.run(browser.fetch(cfg, train))
+    assert backoff.value.attempted is False
+
+    browser._page = _FakePage(asyncio.TimeoutError())
+    browser._launched_at = clock[0]
+    with pytest.raises(BrowserUnavailable) as in_page:
+        asyncio.run(browser.fetch(cfg, train))
+    assert in_page.value.attempted is True
+
+
+def test_each_cycle_logs_its_picks_with_their_outcomes(caplog):
+    store = TrackStore()
+    hot = _hot_fleet("172", "86", "2154", "95")
+    hot["trains"].append(
+        {
+            "train_number": "66",
+            "service_date": "2026-10-17",
+            "stops": [{"code": "NYP", "times_unix": [int((NOW + timedelta(minutes=25)).timestamp())]}],
+        }
+    )
+
+    async def trains(_cfg):
+        return hot
+
+    async def mixed(_cfg, train: DueTrain):
+        if train.train_number == "86":
+            raise StatusMiss("http 404")
+        if train.train_number == "2154":
+            return None
+        if train.train_number == "95":
+            raise BrowserUnavailable("Error")
+        return {"data": []}
+
+    caplog.set_level(logging.INFO, logger="worker.tracks.poller")
+    asyncio.run(poll_once(store, Config(), {}, now=NOW, trains_fetcher=trains, status_fetcher=mixed))
+    lines = [record.getMessage() for record in caplog.records]
+    assert (
+        "track poll picks: 172 hot stored, 86 hot rejected (http 404), 2154 hot rejected (empty), "
+        "95 hot browser unavailable (Error), 66 ready skipped (browser unavailable)"
+    ) in lines
+    assert any(line.startswith("track poll due=5 picked=5 stored=1 ") for line in lines)
+
+
+def test_a_fresh_install_still_checks_a_boarding_stop_at_an_unobserved_station():
+    # track_stations holds only the seeded stations. Providence is 8 minutes out and has no
+    # observed platform yet; v0.8.0 fetched such a train every minute, so a hot check between
+    # full polls must still pick it once its cooldown has passed.
+    document = {
+        "schema": "amtrak-fleet-trains/v1",
+        "track_stations": ["NHV", "NWK", "NYP"],
+        "trains": [
+            {
+                "train_number": "172",
+                "service_date": "2026-10-17",
+                "stops": [{"code": "PVD", "times_unix": [int((NOW + timedelta(minutes=8)).timestamp())]}],
+            },
+            {
+                "train_number": "174",
+                "service_date": "2026-10-17",
+                "stops": [
+                    {"code": "RTE", "boarding": False,
+                     "times_unix": [int((NOW + timedelta(minutes=8)).timestamp())]}
+                ],
+            },
+        ],
+    }
+    fetched: list[str] = []
+
+    async def trains(_cfg):
+        return document
+
+    async def status(_cfg, train):
+        fetched.append(train.train_number)
+        raise StatusMiss("http 404")
+
+    last_fetched: dict = {}
+
+    def check(at):
+        fetched.clear()
+        asyncio.run(
+            poll_once(TrackStore(), Config(), last_fetched, now=at, trains_fetcher=trains,
+                      status_fetcher=status, full=False)
+        )
+        return list(fetched)
+
+    assert check(NOW) == ["172"]
+    assert check(NOW + timedelta(seconds=60)) == []
+    assert check(NOW + timedelta(seconds=90)) == ["172"]

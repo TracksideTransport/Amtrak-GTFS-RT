@@ -9,6 +9,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A hot train with no status document gets fetched.** The track poller fetched up to 24 hot
+  trains every cycle, soonest stop first, with no cooldown, so with more than 24 a train 8 to 13
+  minutes out could go without one: train 172 had no document until about 6 minutes before
+  Providence, and after a restart none again until Route 128 was about 6 minutes away. A train
+  whose remaining stops are deboard-only (Route 128 and Back Bay toward Boston) or at stations
+  that never show a track also stayed hot until its last stop, taking a slot every cycle. Hot
+  trains with no document now go first; every train, hot or not, waits out `TRACK_COOLDOWN_SECS`
+  after Amtrak answers for it (even with a 404 or an empty answer), oldest fetch first. A train is
+  now hot only for a stop inside the hot window where riders can board and Amtrak has published a
+  track: `fleet-trains.json` marks a stop with static `pickup_type` 1 `"boarding": false`, and
+  lists the stations with a configured or observed platform as `track_stations`. A boarding stop
+  inside the hot window at a station not yet listed (on a fresh install, everything but the seeded
+  New York, Newark, and New Haven) still keeps the train checked between full polls, under the
+  cooldown. Both fields are optional and the schema stays `amtrak-fleet-trains/v1`; a list without
+  them counts every stop, as before. A browser failure mid-cycle no longer marks the trains it left
+  unfetched as attempted: a hot one is retried as soon as the browser is back, and a ready one
+  waits for the next full poll, up to 15 minutes, unless it is warm or hinted. The pick whose own
+  status fetch failed (timed out or refused) does count as an attempt and waits out its cooldown,
+  so one train's failing request cannot take the browser down after every relaunch. Each cycle
+  also logs one INFO line naming every pick, whether it was hot or ready, and its outcome, for
+  example `track poll picks: 172 hot stored, 86 hot rejected (http 404), 95 hot browser
+  unavailable (Error), 66 ready skipped (browser unavailable)` (#120).
 - **Observed tracks reach `static.zip` while the service runs.** A static snapshot built
   from the configured platforms alone no longer counts as current once a track is observed, so the
   rebuild downloads `GTFS.zip` in full instead of accepting a `304`. Before, observed platforms were

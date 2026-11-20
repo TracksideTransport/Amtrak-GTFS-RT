@@ -6,9 +6,12 @@ status documents are fetched in a resident page of the worker's one headless bro
 blocked, and so is every host outside ``amtrak.com`` unless ``BLOCK_THIRD_PARTY`` is off.
 
 A failed status fetch keeps the last good document. A browser failure ends the cycle's fetches
-and the relaunch backs off, so a blocked or crashing browser is not relaunched once per train. A
-cycle counts as a success only when it had nothing to fetch or stored a document, so a worker
-Amtrak has stopped answering lets ``/tracks.json`` go stale instead of looking current.
+and the relaunch backs off, so a blocked or crashing browser is not relaunched once per train.
+The trains it left unfetched are not counted as attempted: a hot one is retried as soon as the
+browser is back, and a ready one waits for the next full poll unless it is warm or hinted. A pick
+whose own in-page fetch failed counts as an attempt and takes the cooldown. A cycle counts as a
+success only when it had nothing to fetch or stored a document, so a worker Amtrak has stopped
+answering lets ``/tracks.json`` go stale instead of looking current.
 """
 
 from __future__ import annotations
@@ -28,7 +31,7 @@ from ..browser import LAUNCH_ARGS, Lease, SharedBrowser, describe_error
 from .config import Config
 from .decrypt import DecryptError, decrypt_payload
 from .lead_time import LeadProfile
-from .select import FLEET_TRAINS_SCHEMA, DueTrain, choose_fetches, due_trains, is_hot
+from .select import FLEET_TRAINS_SCHEMA, DueTrain, choose_fetches, due_trains, is_hot, is_warm
 from .store import TrackStore
 
 logger = logging.getLogger(__name__)
@@ -58,7 +61,16 @@ _FETCH_JS = """async ([url, timeoutMs]) => {
 
 
 class BrowserUnavailable(Exception):
-    """The browser could not run a fetch. The rest of the cycle is skipped."""
+    """The browser could not run a fetch. The rest of the cycle is skipped.
+
+    ``attempted`` is true when the in-page status fetch for the pick actually ran and failed (a
+    timed-out or refused request, or a renderer that died during it). Such a failure may be
+    specific to that train, so the pick is stamped like any other attempt.
+    """
+
+    def __init__(self, reason: str, *, attempted: bool = False) -> None:
+        super().__init__(reason)
+        self.attempted = attempted
 
 
 class StatusMiss(Exception):
@@ -206,7 +218,7 @@ class ResidentBrowser:
             )
         except Exception as error:  # noqa: BLE001 — a dead renderer or hung request
             await self._failed(f"status fetch failed: {describe_error(error)}")
-            raise BrowserUnavailable(type(error).__name__) from None
+            raise BrowserUnavailable(type(error).__name__, attempted=True) from None
         self._backoff = 0.0
         return document_from_eval(raw)
 
@@ -316,8 +328,14 @@ async def poll_once(
     """One cycle. Raises when the train list itself cannot be read; status misses are skipped.
 
     Returns whether the cycle succeeded: it had nothing to fetch, or it stored a document. Every
-    attempt, failed or not, starts the train's cooldown. ``last_fetched`` is pruned to the trains
-    still due.
+    attempt that reached Amtrak, stored or rejected, starts the train's cooldown, and so does a
+    pick whose own in-page fetch ran and failed (:class:`BrowserUnavailable` with ``attempted``).
+    A pick the browser could not run at all (a failed launch or first page load, or the relaunch
+    backoff) and every pick after a browser failure are not stamped. A hot one is retried as soon
+    as the browser is back; a ready one is left out of the cycles between full polls unless it is
+    warm or hinted, so it waits for the next full poll. ``last_fetched`` is pruned to the trains
+    still due. One INFO line names each pick, whether it was hot or ready, and its outcome; a
+    second gives the cycle's totals.
     """
     geojson = await trains_fetcher(cfg)
     profile = LeadProfile.load(
@@ -335,16 +353,21 @@ async def poll_once(
     )
     early, early_stations = take_early_hints()
     if not full:
+        # Between full polls: hinted trains, hot trains, and warm ones (a boarding stop at a
+        # station with no track seen yet), which then take the cooldown like any ready train.
+        known = store.tracked()
         due = [
             train
             for train in due
             if train.train_number in early
             or train.upcoming & early_stations
-            or is_hot(train, store.tracked(), cfg.hot_window_secs)
+            or is_hot(train, known, cfg.hot_window_secs)
+            or is_warm(train, known, cfg.hot_window_secs)
         ]
     due_keys = {train.key for train in due}
     for key in [key for key in last_fetched if key not in due_keys]:
         del last_fetched[key]
+    tracked = store.tracked()
     picks = choose_fetches(
         due,
         last_fetched,
@@ -352,30 +375,46 @@ async def poll_once(
         hot_secs=cfg.hot_window_secs,
         cooldown_secs=cfg.cooldown_secs,
         max_fetches=cfg.max_fetches_per_cycle,
-        tracked=store.tracked(),
+        tracked=tracked,
         hinted={train.key for train in due if train.train_number in early},
     )
     stored = 0
     rejected: Counter[str] = Counter()
     browser_down = None
+    outcomes: list[str] = []
     for train in picks:
-        last_fetched[train.key] = now.timestamp()
+        kind = "hot" if is_hot(train, tracked, cfg.hot_window_secs) else "ready"
+        if browser_down is not None:
+            outcomes.append(f"{train.train_number} {kind} skipped (browser unavailable)")
+            continue
         try:
             document = await status_fetcher(cfg, train)
         except BrowserUnavailable as error:
             browser_down = str(error)
-            break
-        except StatusMiss as error:
-            rejected[str(error)] += 1
+            if error.attempted:
+                # The pick's own fetch ran and failed. It takes the cooldown, so a failure
+                # specific to this train cannot put it first after every relaunch.
+                last_fetched[train.key] = now.timestamp()
+            outcomes.append(f"{train.train_number} {kind} browser unavailable ({browser_down})")
             continue
+        except StatusMiss as error:
+            last_fetched[train.key] = now.timestamp()
+            rejected[str(error)] += 1
+            outcomes.append(f"{train.train_number} {kind} rejected ({error})")
+            continue
+        last_fetched[train.key] = now.timestamp()
         if document is None:
             rejected["empty"] += 1
+            outcomes.append(f"{train.train_number} {kind} rejected (empty)")
             continue
         store.put(train.train_number, train.service_date, document, now.timestamp())
         stored += 1
+        outcomes.append(f"{train.train_number} {kind} stored")
     succeeded = not picks or stored > 0
     if succeeded:
         store.mark_success(now.timestamp())
+    if outcomes:
+        logger.info("track poll picks: %s", ", ".join(outcomes))
     logger.info(
         "track poll due=%s picked=%s stored=%s rejected=%s%s",
         len(due),
