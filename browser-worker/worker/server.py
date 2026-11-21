@@ -19,6 +19,7 @@ WARNING. Any other error in a handler is logged at ERROR with its traceback.
 
 from __future__ import annotations
 
+import json
 import logging
 import sys
 import time
@@ -30,10 +31,12 @@ from .config import WorkerConfig
 from .notices import server as notices_server
 from .notices.store import SnapshotStore, safe_detail_name
 from .tracks import server as tracks_server
+from .tracks.stations import StationsStore
 from .tracks.store import TrackStore
 
 HEALTH_PATH = "/healthz"
 TRACKS_PATH = "/tracks.json"
+STATIONS_PATH = "/stations.json"
 NOTICES_PATH = "/service-alerts-and-notices"
 
 logger = logging.getLogger(__name__)
@@ -49,6 +52,7 @@ class Snapshots:
 
     config: WorkerConfig
     tracks: TrackStore | None = None
+    stations: StationsStore | None = None
     notices: SnapshotStore | None = None
 
 
@@ -65,6 +69,13 @@ def route(snapshots: Snapshots, path: str, now: float) -> tuple[int, str, bytes]
         if tracks is None or snapshots.tracks is None:
             return 404, "text/plain", b"tracks are off"
         return _tracks(snapshots, path, now)
+    if clean == STATIONS_PATH:
+        if tracks is None or snapshots.stations is None:
+            return 404, "text/plain", b"tracks are off"
+        payload = snapshots.stations.snapshot()
+        if payload is None:
+            return 503, "text/plain", b"no stations yet"
+        return 200, "application/json", json.dumps(payload, separators=(",", ":")).encode()
     if clean == NOTICES_PATH or safe_detail_name(clean) is not None:
         if notices is None or snapshots.notices is None:
             return 404, "text/plain", b"notices are off"

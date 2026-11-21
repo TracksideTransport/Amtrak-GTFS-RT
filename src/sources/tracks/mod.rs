@@ -14,6 +14,7 @@
 
 pub mod amtrak;
 pub mod hartford;
+pub mod names;
 pub mod raildata;
 pub mod refresher;
 pub mod store;

@@ -217,6 +217,7 @@ const DEFAULT_TRACKS_REQUEST_TIMEOUT_SECS: u64 = 10;
 /// How long an Amtrak track stays published after the stop's latest time. The status document
 /// often drops `departure.track` once the train has left; this covers that gap.
 const DEFAULT_TRACKS_RETAIN_GRACE_SECS: u64 = 900;
+const DEFAULT_STOP_NAMES_REFRESH_SECS: u64 = 1_209_600;
 const DEFAULT_RAILDATA_BASE: &str = "https://raildata.njtransit.com/api/TrainData";
 const DEFAULT_HARTFORD_URL: &str = "https://hartfordline.com/connecting-train-status/";
 const DEFAULT_HARTFORD_STOP: &str = "NHV";
@@ -278,6 +279,15 @@ pub struct TrackConfig {
     /// How long to keep an Amtrak track after the stop's latest time.
     /// Env `AMTRAK_TRACKS_RETAIN_GRACE_SECS` (default 900).
     pub retain_grace: Duration,
+    /// Env `AMTRAK_STOP_NAMES` (default on). Takes effect only with tracks and the Amtrak source on;
+    /// see [`TrackConfig::names_enabled`].
+    pub stop_names: bool,
+    /// How often stop names are renewed from the worker's station names. Env
+    /// `AMTRAK_STOP_NAMES_REFRESH_SECS` (default 1209600, 14 days).
+    pub stop_names_refresh: Duration,
+    /// The worker's `/stations.json`, derived from `amtrak_url` by replacing a trailing
+    /// `/tracks.json`; `None` when that is not possible.
+    pub stations_url: Option<String>,
 }
 
 impl fmt::Debug for TrackConfig {
@@ -300,6 +310,9 @@ impl fmt::Debug for TrackConfig {
             .field("amtrak_enabled", &self.amtrak_enabled)
             .field("amtrak_url", &self.amtrak_url)
             .field("retain_grace", &self.retain_grace)
+            .field("stop_names", &self.stop_names)
+            .field("stop_names_refresh", &self.stop_names_refresh)
+            .field("stations_url", &self.stations_url)
             .finish()
     }
 }
@@ -389,6 +402,13 @@ impl TrackConfig {
             "AMTRAK_TRACKS_RETAIN_GRACE_SECS",
             DEFAULT_TRACKS_RETAIN_GRACE_SECS,
         )?;
+        let stop_names = parse_flag(&get, "AMTRAK_STOP_NAMES", true)?;
+        let stop_names_refresh = positive_secs(
+            &get,
+            "AMTRAK_STOP_NAMES_REFRESH_SECS",
+            DEFAULT_STOP_NAMES_REFRESH_SECS,
+        )?;
+        let stations_url = amtrak_url.as_deref().and_then(stations_url_for);
         Ok(TrackConfig {
             enabled,
             refresh_interval,
@@ -406,13 +426,29 @@ impl TrackConfig {
             amtrak_enabled,
             amtrak_url,
             retain_grace,
+            stop_names,
+            stop_names_refresh,
+            stations_url,
         })
+    }
+
+    /// Whether stops are renamed from the worker's station names: `AMTRAK_STOP_NAMES` on, with
+    /// `AMTRAK_TRACKS` and `AMTRAK_TRACKS_AMTRAK` on.
+    pub fn names_enabled(&self) -> bool {
+        self.stop_names && self.enabled && self.amtrak_enabled
     }
 
     /// Registered RailData credentials, when both are configured.
     pub fn raildata_credentials(&self) -> Option<(&str, &str)> {
         Some((self.njt_username.as_deref()?, self.njt_password.as_deref()?))
     }
+}
+
+/// The worker's station-names URL for a train-status URL ending in `/tracks.json`.
+pub fn stations_url_for(amtrak_url: &str) -> Option<String> {
+    amtrak_url
+        .strip_suffix("/tracks.json")
+        .map(|base| format!("{base}/stations.json"))
 }
 
 /// A source URL: `default` when unset, `None` when explicitly empty (the pre-flag way to turn a
@@ -1281,6 +1317,45 @@ mod tests {
                 TrackConfig::from_map(|key| (key == field).then(|| "0".into())).unwrap_err();
             assert_eq!(error.field(), field);
         }
+    }
+
+    #[test]
+    fn stations_url_derivation() {
+        assert_eq!(
+            stations_url_for("http://127.0.0.1:8081/tracks.json").as_deref(),
+            Some("http://127.0.0.1:8081/stations.json")
+        );
+        assert_eq!(stations_url_for("http://x/other"), None);
+        let defaults = TrackConfig::from_map(map(&[])).unwrap();
+        assert_eq!(
+            defaults.stations_url.as_deref(),
+            Some("http://127.0.0.1:8081/stations.json")
+        );
+        let custom =
+            TrackConfig::from_map(map(&[("AMTRAK_TRACKS_AMTRAK_URL", "http://worker/other")]))
+                .unwrap();
+        assert!(custom.stations_url.is_none());
+    }
+
+    #[test]
+    fn stop_names_flag_and_refresh_default_and_gating() {
+        let defaults = TrackConfig::from_map(map(&[])).unwrap();
+        assert!(defaults.stop_names && defaults.names_enabled());
+        assert_eq!(defaults.stop_names_refresh, Duration::from_secs(1_209_600));
+        let off = TrackConfig::from_map(map(&[("AMTRAK_STOP_NAMES", "off")])).unwrap();
+        assert!(!off.stop_names && !off.names_enabled());
+        for gate in ["AMTRAK_TRACKS", "AMTRAK_TRACKS_AMTRAK"] {
+            let gated = TrackConfig::from_map(map(&[(gate, "off")])).unwrap();
+            assert!(gated.stop_names && !gated.names_enabled(), "{gate}");
+        }
+        let custom =
+            TrackConfig::from_map(map(&[("AMTRAK_STOP_NAMES_REFRESH_SECS", "60")])).unwrap();
+        assert_eq!(custom.stop_names_refresh, Duration::from_secs(60));
+        let error =
+            TrackConfig::from_map(map(&[("AMTRAK_STOP_NAMES_REFRESH_SECS", "0")])).unwrap_err();
+        assert_eq!(error.field(), "AMTRAK_STOP_NAMES_REFRESH_SECS");
+        let error = TrackConfig::from_map(map(&[("AMTRAK_STOP_NAMES", "maybe")])).unwrap_err();
+        assert_eq!(error.field(), "AMTRAK_STOP_NAMES");
     }
 
     #[test]

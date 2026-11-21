@@ -163,8 +163,10 @@ PAG,PAG,Pascagoula Amtrak Station,https://www.amtrak.com/stations/pag,America/Ch
     fn a_repaired_feed_takes_platform_stops() {
         let repaired = repair_static(&mardi_gras_zip(DANGLING)).unwrap();
         let table = PlatformTable::parse("NHV=1").unwrap();
-        let gtfs =
-            Gtfs::from_reader(Cursor::new(augment_static(&repaired, &table).unwrap())).unwrap();
+        let gtfs = Gtfs::from_reader(Cursor::new(
+            augment_static(&repaired, &table, None).unwrap(),
+        ))
+        .unwrap();
         assert!(gtfs.stops.contains_key("NHV:track:1"));
     }
 

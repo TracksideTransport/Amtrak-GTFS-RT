@@ -15,7 +15,16 @@ import pytest
 import worker.server
 from worker.config import WorkerConfig
 from worker.notices.store import SnapshotStore
-from worker.server import HEALTH_PATH, NOTICES_PATH, TRACKS_PATH, Snapshots, make_server, route
+from worker.server import (
+    HEALTH_PATH,
+    NOTICES_PATH,
+    STATIONS_PATH,
+    TRACKS_PATH,
+    Snapshots,
+    make_server,
+    route,
+)
+from worker.tracks.stations import StationsStore
 from worker.tracks.store import TrackStore
 
 DETAIL = "/alert/boston-south-station-restroom-improvement-project.html"
@@ -26,6 +35,7 @@ def _snapshots(tmp_path, **flags):
     return Snapshots(
         config=cfg,
         tracks=TrackStore(started_at=1_000) if cfg.tracks is not None else None,
+        stations=StationsStore(None) if cfg.tracks is not None else None,
         notices=SnapshotStore(tmp_path) if cfg.notices is not None else None,
     )
 
@@ -45,6 +55,26 @@ def test_both_sources_are_routed(tmp_path):
     status, _, body = route(snapshots, DETAIL, listed + 1)
     assert (status, body) == (200, b"<p>Atlantic Avenue</p>")
     assert route(snapshots, "/other", 1_010)[0] == 404
+
+
+def test_stations_route(tmp_path):
+    off = _snapshots(tmp_path, AMTRAK_TRACKS_AMTRAK="off")
+    assert route(off, STATIONS_PATH, 1_000) == (404, "text/plain", b"tracks are off")
+    snapshots = _snapshots(tmp_path)
+    status, _, body = route(snapshots, STATIONS_PATH, 1_000)
+    assert (status, body) == (503, b"no stations yet")
+    snapshots.stations.record_document(
+        {"data": [{"stops": [{"station": {"code": "BBY", "name": "Boston Back Bay"}}]}]}
+    )
+    directory = json.dumps([{"code": "BOS", "name": "Boston", "city": "Boston"}])
+    assert snapshots.stations.accept_directory(directory, 1_000.0)
+    status, content_type, body = route(snapshots, STATIONS_PATH, 1_001)
+    assert (status, content_type) == (200, "application/json")
+    payload = json.loads(body)
+    assert payload["directory"][0]["code"] == "BOS"
+    assert payload["seen"]["BBY"] == {"name": "Boston Back Bay"}
+    assert payload["directory_fetched_at"] == "1970-01-01T00:16:40Z"
+    assert payload["seen_updated_at"] is not None
 
 
 def test_a_source_that_is_off_answers_404(tmp_path):

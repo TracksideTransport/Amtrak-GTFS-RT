@@ -21,6 +21,7 @@
 //! upstream bytes instead.
 
 use crate::sources::tracks::{is_platform_label, split_platform_label};
+use crate::static_names::{apply_names, names_version_suffix, StationNames};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashSet};
 use std::io::{Cursor, Read, Write};
@@ -429,7 +430,7 @@ impl SharedPlatforms {
     }
 }
 
-fn write_atomically(path: &std::path::Path, contents: &str) -> std::io::Result<()> {
+pub(crate) fn write_atomically(path: &std::path::Path, contents: &str) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -491,24 +492,56 @@ pub fn tracks_version_suffix(table: &PlatformTable) -> String {
 
 /// Returns `upstream` with platform structure added for every covered station it contains.
 ///
-/// A covered stop that is absent, not a plain stop, or already parented is skipped with a
-/// warning. A non-empty `feed_info.feed_version` gains [`tracks_version_suffix`]. Every other
-/// archive entry is copied without recompression.
+/// With `names`, the plain stops of `stops.txt` are renamed first ([`apply_names`]), so generated
+/// parents and platforms inherit the new names; a renaming failure is logged and the build goes on
+/// without names. A covered stop that is absent, not a plain stop, or already parented is skipped
+/// with a warning. A non-empty `feed_info.feed_version` gains [`tracks_version_suffix`], then
+/// [`names_version_suffix`] when names were applied. Every other archive entry is copied without
+/// recompression.
 ///
 /// # Errors
 ///
 /// Returns [`AugmentError`] for an unreadable archive, `stops.txt` or `feed_info.txt`, a missing
 /// `stop_id` column, or a generated id that collides with an existing stop.
-pub fn augment_static(upstream: &[u8], table: &PlatformTable) -> Result<Vec<u8>, AugmentError> {
-    let stops = read_entry(upstream, STOPS_FILE)?;
+pub fn augment_static(
+    upstream: &[u8],
+    table: &PlatformTable,
+    names: Option<&StationNames>,
+) -> Result<Vec<u8>, AugmentError> {
+    augment_static_versioned(upstream, table, names).map(|(bytes, _)| bytes)
+}
+
+/// [`augment_static`], also returning the version suffix it applied.
+pub(crate) fn augment_static_versioned(
+    upstream: &[u8],
+    table: &PlatformTable,
+    names: Option<&StationNames>,
+) -> Result<(Vec<u8>, String), AugmentError> {
+    let mut stops = read_entry(upstream, STOPS_FILE)?;
+    let mut suffix = tracks_version_suffix(table);
+    if let Some(names) = names {
+        // Names go first: `apply_names` renames only plain, unparented rows, and
+        // `augment_stops` re-parents covered stops.
+        match apply_names(&stops, names) {
+            Ok((renamed, digest)) => {
+                stops = renamed;
+                suffix.push_str(&names_version_suffix(&digest));
+            }
+            Err(error) => {
+                tracing::warn!(%error, stage = "static", "station renaming failed; publishing without names");
+            }
+        }
+    }
     let rewritten = augment_stops(&stops, table)?;
     let augmented = replace_entry(upstream, STOPS_FILE, &rewritten)?;
     let Some(feed_info) = read_optional_entry(&augmented, FEED_INFO_FILE)? else {
-        return Ok(augmented);
+        return Ok((augmented, suffix));
     };
-    match suffix_feed_version(&feed_info, &tracks_version_suffix(table))? {
-        Some(versioned) => replace_entry(&augmented, FEED_INFO_FILE, &versioned),
-        None => Ok(augmented),
+    match suffix_feed_version(&feed_info, &suffix)? {
+        Some(versioned) => {
+            replace_entry(&augmented, FEED_INFO_FILE, &versioned).map(|bytes| (bytes, suffix))
+        }
+        None => Ok((augmented, suffix)),
     }
 }
 
@@ -620,7 +653,16 @@ pub(crate) fn fail(stage: &str, error: impl std::fmt::Display) -> AugmentError {
     AugmentError(format!("{stage}: {error}"))
 }
 
-fn augment_stops(raw: &[u8], table: &PlatformTable) -> Result<Vec<u8>, AugmentError> {
+/// Reads `stops.txt`: strips the BOM, accepts short rows, trims headers, appends any of
+/// `extra_columns` that are missing, and pads every row to the header width.
+///
+/// # Errors
+///
+/// Returns [`AugmentError`] when the CSV can't be parsed.
+pub(crate) fn read_stops(
+    raw: &[u8],
+    extra_columns: &[&str],
+) -> Result<(Vec<String>, Vec<Vec<String>>), AugmentError> {
     let body = raw.strip_prefix(UTF8_BOM).unwrap_or(raw);
     // GTFS producers may omit trailing empty fields, so short rows are legal; they are padded to
     // the header width below rather than failing the whole augmentation.
@@ -636,14 +678,45 @@ fn augment_stops(raw: &[u8], table: &PlatformTable) -> Result<Vec<u8>, AugmentEr
         let record = record.map_err(|error| fail("stops.txt row", error))?;
         rows.push(record.iter().map(str::to_string).collect());
     }
-    for column in ["location_type", "parent_station", "platform_code"] {
+    for column in extra_columns {
         if !headers.iter().any(|header| header == column) {
-            headers.push(column.to_string());
+            headers.push((*column).to_string());
         }
     }
     for row in &mut rows {
         row.resize(headers.len(), String::new());
     }
+    Ok((headers, rows))
+}
+
+/// Writes `stops.txt` with the `\n` line terminator.
+///
+/// # Errors
+///
+/// Returns [`AugmentError`] when a record can't be written.
+pub(crate) fn write_stops(
+    headers: &[String],
+    rows: &[Vec<String>],
+) -> Result<Vec<u8>, AugmentError> {
+    let mut writer = csv::WriterBuilder::new()
+        .terminator(csv::Terminator::Any(b'\n'))
+        .from_writer(Vec::new());
+    writer
+        .write_record(headers)
+        .map_err(|error| fail("stops.txt write", error))?;
+    for row in rows {
+        writer
+            .write_record(row)
+            .map_err(|error| fail("stops.txt write", error))?;
+    }
+    writer
+        .into_inner()
+        .map_err(|error| fail("stops.txt write", error))
+}
+
+fn augment_stops(raw: &[u8], table: &PlatformTable) -> Result<Vec<u8>, AugmentError> {
+    let (headers, mut rows) =
+        read_stops(raw, &["location_type", "parent_station", "platform_code"])?;
     let column = |name: &str| headers.iter().position(|header| header == name);
     let id = column("stop_id").ok_or_else(|| AugmentError("stops.txt has no stop_id".into()))?;
     let location = column("location_type").unwrap_or_default();
@@ -686,6 +759,7 @@ fn augment_stops(raw: &[u8], table: &PlatformTable) -> Result<Vec<u8>, AugmentEr
             &headers,
             &[
                 "stop_name",
+                "stop_desc",
                 "stop_lat",
                 "stop_lon",
                 "stop_timezone",
@@ -713,20 +787,8 @@ fn augment_stops(raw: &[u8], table: &PlatformTable) -> Result<Vec<u8>, AugmentEr
         }
     }
 
-    let mut writer = csv::WriterBuilder::new()
-        .terminator(csv::Terminator::Any(b'\n'))
-        .from_writer(Vec::new());
-    writer
-        .write_record(&headers)
-        .map_err(|error| fail("stops.txt write", error))?;
-    for row in rows.iter().chain(added.iter()) {
-        writer
-            .write_record(row)
-            .map_err(|error| fail("stops.txt write", error))?;
-    }
-    writer
-        .into_inner()
-        .map_err(|error| fail("stops.txt write", error))
+    let all: Vec<Vec<String>> = rows.iter().chain(added.iter()).cloned().collect();
+    write_stops(&headers, &all)
 }
 
 fn clear_except(row: &mut [String], headers: &[String], keep: &[&str]) {
@@ -740,6 +802,7 @@ fn clear_except(row: &mut [String], headers: &[String], keep: &[&str]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::static_names::NAMES_VERSION_MARKER;
     use gtfs_structures::{Gtfs, LocationType};
 
     const STOPS: &str = "stop_id,stop_code,stop_name,stop_url,stop_timezone,stop_lat,stop_lon\n\
@@ -792,7 +855,7 @@ NYP,NYP,\"Ny Moynihan Train Hall At Penn Station\",https://www.amtrak.com/statio
         assert!(observed.insert_track("WAS", "24@H"));
         assert!(!observed.insert_track("WAS", "24@GATE"));
 
-        let augmented = augment_static(&fixture_zip(STOPS.as_bytes()), &table).unwrap();
+        let augmented = augment_static(&fixture_zip(STOPS.as_bytes()), &table, None).unwrap();
         let gtfs = Gtfs::from_reader(Cursor::new(augmented)).unwrap();
         let gated = &gtfs.stops["NWK:track:1:gate:H"];
         assert_eq!(platform_stop_id("NWK", "1@H"), "NWK:track:1:gate:H");
@@ -842,7 +905,7 @@ NYP,NYP,\"Ny Moynihan Train Hall At Penn Station\",https://www.amtrak.com/statio
         assert!(!table.insert_track("bad:stop", "1"));
         assert_ne!(table.digest(), before);
         assert_eq!(table.canonical(), "BUF=MAIN;NWK=1;PVD=1");
-        let augmented = augment_static(&fixture_zip(STOPS.as_bytes()), &table).unwrap();
+        let augmented = augment_static(&fixture_zip(STOPS.as_bytes()), &table, None).unwrap();
         let gtfs = Gtfs::from_reader(Cursor::new(augmented)).unwrap();
         assert!(gtfs.stops.contains_key("NWK:track:1"));
         assert!(!gtfs.stops.contains_key("PVD:track:1"));
@@ -916,7 +979,7 @@ NYP,NYP,\"Ny Moynihan Train Hall At Penn Station\",https://www.amtrak.com/statio
     #[test]
     fn augmentation_adds_platform_structure_only() {
         let upstream = fixture_zip(STOPS.as_bytes());
-        let augmented = augment_static(&upstream, &table()).unwrap();
+        let augmented = augment_static(&upstream, &table(), None).unwrap();
         let gtfs = Gtfs::from_reader(Cursor::new(augmented.clone())).unwrap();
 
         let station = &gtfs.stops["NWK:station"];
@@ -961,8 +1024,8 @@ NYP,NYP,\"Ny Moynihan Train Hall At Penn Station\",https://www.amtrak.com/statio
     fn augmentation_is_deterministic() {
         let upstream = fixture_zip(STOPS.as_bytes());
         assert_eq!(
-            augment_static(&upstream, &table()).unwrap(),
-            augment_static(&upstream, &table()).unwrap()
+            augment_static(&upstream, &table(), None).unwrap(),
+            augment_static(&upstream, &table(), None).unwrap()
         );
     }
 
@@ -989,7 +1052,7 @@ NYP,NYP,\"Ny Moynihan Train Hall At Penn Station\",https://www.amtrak.com/statio
         let mut feed_info = UTF8_BOM.to_vec();
         feed_info.extend_from_slice(b"feed_publisher_name,feed_publisher_url,feed_lang,default_lang,feed_start_date,feed_end_date,feed_version,feed_contact_email,feed_contact_url\nAmtrak,http://www.amtrak.com,en,en,20261118,20271115,20261117,DL_DTGTFSsupport@Amtrak.com,http://www.amtrak.com\n");
         let upstream = with_feed_info(&fixture_zip(STOPS.as_bytes()), &feed_info);
-        let augmented = augment_static(&upstream, &table()).unwrap();
+        let augmented = augment_static(&upstream, &table(), None).unwrap();
 
         let gtfs = Gtfs::from_reader(Cursor::new(augmented.clone())).unwrap();
         let expected = format!("20261117{}", tracks_version_suffix(&table()));
@@ -1001,7 +1064,10 @@ NYP,NYP,\"Ny Moynihan Train Hall At Penn Station\",https://www.amtrak.com/statio
             gtfs.feed_info[0].contact_email.as_deref(),
             Some("DL_DTGTFSsupport@Amtrak.com")
         );
-        assert_eq!(augmented, augment_static(&upstream, &table()).unwrap());
+        assert_eq!(
+            augmented,
+            augment_static(&upstream, &table(), None).unwrap()
+        );
         for (old, new) in entries(&upstream).iter().zip(&entries(&augmented)) {
             if old.0 != STOPS_FILE && old.0 != FEED_INFO_FILE {
                 assert_eq!(old.1, new.1, "{} changed", old.0);
@@ -1013,7 +1079,7 @@ NYP,NYP,\"Ny Moynihan Train Hall At Penn Station\",https://www.amtrak.com/statio
     fn feed_info_without_a_version_is_copied() {
         let feed_info = b"feed_publisher_name,feed_publisher_url,feed_lang,feed_version\nAmtrak,https://amtrak.com,en,\n";
         let upstream = with_feed_info(&fixture_zip(STOPS.as_bytes()), feed_info);
-        let augmented = augment_static(&upstream, &table()).unwrap();
+        let augmented = augment_static(&upstream, &table(), None).unwrap();
         assert_eq!(read_entry(&augmented, FEED_INFO_FILE).unwrap(), feed_info);
         let raw = |zip: &[u8]| {
             entries(zip)
@@ -1033,7 +1099,7 @@ NYP,NYP,\"Ny Moynihan Train Hall At Penn Station\",https://www.amtrak.com/statio
     fn byte_order_mark_is_ignored() {
         let mut stops = UTF8_BOM.to_vec();
         stops.extend_from_slice(STOPS.as_bytes());
-        let augmented = augment_static(&fixture_zip(&stops), &table()).unwrap();
+        let augmented = augment_static(&fixture_zip(&stops), &table(), None).unwrap();
         let gtfs = Gtfs::from_reader(Cursor::new(augmented)).unwrap();
         assert!(gtfs.stops.contains_key("NWK:track:A"));
     }
@@ -1045,7 +1111,7 @@ P,Parent,40,-74,1,\n\
 NWK,Newark,40,-74,0,P\n\
 NYP,Penn,40,-73,1,\n\
 X,Stop,40,-73,0,P\n";
-        let augmented = augment_static(&fixture_zip(stops.as_bytes()), &table()).unwrap();
+        let augmented = augment_static(&fixture_zip(stops.as_bytes()), &table(), None).unwrap();
         let gtfs = Gtfs::from_reader(Cursor::new(augmented)).unwrap();
         assert!(!gtfs
             .stops
@@ -1058,7 +1124,7 @@ X,Stop,40,-73,0,P\n";
         let stops = "stop_id,stop_name,stop_lat,stop_lon,stop_timezone,stop_url\n\
 NWK,Newark,40.73,-74.16\n\
 NYP,Penn,40.75,-73.99,America/New_York,https://www.amtrak.com/stations/nyp\n";
-        let augmented = augment_static(&fixture_zip(stops.as_bytes()), &table()).unwrap();
+        let augmented = augment_static(&fixture_zip(stops.as_bytes()), &table(), None).unwrap();
         let gtfs = Gtfs::from_reader(Cursor::new(augmented)).unwrap();
         assert!(gtfs.stops.contains_key("NWK:track:A"));
         assert_eq!(
@@ -1071,10 +1137,10 @@ NYP,Penn,40.75,-73.99,America/New_York,https://www.amtrak.com/stations/nyp\n";
     fn collisions_and_missing_stop_ids_fail() {
         let stops =
             "stop_id,stop_name,stop_lat,stop_lon\nNWK,Newark,40,-74\nNWK:track:A,Clash,40,-74\n";
-        assert!(augment_static(&fixture_zip(stops.as_bytes()), &table()).is_err());
+        assert!(augment_static(&fixture_zip(stops.as_bytes()), &table(), None).is_err());
         let stops = "stop_name,stop_lat,stop_lon\nNewark,40,-74\n";
-        assert!(augment_static(&fixture_zip(stops.as_bytes()), &table()).is_err());
-        assert!(augment_static(b"not a zip", &table()).is_err());
+        assert!(augment_static(&fixture_zip(stops.as_bytes()), &table(), None).is_err());
+        assert!(augment_static(b"not a zip", &table(), None).is_err());
     }
 
     /// Augments a real feed for manual validator runs:
@@ -1087,7 +1153,95 @@ NYP,Penn,40.75,-73.99,America/New_York,https://www.amtrak.com/stations/nyp\n";
         let table = PlatformTable::parse("NYP=1-21;NWK=A,1-5;NHV=1-4,8,10,12,14").unwrap();
         let upstream = std::fs::read(input).unwrap();
         let upstream = crate::static_repair::repair_static(&upstream).unwrap_or(upstream);
-        let augmented = augment_static(&upstream, &table).unwrap();
+        let augmented = augment_static(&upstream, &table, None).unwrap();
         std::fs::write(output, augmented).unwrap();
+    }
+
+    fn new_haven_names() -> StationNames {
+        let mut names = StationNames::default();
+        names.seen.insert(
+            "NHV".into(),
+            crate::static_names::SeenStation {
+                display_name: Some("New Haven".into()),
+                ..Default::default()
+            },
+        );
+        names
+    }
+
+    const NHV_STOPS: &str =
+        "stop_id,stop_name,stop_lat,stop_lon\nNHV,New Haven Union Station,41.3,-72.9\nNWK,Newark,40.7,-74.1\nNYP,New York,40.7,-74.0\n";
+
+    #[test]
+    fn platforms_inherit_the_new_name() {
+        let table = PlatformTable::parse("NHV=1").unwrap();
+        let augmented = augment_static(
+            &fixture_zip(NHV_STOPS.as_bytes()),
+            &table,
+            Some(&new_haven_names()),
+        )
+        .unwrap();
+        let gtfs = Gtfs::from_reader(Cursor::new(augmented)).unwrap();
+        assert_eq!(gtfs.stops["NHV"].name.as_deref(), Some("New Haven"));
+        assert_eq!(gtfs.stops["NHV:station"].name.as_deref(), Some("New Haven"));
+        assert_eq!(
+            gtfs.stops["NHV:track:1"].name.as_deref(),
+            Some("New Haven Track 1")
+        );
+        assert_eq!(
+            gtfs.stops["NHV:track:1"].parent_station.as_deref(),
+            Some("NHV:station")
+        );
+    }
+
+    #[test]
+    fn parent_keeps_the_new_stop_desc() {
+        let table = PlatformTable::parse("NHV=1").unwrap();
+        let mut names = new_haven_names();
+        names.directory.insert(
+            "NHV".into(),
+            crate::static_names::DirectoryStation {
+                name: "New Haven, CT".into(),
+                city: "New Haven".into(),
+                facility: Some("Union Station".into()),
+            },
+        );
+        let augmented =
+            augment_static(&fixture_zip(NHV_STOPS.as_bytes()), &table, Some(&names)).unwrap();
+        let gtfs = Gtfs::from_reader(Cursor::new(augmented)).unwrap();
+        let desc = gtfs.stops["NHV"].description.clone();
+        assert!(desc.as_deref().is_some_and(|d| !d.is_empty()), "{desc:?}");
+        assert_eq!(gtfs.stops["NHV:station"].description, desc);
+        assert_eq!(gtfs.stops["NHV:track:1"].description, None);
+    }
+
+    #[test]
+    fn names_add_a_suffix_after_the_tracks_suffix() {
+        let table = PlatformTable::parse("NHV=1").unwrap();
+        let (_, suffix) = augment_static_versioned(
+            &fixture_zip(NHV_STOPS.as_bytes()),
+            &table,
+            Some(&new_haven_names()),
+        )
+        .unwrap();
+        let prefix = format!("{}{}", tracks_version_suffix(&table), NAMES_VERSION_MARKER);
+        assert!(suffix.starts_with(&prefix), "{suffix}");
+        assert_eq!(suffix.len(), prefix.len() + 8);
+    }
+
+    #[test]
+    fn renaming_failure_keeps_tracks() {
+        let stops = "stop_id,stop_lat,stop_lon\nNHV,41.3,-72.9\nNWK,40.7,-74.1\nNYP,40.7,-74.0\n";
+        let table = PlatformTable::parse("NHV=1").unwrap();
+        let (bytes, suffix) = augment_static_versioned(
+            &fixture_zip(stops.as_bytes()),
+            &table,
+            Some(&new_haven_names()),
+        )
+        .unwrap();
+        assert_eq!(suffix, tracks_version_suffix(&table));
+        assert!(!suffix.contains(NAMES_VERSION_MARKER));
+        let gtfs = Gtfs::from_reader(Cursor::new(bytes)).unwrap();
+        assert!(gtfs.stops.contains_key("NHV:track:1"));
     }
 }

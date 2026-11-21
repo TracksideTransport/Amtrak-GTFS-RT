@@ -33,6 +33,7 @@ from .config import Config
 from .decrypt import DecryptError, decrypt_payload
 from .lead_time import LeadProfile
 from .select import FLEET_TRAINS_SCHEMA, DueTrain, choose_fetches, due_trains, is_hot, is_warm
+from .stations import DIRECTORY_URL, StationsStore
 from .store import TrackStore
 
 logger = logging.getLogger(__name__)
@@ -228,17 +229,27 @@ class ResidentBrowser:
         :class:`BrowserUnavailable` when the browser cannot run the request.
         """
         url = status_url(train.train_number, train.service_date)
+        status, body = await self.fetch_json(url, cfg.fetch_timeout_secs)
+        return document_from_eval({"status": status, "body": body})
+
+    async def fetch_json(self, url: str, timeout_secs: int) -> tuple[int, str]:
+        """Fetch ``url`` in the page with ``Accept: application/json``: ``(status, body)``.
+
+        Raises :class:`BrowserUnavailable` when the browser cannot run the request.
+        """
         page = await self._ensure_page()
-        timeout = cfg.fetch_timeout_secs
         try:
             raw = await asyncio.wait_for(
-                page.evaluate(_FETCH_JS, [url, timeout * 1000]), timeout + 5
+                page.evaluate(_FETCH_JS, [url, timeout_secs * 1000]), timeout_secs + 5
             )
         except Exception as error:  # noqa: BLE001 — a dead renderer or hung request
             await self._failed(f"status fetch failed: {describe_error(error)}")
             raise BrowserUnavailable(type(error).__name__, attempted=True) from None
         self._backoff = 0.0
-        return document_from_eval(raw)
+        if not isinstance(raw, dict):
+            return 0, ""
+        status, body = raw.get("status"), raw.get("body")
+        return (status if isinstance(status, int) else 0), (body if isinstance(body, str) else "")
 
     async def recycle_if_due(self) -> None:
         """Swap the status page for a fresh one once it is ``BROWSER_MAX_AGE_SECS`` old.
@@ -395,6 +406,7 @@ async def poll_once(
     trains_fetcher: TrainsFetcher,
     status_fetcher: StatusFetcher,
     full: bool = True,
+    stations: StationsStore | None = None,
 ) -> bool:
     """One cycle. Raises when the train list itself cannot be read; status misses are skipped.
 
@@ -455,8 +467,17 @@ async def poll_once(
     outcomes: list[str] = []
     for train in picks:
         kind = "hot" if is_hot(train, tracked, cfg.hot_window_secs) else "ready"
+        label = f"{train.train_number} {kind}"
+        suffix = ""
+        if train.next_station:
+            shown = (
+                stations.display_name(train.next_station)
+                if stations is not None
+                else train.next_station
+            )
+            suffix = f" next={train.next_station} ({shown})"
         if browser_down is not None:
-            outcomes.append(f"{train.train_number} {kind} skipped (browser unavailable)")
+            outcomes.append(f"{label} skipped (browser unavailable){suffix}")
             continue
         try:
             document = await status_fetcher(cfg, train)
@@ -466,21 +487,23 @@ async def poll_once(
                 # The pick's own fetch ran and failed. It takes the cooldown, so a failure
                 # specific to this train cannot put it first after every relaunch.
                 last_fetched[train.key] = now.timestamp()
-            outcomes.append(f"{train.train_number} {kind} browser unavailable ({browser_down})")
+            outcomes.append(f"{label} browser unavailable ({browser_down}){suffix}")
             continue
         except StatusMiss as error:
             last_fetched[train.key] = now.timestamp()
             rejected[str(error)] += 1
-            outcomes.append(f"{train.train_number} {kind} rejected ({error})")
+            outcomes.append(f"{label} rejected ({error}){suffix}")
             continue
         last_fetched[train.key] = now.timestamp()
         if document is None:
             rejected["empty"] += 1
-            outcomes.append(f"{train.train_number} {kind} rejected (empty)")
+            outcomes.append(f"{label} rejected (empty){suffix}")
             continue
         store.put(train.train_number, train.service_date, document, now.timestamp())
+        if stations is not None:
+            stations.record_document(document)
         stored += 1
-        outcomes.append(f"{train.train_number} {kind} stored")
+        outcomes.append(f"{label} stored{suffix}")
     store.prune(now.timestamp(), cfg.document_ttl_secs)
     succeeded = not picks or stored > 0
     if succeeded:
@@ -537,6 +560,40 @@ def take_early_hints() -> tuple[set[str], set[str]]:
     return trains, stations
 
 
+async def refresh_directory(
+    stations: StationsStore, browser: ResidentBrowser, cfg: Config, now: float
+) -> None:
+    """Fetch Amtrak's station directory when it is due, or at once for a new manual request.
+
+    A request (``stations.take_request``) skips the interval and the failure backoff and is acted
+    on once, whether the fetch succeeds or fails. A failure is logged, never raised.
+    """
+    requested = stations.take_request() is not None
+    if not requested and not stations.directory_due(now, cfg.stations_refresh_secs):
+        return
+    if requested:
+        logger.info("station directory fetch requested by the operator")
+    try:
+        status, body = await browser.fetch_json(DIRECTORY_URL, cfg.fetch_timeout_secs)
+    except BrowserUnavailable as error:
+        stations.accept_directory("", now)
+        logger.warning("station directory not fetched: browser unavailable (%s)", error)
+        return
+    except Exception:  # noqa: BLE001 — the directory must never stop the track loop
+        stations.accept_directory("", now)
+        logger.exception("station directory fetch failed")
+        return
+    if status == 200 and stations.accept_directory(body, now):
+        rows = (stations.snapshot() or {}).get("directory") or []
+        logger.info("station directory fetched: %d stations", len(rows))
+        return
+    if status == 200:
+        logger.warning("station directory rejected: not a usable station list")
+    else:
+        stations.accept_directory("", now)
+        logger.warning("station directory not fetched: http %s", status)
+
+
 async def run_forever(
     store: TrackStore,
     cfg: Config,
@@ -548,6 +605,7 @@ async def run_forever(
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     clock: Clock | None = None,
     iterations: int | None = None,
+    stations: StationsStore | None = None,
 ) -> None:
     """Poll until cancelled, or ``iterations`` times in tests.
 
@@ -576,6 +634,7 @@ async def run_forever(
                     trains_fetcher=trains,
                     status_fetcher=status,
                     full=full,
+                    **({} if stations is None else {"stations": stations}),
                 )
             except TrainListNotReady:
                 # A cold start: the service publishes its first generation shortly. Not a failure.
@@ -586,6 +645,8 @@ async def run_forever(
                 logger.exception("track poll failed; keeping the last snapshot")
                 succeeded = False
                 raised = True
+            if stations is not None:
+                await refresh_directory(stations, browser, cfg, now_of().timestamp())
             store.record_poll(succeeded)
             store.mark_cycle(now_of().timestamp())
             count += 1

@@ -183,6 +183,9 @@ def posted_track_rows(train: str, service_date: str, document: dict) -> list[dic
             name = station.get("name") or ""
             if not isinstance(name, str):
                 name = ""
+            display = station.get("displayName")
+            if not isinstance(display, str) or not display.strip():
+                display = name
             for side in ("arrival", "departure"):
                 event = stop.get(side)
                 if not isinstance(event, dict):
@@ -201,6 +204,7 @@ def posted_track_rows(train: str, service_date: str, document: dict) -> list[dic
                         "service_date": service_date,
                         "station": code,
                         "station_name": name,
+                        "station_display": display,
                         "side": side,
                         "track": number,
                         "gate": (gate.get("number") if isinstance(gate, dict) else gate) or "",

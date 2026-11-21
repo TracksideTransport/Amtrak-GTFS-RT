@@ -409,7 +409,7 @@ t167,16:20:00,16:20:00,BOS,1\nt167,17:06:00,17:08:00,PVD,2\n"),
         // The observed track becomes a platform stop in the published static feed.
         let table = platforms.snapshot();
         let augmented =
-            crate::static_augment::augment_static(&northeast_regional_zip(), &table).unwrap();
+            crate::static_augment::augment_static(&northeast_regional_zip(), &table, None).unwrap();
         let gtfs = gtfs_structures::Gtfs::from_reader(std::io::Cursor::new(augmented)).unwrap();
         let stop = &gtfs.stops[platform];
         assert_eq!(stop.platform_code.as_deref(), Some(code));
