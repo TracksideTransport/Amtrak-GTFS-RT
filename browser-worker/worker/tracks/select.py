@@ -59,6 +59,8 @@ class DueTrain:
     :func:`is_hot`): a stop where riders cannot board, or at a station not in the train list's
     ``track_stations``, is left out. ``unlisted_stops`` are the upcoming boarding stops at
     stations not in ``track_stations``; they can make the train warm (see :func:`is_warm`).
+    ``next_station`` is the code of the station with the soonest of those future events (the
+    first in document order on a tie), or ``None`` when no such stop has a code.
     """
 
     train_number: str
@@ -68,6 +70,7 @@ class DueTrain:
     upcoming: frozenset[str] = frozenset()
     track_stops: tuple[TrackStop, ...] = ()
     unlisted_stops: tuple[TrackStop, ...] = ()
+    next_station: str | None = None
 
     @property
     def key(self) -> tuple[str, str]:
@@ -105,6 +108,7 @@ def due_trains(
         upcoming: set[str] = set()
         track_stops: list[TrackStop] = []
         unlisted_stops: list[TrackStop] = []
+        next_station: tuple[float, str] | None = None
         for code, moments, boarding in stops:
             station_before = (
                 lead.before_secs(code, before_secs) if lead is not None else before_secs
@@ -122,6 +126,9 @@ def due_trains(
             if code is None:
                 continue
             upcoming.add(code)
+            soonest = min(stop_ahead)
+            if next_station is None or soonest < next_station[0]:
+                next_station = (soonest, code)
             if not boarding:
                 continue
             station_hot = (
@@ -144,6 +151,7 @@ def due_trains(
             frozenset(upcoming),
             tuple(track_stops),
             tuple(unlisted_stops),
+            next_station[1] if next_station is not None else None,
         )
         current = found.get(train.key)
         if current is None or train.soonest_secs < current.soonest_secs:

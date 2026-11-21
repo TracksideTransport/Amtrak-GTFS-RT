@@ -21,7 +21,7 @@ DOCUMENT = {
                     },
                 },
                 {
-                    "station": {"code": "BWI", "name": "BWI Airport, MD"},
+                    "station": {"code": "BWI", "name": "BWI Airport, MD", "displayName": "Baltimore BWI"},
                     "arrival": {
                         "schedule": {"dateTime": "2026-10-19T22:33:00-04:00"},
                         "track": {"number": "1", "asOf": "2026-10-19T10:33:01-04:00"},
@@ -52,6 +52,7 @@ def test_posted_tracks_lists_every_assigned_track_in_stop_order():
         "service_date": TODAY,
         "station": "WAS",
         "station_name": "Washington, DC",
+        "station_display": "Washington, DC",
         "side": "departure",
         "track": "24",
         "gate": "H",
@@ -59,6 +60,15 @@ def test_posted_tracks_lists_every_assigned_track_in_stop_order():
         "as_of": "2026-10-19T21:38:18-04:00",
     }
     assert rows[2]["scheduled"] == "" and rows[2]["as_of"] == ""
+
+
+def test_dump_rows_name_station():
+    rows = posted_tracks("66", TODAY, DOCUMENT)
+    assert [(row["station"], row["station_display"]) for row in rows] == [
+        ("WAS", "Washington, DC"),
+        ("BWI", "Baltimore BWI"),
+        ("BUF", ""),
+    ]
 
 
 def test_posted_tracks_tolerates_documents_without_stops():

@@ -30,6 +30,7 @@ from worker.tracks.poller import (
     take_early_hints,
 )
 from worker.tracks.select import DueTrain
+from worker.tracks.stations import StationsStore
 from worker.tracks.store import TrackStore
 
 NOW = datetime(2026, 10, 17, 21, 0, tzinfo=timezone.utc)
@@ -735,10 +736,35 @@ def test_each_cycle_logs_its_picks_with_their_outcomes(caplog):
     asyncio.run(poll_once(store, Config(), {}, now=NOW, trains_fetcher=trains, status_fetcher=mixed))
     lines = [record.getMessage() for record in caplog.records]
     assert (
-        "track poll picks: 172 hot stored, 86 hot rejected (http 404), 2154 hot rejected (empty), "
-        "95 hot browser unavailable (Error), 66 ready skipped (browser unavailable)"
+        "track poll picks: 172 hot stored next=PVD (PVD), 86 hot rejected (http 404) next=PVD (PVD), "
+        "2154 hot rejected (empty) next=PVD (PVD), "
+        "95 hot browser unavailable (Error) next=PVD (PVD), "
+        "66 ready skipped (browser unavailable) next=NYP (NYP)"
     ) in lines
     assert any(line.startswith("track poll due=5 picked=5 stored=1 ") for line in lines)
+
+
+def test_picks_line_names_next_station(caplog):
+    stations = StationsStore(None)
+    stations.record_document(
+        {"data": [{"stops": [{"station": {"code": "PVD", "name": "Providence"}}]}]}
+    )
+
+    async def trains(_cfg):
+        return _hot_fleet("172")
+
+    async def stored(_cfg, _train):
+        return {"data": []}
+
+    caplog.set_level(logging.INFO, logger="worker.tracks.poller")
+    asyncio.run(
+        poll_once(
+            TrackStore(), Config(), {}, now=NOW, trains_fetcher=trains, status_fetcher=stored,
+            stations=stations,
+        )
+    )
+    lines = [record.getMessage() for record in caplog.records]
+    assert "track poll picks: 172 hot stored next=PVD (Providence)" in lines
 
 
 def test_a_fresh_install_still_checks_a_boarding_stop_at_an_unobserved_station():

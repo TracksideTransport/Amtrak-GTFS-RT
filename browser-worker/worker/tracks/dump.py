@@ -41,7 +41,7 @@ _COLUMNS = (
     ("gate", "Gate"),
     ("scheduled", "Scheduled"),
     ("as_of", "As of"),
-    ("station_name", "Station name"),
+    ("station_display", "Station name"),
 )
 
 

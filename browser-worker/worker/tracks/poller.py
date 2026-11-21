@@ -467,8 +467,17 @@ async def poll_once(
     outcomes: list[str] = []
     for train in picks:
         kind = "hot" if is_hot(train, tracked, cfg.hot_window_secs) else "ready"
+        label = f"{train.train_number} {kind}"
+        suffix = ""
+        if train.next_station:
+            shown = (
+                stations.display_name(train.next_station)
+                if stations is not None
+                else train.next_station
+            )
+            suffix = f" next={train.next_station} ({shown})"
         if browser_down is not None:
-            outcomes.append(f"{train.train_number} {kind} skipped (browser unavailable)")
+            outcomes.append(f"{label} skipped (browser unavailable){suffix}")
             continue
         try:
             document = await status_fetcher(cfg, train)
@@ -478,23 +487,23 @@ async def poll_once(
                 # The pick's own fetch ran and failed. It takes the cooldown, so a failure
                 # specific to this train cannot put it first after every relaunch.
                 last_fetched[train.key] = now.timestamp()
-            outcomes.append(f"{train.train_number} {kind} browser unavailable ({browser_down})")
+            outcomes.append(f"{label} browser unavailable ({browser_down}){suffix}")
             continue
         except StatusMiss as error:
             last_fetched[train.key] = now.timestamp()
             rejected[str(error)] += 1
-            outcomes.append(f"{train.train_number} {kind} rejected ({error})")
+            outcomes.append(f"{label} rejected ({error}){suffix}")
             continue
         last_fetched[train.key] = now.timestamp()
         if document is None:
             rejected["empty"] += 1
-            outcomes.append(f"{train.train_number} {kind} rejected (empty)")
+            outcomes.append(f"{label} rejected (empty){suffix}")
             continue
         store.put(train.train_number, train.service_date, document, now.timestamp())
         if stations is not None:
             stations.record_document(document)
         stored += 1
-        outcomes.append(f"{train.train_number} {kind} stored")
+        outcomes.append(f"{label} stored{suffix}")
     store.prune(now.timestamp(), cfg.document_ttl_secs)
     succeeded = not picks or stored > 0
     if succeeded:
