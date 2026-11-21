@@ -111,7 +111,11 @@ pub fn renaming_due(
 ) -> bool {
     match applied {
         None => directory_fetched_at.is_some_and(|at| at + FIRST_RENAMING_DELAY <= now),
-        Some(applied) => UNIX_EPOCH + Duration::from_secs(applied.applied_at_unix) + every <= now,
+        // An overflowing due time (a huge persisted value or interval) means never.
+        Some(applied) => UNIX_EPOCH
+            .checked_add(Duration::from_secs(applied.applied_at_unix))
+            .and_then(|at| at.checked_add(every))
+            .is_some_and(|due| due <= now),
     }
 }
 
@@ -155,6 +159,11 @@ pub async fn refresh_names_once(
     };
     if inputs.directory.is_empty() && inputs.seen.is_empty() {
         tracing::warn!("station names are empty; keeping the applied names");
+        return NamesOutcome::Kept;
+    }
+    // An empty directory never replaces applied names (a reset worker or a blocked fetch).
+    if applied.is_some() && inputs.directory.is_empty() && fetched_at.is_none() {
+        tracing::warn!("station directory is empty; keeping the applied names");
         return NamesOutcome::Kept;
     }
     if !renaming_due(applied.as_deref(), fetched_at, now, every) {
@@ -477,5 +486,57 @@ mod tests {
         .await;
         assert_eq!(outcome, NamesOutcome::Kept);
         assert_eq!(names.applied().unwrap().applied_at_unix, 1);
+    }
+
+    #[tokio::test]
+    async fn empty_directory_never_replaces_applied_names() {
+        let url = serve(Router::new().route(
+            "/stations.json",
+            get(|| async {
+                r#"{"directory":[],"directory_fetched_at":null,"seen":{"BOS":{"name":"Boston South"}}}"#
+            }),
+        ))
+        .await;
+        let names = SharedNames::load(path("empty-dir"));
+        names.set_applied(applied(100)).unwrap();
+        names.changed().notified().await;
+        let before = names.applied().unwrap();
+        let outcome = refresh_names_once(
+            &client(),
+            &format!("{url}/stations.json"),
+            &names,
+            FOURTEEN_DAYS,
+            at(100 + 1_209_600),
+        )
+        .await;
+        assert_eq!(outcome, NamesOutcome::Kept);
+        assert_eq!(*names.applied().unwrap(), *before);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), names.changed().notified())
+                .await
+                .is_err(),
+            "an empty directory must not notify"
+        );
+    }
+
+    #[test]
+    fn huge_refresh_interval_is_never_due_and_does_not_panic() {
+        let applied = applied(100);
+        assert!(!renaming_due(
+            Some(&applied),
+            None,
+            at(2_000_000_000),
+            Duration::from_secs(u64::MAX)
+        ));
+        let huge = super::AppliedNames {
+            inputs: StationNames::default(),
+            applied_at_unix: u64::MAX,
+        };
+        assert!(!renaming_due(
+            Some(&huge),
+            None,
+            at(2_000_000_000),
+            FOURTEEN_DAYS
+        ));
     }
 }

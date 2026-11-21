@@ -759,6 +759,7 @@ fn augment_stops(raw: &[u8], table: &PlatformTable) -> Result<Vec<u8>, AugmentEr
             &headers,
             &[
                 "stop_name",
+                "stop_desc",
                 "stop_lat",
                 "stop_lon",
                 "stop_timezone",
@@ -1191,6 +1192,27 @@ NYP,Penn,40.75,-73.99,America/New_York,https://www.amtrak.com/stations/nyp\n";
             gtfs.stops["NHV:track:1"].parent_station.as_deref(),
             Some("NHV:station")
         );
+    }
+
+    #[test]
+    fn parent_keeps_the_new_stop_desc() {
+        let table = PlatformTable::parse("NHV=1").unwrap();
+        let mut names = new_haven_names();
+        names.directory.insert(
+            "NHV".into(),
+            crate::static_names::DirectoryStation {
+                name: "New Haven, CT".into(),
+                city: "New Haven".into(),
+                facility: Some("Union Station".into()),
+            },
+        );
+        let augmented =
+            augment_static(&fixture_zip(NHV_STOPS.as_bytes()), &table, Some(&names)).unwrap();
+        let gtfs = Gtfs::from_reader(Cursor::new(augmented)).unwrap();
+        let desc = gtfs.stops["NHV"].description.clone();
+        assert!(desc.as_deref().is_some_and(|d| !d.is_empty()), "{desc:?}");
+        assert_eq!(gtfs.stops["NHV:station"].description, desc);
+        assert_eq!(gtfs.stops["NHV:track:1"].description, None);
     }
 
     #[test]

@@ -775,6 +775,9 @@ mod tests {
             .insert("ZZZ".into(), dir("Nowhere, NA", "Nowhere", None));
         assert_eq!(digest, names_digest(&resolve_names(&s, &i)));
         assert_eq!(names_version_suffix(&digest), format!("+names.{digest}"));
+        let renamed = statics(&[("BOS", "Boston"), ("NWK", "Newark")]);
+        let other = inputs(&[("BOS", seen(None, Some("Boston Back Bay")))], &[]);
+        assert_ne!(digest, names_digest(&resolve_names(&renamed, &other)));
     }
 
     #[test]

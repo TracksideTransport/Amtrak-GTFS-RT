@@ -1157,7 +1157,8 @@ keeps the names already applied, and an empty set is never applied.
 **Configuration.** `AMTRAK_STOP_NAMES` (`on` by default) takes effect only when `AMTRAK_TRACKS` and
 `AMTRAK_TRACKS_AMTRAK` are on. When it is off, `stops.txt` is unchanged and the version has no
 `+names`. The service finds `/stations.json` by replacing a trailing `/tracks.json` in
-`AMTRAK_TRACKS_AMTRAK_URL`; with any other URL, names are never renewed and a warning is logged.
+`AMTRAK_TRACKS_AMTRAK_URL`; with any other URL, names are never applied (or, once applied, never renewed) and a warning is
+logged.
 
 **Files.** The worker keeps `{AMTRAK_OUTPUT_DIR}/tracks/stations-directory.json` and
 `stations-seen.json`. The service keeps the names it applied in

@@ -360,8 +360,12 @@ async fn build_static(
     let repaired = repair_static(official.as_ref());
     let upstream = repaired.as_deref().unwrap_or(official.as_ref());
     for table in platforms {
-        if let Some(mut snapshot) = augmented_snapshot(upstream, table, names, validator, now).await
-        {
+        let mut built = augmented_snapshot(upstream, table, names, validator, now).await;
+        if built.is_none() && names.is_some() {
+            tracing::warn!(stage = "static", "station names dropped; keeping platforms");
+            built = augmented_snapshot(upstream, table, None, validator, now).await;
+        }
+        if let Some(mut snapshot) = built {
             stamp_official(&mut snapshot, official);
             return Ok(snapshot);
         }
@@ -2090,6 +2094,48 @@ t,10:00:00,10:00:00,NWK,1\nt,10:30:00,10:30:00,OSM,2\n";
             snapshot.parsed.stops["NWK:track:1"].name.as_deref(),
             Some("Newark Penn Track 1")
         );
+        server.abort();
+    }
+
+    /// Rejects archives whose `stops.txt` carries the renamed stop, to drive the names fallback.
+    struct RejectRenamed;
+
+    #[async_trait]
+    impl StaticStandardsValidator for RejectRenamed {
+        async fn validate(&self, zip: Arc<[u8]>) -> Result<(), StaticValidationError> {
+            let parsed = Gtfs::from_reader(Cursor::new(zip)).unwrap();
+            if parsed.stops.values().any(|stop| {
+                stop.name
+                    .as_deref()
+                    .is_some_and(|name| name.contains("Renamed"))
+            }) {
+                Err(StaticValidationError("fixture rejects renamed".into()))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn renamed_feed_rejected_by_validator_keeps_tracks() {
+        let (url, server) = served_zip(augmentable_zip("20260927"));
+        let table = PlatformTable::parse("NWK=1-2").unwrap();
+        let names = nwk_names("Renamed Newark");
+        let snapshot = fetch_static(
+            &url,
+            &RejectRenamed,
+            std::slice::from_ref(&table),
+            Some(&names),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            snapshot.version,
+            format!("20260927+tracks.{}", table.digest())
+        );
+        assert!(!snapshot.version.contains(NAMES_VERSION_MARKER));
+        assert!(snapshot.parsed.stops.contains_key("NWK:track:2"));
+        assert_eq!(snapshot.parsed.stops["NWK"].name.as_deref(), Some("Newark"));
         server.abort();
     }
 
