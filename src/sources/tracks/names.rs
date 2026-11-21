@@ -183,12 +183,15 @@ async fn read_stations(http: &reqwest::Client, url: &str) -> Result<String, Stri
         .get(url)
         .send()
         .await
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| format!("request failed: {}", error.without_url()))?;
     let status = response.status();
     if !status.is_success() {
         return Err(format!("status {status}"));
     }
-    response.text().await.map_err(|error| error.to_string())
+    response
+        .text()
+        .await
+        .map_err(|error| format!("body read failed: {}", error.without_url()))
 }
 
 /// Checks hourly and renames when due. A failed read keeps the applied names and retries at the
@@ -438,6 +441,26 @@ mod tests {
         .await;
         assert_eq!(outcome, NamesOutcome::Kept);
         assert!(names.applied().is_none());
+    }
+
+    #[tokio::test]
+    async fn read_errors_do_not_contain_the_url() {
+        let error = read_stations(&client(), "http://127.0.0.1:1/secret-path/stations.json")
+            .await
+            .unwrap_err();
+        assert!(error.starts_with("request failed"), "{error}");
+        assert!(!error.contains("secret-path"), "{error}");
+        assert!(!error.contains("127.0.0.1"), "{error}");
+        // A bad status carries no URL either.
+        let url = serve(Router::new().route(
+            "/secret-path/stations.json",
+            get(|| async { StatusCode::SERVICE_UNAVAILABLE }),
+        ))
+        .await;
+        let error = read_stations(&client(), &format!("{url}/secret-path/stations.json"))
+            .await
+            .unwrap_err();
+        assert!(!error.contains("secret-path"), "{error}");
     }
 
     #[tokio::test]
