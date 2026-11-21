@@ -90,6 +90,34 @@ fn section<'a>(
 }
 
 impl StationNames {
+    /// These freshly read names merged over the `applied` ones, so board names persist (#179).
+    ///
+    /// For each station in either set, a field present here wins and an absent field keeps the
+    /// applied value, so a board name Amtrak changes is updated but a worker that lost its seen
+    /// table cannot erase one. Stations missing here keep their applied entry. The directory is
+    /// taken whole when this read has one, and the applied directory is kept when it is empty.
+    pub fn persisted_over(self, applied: &StationNames) -> StationNames {
+        let mut seen = applied.seen.clone();
+        for (code, fresh) in self.seen {
+            let entry = seen.entry(code).or_default();
+            let keep = |new: Option<String>, old: &mut Option<String>| {
+                if new.is_some() {
+                    *old = new;
+                }
+            };
+            keep(fresh.name, &mut entry.name);
+            keep(fresh.display_name, &mut entry.display_name);
+            keep(fresh.facility, &mut entry.facility);
+            keep(fresh.audio_name, &mut entry.audio_name);
+        }
+        let directory = if self.directory.is_empty() {
+            applied.directory.clone()
+        } else {
+            self.directory
+        };
+        StationNames { directory, seen }
+    }
+
     /// The persisted JSON form: `{"directory": {CODE: {name, city, facility?}}, "seen": {CODE:
     /// {name?, display_name?, facility?, audio_name?}}}`. Absent optional fields are omitted.
     pub fn to_json(&self) -> serde_json::Value {
@@ -882,5 +910,64 @@ BOS:track:1,Boston South Track 1,0,BOS:station,,\n"
         assert_eq!(shared.applied().as_deref(), Some(&applied));
         let reloaded = SharedNames::load(path);
         assert_eq!(reloaded.applied().as_deref(), Some(&applied));
+    }
+
+    /// #179: board names persist across renamings. A new value wins, an absent field never
+    /// erases a known one, a station missing from the new read keeps its entry, and an empty
+    /// new directory keeps the applied one.
+    #[test]
+    fn fresh_names_merge_over_applied_without_erasing() {
+        let mut applied = StationNames::default();
+        applied.seen.insert(
+            "BBY".into(),
+            SeenStation {
+                name: Some("Boston, MA".into()),
+                display_name: Some("Boston Back Bay".into()),
+                facility: Some("Back Bay Station".into()),
+                audio_name: Some("Boston Back Bay".into()),
+            },
+        );
+        applied.seen.insert(
+            "STS".into(),
+            SeenStation {
+                display_name: Some("New Haven (State Street)".into()),
+                ..SeenStation::default()
+            },
+        );
+        applied.directory.insert(
+            "BBY".into(),
+            DirectoryStation {
+                name: "Boston, MA".into(),
+                city: "Boston".into(),
+                facility: Some("Back Bay Station".into()),
+            },
+        );
+        let mut fresh = StationNames::default();
+        fresh.seen.insert(
+            "BBY".into(),
+            SeenStation {
+                display_name: Some("Boston Back Bay Station".into()),
+                ..SeenStation::default()
+            },
+        );
+        fresh.seen.insert(
+            "NYP".into(),
+            SeenStation {
+                display_name: Some("New York".into()),
+                ..SeenStation::default()
+            },
+        );
+        let merged = fresh.persisted_over(&applied);
+        let bby = &merged.seen["BBY"];
+        assert_eq!(bby.display_name.as_deref(), Some("Boston Back Bay Station"));
+        assert_eq!(bby.facility.as_deref(), Some("Back Bay Station"));
+        assert_eq!(bby.audio_name.as_deref(), Some("Boston Back Bay"));
+        assert_eq!(bby.name.as_deref(), Some("Boston, MA"));
+        assert_eq!(
+            merged.seen["STS"].display_name.as_deref(),
+            Some("New Haven (State Street)")
+        );
+        assert_eq!(merged.seen["NYP"].display_name.as_deref(), Some("New York"));
+        assert_eq!(merged.directory, applied.directory);
     }
 }

@@ -1154,6 +1154,12 @@ days), so the static version does not churn. The worker refetches the directory 
 comes 24 hours (`86400` s) after the directory's first successful fetch. A failed or empty read
 keeps the names already applied, and an empty set is never applied.
 
+**Board names persist.** Each renaming merges what the worker knows over the names already
+applied: a new value wins, so a board name Amtrak changes is updated, but a field or station the
+worker no longer has keeps its applied value. A worker whose station files were reset or set
+aside therefore cannot roll board names back to "City, ST". An empty directory keeps the applied
+directory.
+
 **Configuration.** `AMTRAK_STOP_NAMES` (`on` by default) takes effect only when `AMTRAK_TRACKS` and
 `AMTRAK_TRACKS_AMTRAK` are on. When it is off, `stops.txt` is unchanged and the version has no
 `+names`. The service finds `/stations.json` by replacing a trailing `/tracks.json` in

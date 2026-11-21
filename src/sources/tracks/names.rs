@@ -169,6 +169,11 @@ pub async fn refresh_names_once(
     if !renaming_due(applied.as_deref(), fetched_at, now, every) {
         return NamesOutcome::Kept;
     }
+    // Board names persist: the read is merged over the applied names, never replacing them.
+    let inputs = match applied.as_deref() {
+        Some(current) => inputs.persisted_over(&current.inputs),
+        None => inputs,
+    };
     let applied_at_unix = now
         .duration_since(UNIX_EPOCH)
         .map_or(0, |since| since.as_secs());
@@ -538,5 +543,48 @@ mod tests {
             at(2_000_000_000),
             FOURTEEN_DAYS
         ));
+    }
+
+    /// #179: a renaming merges the worker's names over the applied ones, so a board name the
+    /// worker no longer has (a reset or a corrupt seen table) persists.
+    #[tokio::test]
+    async fn board_names_persist_across_renamings() {
+        let url = serve(Router::new().route(
+            "/stations.json",
+            get(|| async {
+                r#"{"directory":[{"code":"NYP","name":"New York, NY","city":"New York"}],"directory_fetched_at":"2026-11-21T00:00:00Z","seen":{"NYP":{"displayName":"New York"}}}"#
+            }),
+        ))
+        .await;
+        let names = SharedNames::load(path("persist"));
+        let mut kept = applied(100);
+        kept.inputs.seen.insert(
+            "STS".into(),
+            crate::static_names::SeenStation {
+                display_name: Some("New Haven (State Street)".into()),
+                ..Default::default()
+            },
+        );
+        names.set_applied(kept).unwrap();
+        names.changed().notified().await;
+        let outcome = refresh_names_once(
+            &client(),
+            &format!("{url}/stations.json"),
+            &names,
+            FOURTEEN_DAYS,
+            at(100 + 1_209_600),
+        )
+        .await;
+        assert_eq!(outcome, NamesOutcome::Applied);
+        let current = names.applied().unwrap();
+        assert_eq!(
+            current.inputs.seen["STS"].display_name.as_deref(),
+            Some("New Haven (State Street)")
+        );
+        assert_eq!(
+            current.inputs.seen["NYP"].display_name.as_deref(),
+            Some("New York")
+        );
+        assert!(current.inputs.directory.contains_key("NYP"));
     }
 }

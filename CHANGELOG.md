@@ -16,7 +16,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   days. New settings: `AMTRAK_STOP_NAMES` (`on` by default; takes effect only with `AMTRAK_TRACKS`
   and `AMTRAK_TRACKS_AMTRAK` on) and `AMTRAK_STOP_NAMES_REFRESH_SECS` (`1209600`). The browser worker
   gains `GET /stations.json`, `STATIONS_REFRESH_SECS` (`1209600`), and station names in its logs and
-  `worker.tracks.dump` output.
+  `worker.tracks.dump` output. Board names persist: each renaming merges new names over the applied
+  ones, so a reset worker cannot erase them.
 
 ### Changed
 

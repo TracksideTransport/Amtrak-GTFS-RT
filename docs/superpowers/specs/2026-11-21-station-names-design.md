@@ -176,6 +176,9 @@ exact figure depends on which stations the worker has seen, so tests must not pi
     `{AMTRAK_OUTPUT_DIR}/tracks/station-names-applied.json`. Every static build uses them: the daily
     scheduled refresh, track-triggered rebuilds (30 s debounce, 10 min gap), restarts, and the
     restored-snapshot check.
+  - **Board names persist** (owner decision, 2026-11-21): the read is merged over the applied inputs
+    before resolving. A present field wins and an absent field keeps the applied value; stations
+    missing from the read keep their entry; an empty directory keeps the applied directory.
   - **When a renaming is due**, the service reads `/stations.json` and resolves the names. If the
     resolved digest differs from the applied one, it persists the new inputs as applied and rebuilds
     static, even when Amtrak's GTFS answers `304`, skipping the conditional request the way a new
