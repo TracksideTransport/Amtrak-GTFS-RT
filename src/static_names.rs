@@ -7,7 +7,7 @@
 //! `location_type` or `0`, no `parent_station`) and returns the digest that
 //! [`names_version_suffix`] turns into the `+names.{digest}` version suffix.
 
-use crate::static_augment::{fail, AugmentError, UTF8_BOM};
+use crate::static_augment::{read_stops, write_stops, AugmentError};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 
@@ -170,7 +170,10 @@ struct Work {
     name: String,
     city_key: String,
     city_state: Option<String>,
-    facility: Option<String>,
+    /// `facilityName64` only: the facility step (b) adds to a name.
+    name_facility: Option<String>,
+    /// `facilityName64`, else the seen facility: the facility `stop_desc` shows.
+    desc_facility: Option<String>,
 }
 
 fn duplicate_groups(work: &BTreeMap<String, Work>) -> Vec<Vec<String>> {
@@ -219,7 +222,7 @@ fn exact_collisions(work: &mut BTreeMap<String, Work>) -> bool {
     let mut changed = false;
     for code in duplicate_groups(work).into_iter().flatten() {
         let item = work.get_mut(&code).expect("code came from work");
-        if let Some(facility) = item.facility.clone() {
+        if let Some(facility) = item.name_facility.clone() {
             let suffix = format!(" – {facility}");
             if !item.name.ends_with(&suffix) {
                 item.name.push_str(&suffix);
@@ -270,17 +273,19 @@ pub fn resolve_names(
             Some(city) => city.to_lowercase(),
             None => city_part(&name).to_lowercase(),
         };
-        let facility = dir
-            .and_then(|d| non_empty(&d.facility))
-            .or_else(|| seen.and_then(|s| non_empty(&s.facility)))
-            .map(str::to_string);
+        let name_facility = dir.and_then(|d| non_empty(&d.facility)).map(str::to_string);
+        let desc_facility = name_facility.clone().or_else(|| {
+            seen.and_then(|s| non_empty(&s.facility))
+                .map(str::to_string)
+        });
         work.insert(
             code.clone(),
             Work {
                 name,
                 city_key,
                 city_state,
-                facility,
+                name_facility,
+                desc_facility,
             },
         );
     }
@@ -323,7 +328,7 @@ fn describe(item: &Work, dir: Option<&DirectoryStation>) -> String {
         return String::new();
     };
     let mut desc = station.to_string();
-    if let Some(facility) = &item.facility {
+    if let Some(facility) = &item.desc_facility {
         desc.push_str(" – ");
         desc.push_str(facility);
     }
@@ -374,27 +379,7 @@ pub fn apply_names(
     stops_csv: &[u8],
     inputs: &StationNames,
 ) -> Result<(Vec<u8>, String), AugmentError> {
-    let body = stops_csv.strip_prefix(UTF8_BOM).unwrap_or(stops_csv);
-    let mut reader = csv::ReaderBuilder::new().flexible(true).from_reader(body);
-    let mut headers: Vec<String> = reader
-        .headers()
-        .map_err(|error| fail("stops.txt header", error))?
-        .iter()
-        .map(|header| header.trim().to_string())
-        .collect();
-    let mut rows: Vec<Vec<String>> = Vec::new();
-    for record in reader.records() {
-        let record = record.map_err(|error| fail("stops.txt row", error))?;
-        rows.push(record.iter().map(str::to_string).collect());
-    }
-    for column in ["stop_desc", "tts_stop_name"] {
-        if !headers.iter().any(|header| header == column) {
-            headers.push(column.to_string());
-        }
-    }
-    for row in &mut rows {
-        row.resize(headers.len(), String::new());
-    }
+    let (headers, mut rows) = read_stops(stops_csv, &["stop_desc", "tts_stop_name"])?;
     let column = |name: &str| headers.iter().position(|header| header == name);
     let id = column("stop_id").ok_or_else(|| AugmentError("stops.txt has no stop_id".into()))?;
     let name =
@@ -424,20 +409,7 @@ pub fn apply_names(
         }
     }
 
-    let mut writer = csv::WriterBuilder::new()
-        .terminator(csv::Terminator::Any(b'\n'))
-        .from_writer(Vec::new());
-    writer
-        .write_record(&headers)
-        .map_err(|error| fail("stops.txt write", error))?;
-    for row in &rows {
-        writer
-            .write_record(row)
-            .map_err(|error| fail("stops.txt write", error))?;
-    }
-    let bytes = writer
-        .into_inner()
-        .map_err(|error| fail("stops.txt write", error))?;
+    let bytes = write_stops(&headers, &rows)?;
     Ok((bytes, names_digest(&resolved)))
 }
 
@@ -722,5 +694,26 @@ BOS:track:1,Boston South Track 1,0,BOS:station,,\n"
         );
         assert_eq!(StationNames::from_json(&x.to_json()), Ok(x));
         assert!(StationNames::from_json(&serde_json::json!([])).is_err());
+    }
+
+    #[test]
+    fn seen_facility_only_feeds_stop_desc_not_stop_name() {
+        let mut a = seen(None, Some("Lakeland"));
+        a.facility = Some("North side".into());
+        let mut b = seen(None, Some("Lakeland"));
+        b.facility = Some("South side".into());
+        let i = inputs(
+            &[("LAK", a), ("LKL", b)],
+            &[
+                ("LAK", dir("Lakeland, FL", "Lakeland", None)),
+                ("LKL", dir("Lakeland, FL", "Lakeland", None)),
+            ],
+        );
+        let s = statics(&[("LAK", "Lakeland"), ("LKL", "Lakeland")]);
+        let r = resolve_names(&s, &i);
+        assert_eq!(r["LAK"].stop_name, "Lakeland, FL (LAK)");
+        assert_eq!(r["LKL"].stop_name, "Lakeland, FL (LKL)");
+        assert_eq!(r["LAK"].stop_desc, "Lakeland, FL – North side");
+        assert_eq!(r["LKL"].stop_desc, "Lakeland, FL – South side");
     }
 }

@@ -620,7 +620,16 @@ pub(crate) fn fail(stage: &str, error: impl std::fmt::Display) -> AugmentError {
     AugmentError(format!("{stage}: {error}"))
 }
 
-fn augment_stops(raw: &[u8], table: &PlatformTable) -> Result<Vec<u8>, AugmentError> {
+/// Reads `stops.txt`: strips the BOM, accepts short rows, trims headers, appends any of
+/// `extra_columns` that are missing, and pads every row to the header width.
+///
+/// # Errors
+///
+/// Returns [`AugmentError`] when the CSV can't be parsed.
+pub(crate) fn read_stops(
+    raw: &[u8],
+    extra_columns: &[&str],
+) -> Result<(Vec<String>, Vec<Vec<String>>), AugmentError> {
     let body = raw.strip_prefix(UTF8_BOM).unwrap_or(raw);
     // GTFS producers may omit trailing empty fields, so short rows are legal; they are padded to
     // the header width below rather than failing the whole augmentation.
@@ -636,14 +645,45 @@ fn augment_stops(raw: &[u8], table: &PlatformTable) -> Result<Vec<u8>, AugmentEr
         let record = record.map_err(|error| fail("stops.txt row", error))?;
         rows.push(record.iter().map(str::to_string).collect());
     }
-    for column in ["location_type", "parent_station", "platform_code"] {
+    for column in extra_columns {
         if !headers.iter().any(|header| header == column) {
-            headers.push(column.to_string());
+            headers.push((*column).to_string());
         }
     }
     for row in &mut rows {
         row.resize(headers.len(), String::new());
     }
+    Ok((headers, rows))
+}
+
+/// Writes `stops.txt` with the `\n` line terminator.
+///
+/// # Errors
+///
+/// Returns [`AugmentError`] when a record can't be written.
+pub(crate) fn write_stops(
+    headers: &[String],
+    rows: &[Vec<String>],
+) -> Result<Vec<u8>, AugmentError> {
+    let mut writer = csv::WriterBuilder::new()
+        .terminator(csv::Terminator::Any(b'\n'))
+        .from_writer(Vec::new());
+    writer
+        .write_record(headers)
+        .map_err(|error| fail("stops.txt write", error))?;
+    for row in rows {
+        writer
+            .write_record(row)
+            .map_err(|error| fail("stops.txt write", error))?;
+    }
+    writer
+        .into_inner()
+        .map_err(|error| fail("stops.txt write", error))
+}
+
+fn augment_stops(raw: &[u8], table: &PlatformTable) -> Result<Vec<u8>, AugmentError> {
+    let (headers, mut rows) =
+        read_stops(raw, &["location_type", "parent_station", "platform_code"])?;
     let column = |name: &str| headers.iter().position(|header| header == name);
     let id = column("stop_id").ok_or_else(|| AugmentError("stops.txt has no stop_id".into()))?;
     let location = column("location_type").unwrap_or_default();
@@ -713,20 +753,8 @@ fn augment_stops(raw: &[u8], table: &PlatformTable) -> Result<Vec<u8>, AugmentEr
         }
     }
 
-    let mut writer = csv::WriterBuilder::new()
-        .terminator(csv::Terminator::Any(b'\n'))
-        .from_writer(Vec::new());
-    writer
-        .write_record(&headers)
-        .map_err(|error| fail("stops.txt write", error))?;
-    for row in rows.iter().chain(added.iter()) {
-        writer
-            .write_record(row)
-            .map_err(|error| fail("stops.txt write", error))?;
-    }
-    writer
-        .into_inner()
-        .map_err(|error| fail("stops.txt write", error))
+    let all: Vec<Vec<String>> = rows.iter().chain(added.iter()).cloned().collect();
+    write_stops(&headers, &all)
 }
 
 fn clear_except(row: &mut [String], headers: &[String], keep: &[&str]) {
