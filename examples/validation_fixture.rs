@@ -35,6 +35,7 @@ use amtrak_gtfs_rt_service::orchestrator::{
 };
 use amtrak_gtfs_rt_service::sources::amtrak::batch_from_results;
 use amtrak_gtfs_rt_service::static_augment::{augment_static, PlatformTable};
+use amtrak_gtfs_rt_service::static_names::{DirectoryStation, SeenStation, StationNames};
 use gtfs_realtime::trip_descriptor::ScheduleRelationship as TripRelationship;
 use gtfs_realtime::trip_update::stop_time_update::{
     ScheduleRelationship as StopRelationship, StopTimeProperties,
@@ -45,6 +46,7 @@ use gtfs_realtime::{
     TranslatedString, TripDescriptor, TripUpdate, VehiclePosition,
 };
 use gtfs_structures::Gtfs;
+use std::collections::BTreeMap;
 use std::io::{Cursor, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -54,6 +56,57 @@ use zip::write::SimpleFileOptions;
 /// The platform stop the fixture's train is stamped with, and the table that creates it.
 const PLATFORM: &str = "NYP:track:7:gate:A";
 const PLATFORM_TABLE: &str = "NYP=7@A,8";
+
+/// Station names the way the service applies them: two stops with a board name (one also with a
+/// spoken name) and one with only a directory entry, so the validators check the renamed
+/// `stops.txt`, `stop_desc` and `tts_stop_name`.
+fn station_names() -> StationNames {
+    let directory = |name: &str, city: &str, facility: &str| DirectoryStation {
+        name: name.to_string(),
+        city: city.to_string(),
+        facility: Some(facility.to_string()),
+    };
+    StationNames {
+        directory: BTreeMap::from([
+            (
+                "NYP".to_string(),
+                directory("New York, NY", "New York", "Moynihan Train Hall"),
+            ),
+            (
+                "PHL".to_string(),
+                directory(
+                    "Philadelphia, PA",
+                    "Philadelphia",
+                    "William H. Gray III 30th Street",
+                ),
+            ),
+            (
+                "WAS".to_string(),
+                directory("Washington, DC", "Washington", "Union Station"),
+            ),
+        ]),
+        seen: BTreeMap::from([
+            (
+                "NYP".to_string(),
+                SeenStation {
+                    name: Some("New York, NY".into()),
+                    display_name: Some("New York Penn".into()),
+                    facility: Some("Moynihan Train Hall".into()),
+                    audio_name: Some("New York Penn Station".into()),
+                },
+            ),
+            (
+                "PHL".to_string(),
+                SeenStation {
+                    name: Some("Philadelphia, PA".into()),
+                    display_name: Some("Philadelphia 30th St".into()),
+                    facility: None,
+                    audio_name: None,
+                },
+            ),
+        ]),
+    }
+}
 
 const STATIC_FILES: &[(&str, &str)] = &[
     (
@@ -246,8 +299,9 @@ fn main() {
     let official = zip_of(STATIC_FILES);
     // New York: a parent station, platform 7 boarded through gate A, and platform 8.
     let table = PlatformTable::parse(PLATFORM_TABLE).expect("platform table");
+    let names = station_names();
     let combined =
-        augment_static(&official, &table, None).expect("augment the fixture static feed");
+        augment_static(&official, &table, Some(&names)).expect("augment the fixture static feed");
     let parsed = Gtfs::from_reader(Cursor::new(combined.clone())).expect("parse the combined feed");
     for stop in ["NYP:station", PLATFORM, "NYP:track:8"] {
         assert!(
@@ -255,7 +309,17 @@ fn main() {
             "missing platform stop {stop}"
         );
     }
-    let version = format!("FIXTURE+tracks.{}", table.digest());
+    // The version the service publishes: `FIXTURE+tracks.{digest}+names.{digest}`, as written to
+    // `feed_info.txt` by the augmentation.
+    let version = parsed
+        .feed_info
+        .first()
+        .and_then(|info| info.version.clone())
+        .expect("the combined feed carries a feed_version");
+    assert!(
+        version.starts_with(&format!("FIXTURE+tracks.{}+names.", table.digest())),
+        "unexpected feed version {version}"
+    );
     let parsed = Arc::new(parsed);
     let snapshot = Arc::new(StaticSnapshot::identical(
         version,

@@ -646,6 +646,8 @@ Restart=on-failure
 | `AMTRAK_TRACKS_HARTFORD_STOP` | `NHV` | Amtrak `stop_id` for that board |
 | `AMTRAK_TRACKS_AMTRAK` | on | Amtrak's own track and gate status documents, read through the browser worker. Set `off` to skip them |
 | `AMTRAK_TRACKS_AMTRAK_URL` | `http://127.0.0.1:8081/tracks.json` (built-in browser worker) | Override for Amtrak's status JSON. Setting it empty also skips that source and logs a warning at startup. This is not `www.amtrak.com`; that host blocks plain HTTP |
+| `AMTRAK_STOP_NAMES` | on | Renames `stops.txt` from Amtrak's station names (see [Station names](#station-names)). Takes effect only when `AMTRAK_TRACKS` and `AMTRAK_TRACKS_AMTRAK` are on. Set `off` to publish Amtrak's own names with no `+names` suffix |
+| `AMTRAK_STOP_NAMES_REFRESH_SECS` | `1209600` | Seconds between renamings (14 days). The first renaming comes 24 hours after the worker's first successful directory fetch. The service reads the worker's `/stations.json` at most this often |
 | `AMTRAK_TRACKS_RETAIN_GRACE_SECS` | `900` | How long an Amtrak track stays published after the stop's latest time |
 | `AMTRAK_TRACKS_BASE_INTERVAL_SECS` | `900` | Seconds between full track polls. Hot stations, including a lead-time profile such as PVD, are still checked every `POLL_INTERVAL_SECS` between them. Read by the browser worker |
 | `AMTRAK_TRACKS_LEAD_TIME_FILE` | empty | An `amtrak-station-lead-time/v1` JSON file. Only `confidence=observed` with `compared_to_default=wider` changes a station's lookahead and hot window. Read by the browser worker |
@@ -879,7 +881,8 @@ flowchart TD
 ```
 
 The published static version becomes `{feed_version}+tracks.{digest}`, where the digest changes
-only when the platform list changes. `feed_info.txt`'s `feed_version` carries the same value, so it
+only when the platform list changes. When [station names](#station-names) apply, `+names.{digest}`
+follows it (`{feed_version}+tracks.{digest}+names.{digest}`). `feed_info.txt`'s `feed_version` carries the same value, so it
 matches the `feed_version` in every GTFS-Realtime header, as the reference requires;
 `official-static.zip` keeps Amtrak's own version. Nothing else in Amtrak's feed changes, and the
 other files are copied byte-for-byte (after the [stop-reference repair](#validation-gate), when one
@@ -1105,6 +1108,62 @@ The CTrail Hartford Line connecting-train board covers New Haven Union, which is
 RailData station. Amtrak's own status had no New Haven track for train 167 on 2026-10-17, while
 this board showed track 3. Set `AMTRAK_TRACKS_HARTFORD_URL` empty to skip it.
 
+## Station names
+
+Amtrak's own `stop_name`s are often ambiguous or uninformative (`NYP` is "Ny Moynihan Train Hall At
+Penn Station", and `BOS`, `BBY` and `BON` are all "Boston"). With `AMTRAK_STOP_NAMES` on (the
+default), the service renames the plain stops in the published `static.zip` to the names on
+Amtrak's departure boards, and no two stops share a `stop_name`. Only `stops.txt` changes. No
+`stop_id`, `parent_station`, platform id or `platform_code` changes, and neither do the realtime
+feeds or `official-static.zip`.
+
+> [!IMPORTANT]
+> Most `stop_name`s change. Consumers that match stops by name must re-match by `stop_id`. The
+> static version also gains a `+names.{digest}` suffix; see [Consumer migration](#consumer-migration).
+
+**The rule.** For each plain stop (not a generated parent or platform), the base `stop_name` is the
+first available of:
+
+1. the departure-board name (`displayName`) from a station status document;
+2. that document's `name` ("City, ST");
+3. the `name` in Amtrak's station directory;
+4. today's static name.
+
+Duplicates are then removed in order, repeating until nothing changes: (a) stops whose bare names
+share a city take their "City, ST" form; (b) stops still equal add ` – ` plus the directory's
+`facilityName64`; (c) anything still equal gets ` (CODE)`. A stop with no
+source keeps its static name, made unique the same way.
+
+`stop_desc` carries the station name, the facility (` – ` plus `facilityName64`, else the status
+document's `facility`), and ` (in {directory name})` when the directory's city differs from the
+station name's city. It is empty when it would equal `stop_name`. `tts_stop_name` is the
+announcement name (`audioName`) where Amtrak has one, else empty. The generated parent
+`{stop}:station` takes the stop's final name, and each platform is named from it (`New Haven (State
+Street) Track 2`).
+
+**Sources.** Both come from the [browser worker](browser-worker/README.md), because `www.amtrak.com`
+blocks plain HTTP. The worker fetches Amtrak's station directory
+(`https://www.amtrak.com/services/data.stations.json`) in its browser page, and records each
+station that appears in the status documents it already reads for tracks. The service reads both
+from the worker's `GET /stations.json`. The directory has no board or announcement names, so those
+accumulate as trains are seen.
+
+**Cadence.** Names change at most once per `AMTRAK_STOP_NAMES_REFRESH_SECS` (default `1209600`, 14
+days), so the static version does not churn. The worker refetches the directory every
+`STATIONS_REFRESH_SECS` (default `1209600`) and retries hourly after a failure. The first renaming
+comes 24 hours (`86400` s) after the directory's first successful fetch. A failed or empty read
+keeps the names already applied, and an empty set is never applied.
+
+**Configuration.** `AMTRAK_STOP_NAMES` (`on` by default) takes effect only when `AMTRAK_TRACKS` and
+`AMTRAK_TRACKS_AMTRAK` are on. When it is off, `stops.txt` is unchanged and the version has no
+`+names`. The service finds `/stations.json` by replacing a trailing `/tracks.json` in
+`AMTRAK_TRACKS_AMTRAK_URL`; with any other URL, names are never renewed and a warning is logged.
+
+**Files.** The worker keeps `{AMTRAK_OUTPUT_DIR}/tracks/stations-directory.json` and
+`stations-seen.json`. The service keeps the names it applied in
+`{AMTRAK_OUTPUT_DIR}/tracks/station-names-applied.json`, so a restart rebuilds the same names. Every
+write is atomic, and a corrupt file is renamed to `*.invalid` and ignored.
+
 ## Station and train status CLI
 
 `amtrak-status` answers station-departure and train-status questions from one coherent generation
@@ -1280,6 +1339,13 @@ fallback change in three ways:
 A consumer that keyed on `asm-` entity ids, or showed `vehicle.label` as a route name, must
 change: take the route from `trip.route_id` and the static `routes.txt`. A consumer that reads the
 train number from the static `trip_short_name` (Trackside does) is not affected.
+
+**Station names (#179, Unreleased).** Most `stop_name`s in `static.zip` change to Amtrak's
+departure-board names, unique across the feed, and `stop_desc` and `tts_stop_name` are filled in.
+`stop_id`s are unchanged, so a consumer that matches stops by name must re-match by `stop_id`. The
+static version and `feed_info.txt`'s `feed_version` gain `+names.{digest}` after `+tracks.{digest}`.
+`AMTRAK_STOP_NAMES=off` keeps Amtrak's names and drops the suffix. See
+[Station names](#station-names).
 
 ## Changelog
 

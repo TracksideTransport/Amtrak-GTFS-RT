@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Station names in `stops.txt` (#179).** The service renames plain stops to the names on Amtrak's
+  departure boards, unique across the feed, and fills `stop_desc` (station, facility, municipality)
+  and `tts_stop_name` (Amtrak's announcement name). Names come from Amtrak's station directory and
+  the station status documents, both read through the browser worker, and change at most every 14
+  days. New settings: `AMTRAK_STOP_NAMES` (`on` by default; takes effect only with `AMTRAK_TRACKS`
+  and `AMTRAK_TRACKS_AMTRAK` on) and `AMTRAK_STOP_NAMES_REFRESH_SECS` (`1209600`). The browser worker
+  gains `GET /stations.json`, `STATIONS_REFRESH_SECS` (`1209600`), and station names in its logs and
+  `worker.tracks.dump` output.
+
+### Changed
+
+- **Most `stop_name`s change.** Consumers that match stops by name must re-match by `stop_id`; no
+  `stop_id`, `parent_station`, platform id or `platform_code` changes. The static version and
+  `feed_info.txt`'s `feed_version` gain `+names.{digest}` after `+tracks.{digest}`. Realtime feeds
+  and `official-static.zip` are unchanged. `AMTRAK_STOP_NAMES=off` keeps Amtrak's names and drops the
+  suffix.
+
 ## [0.10.0] - 2026-11-21
 
 Fixed feed URLs for apps and routing backends, and the catenary crate's new trip matching.
