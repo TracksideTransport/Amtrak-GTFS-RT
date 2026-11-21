@@ -1,7 +1,9 @@
 use crate::orchestrator::StaticSnapshot;
 use crate::static_augment::{
-    augment_static, tracks_version_suffix, PlatformTable, SharedPlatforms, TRACKS_VERSION_MARKER,
+    augment_static_versioned, tracks_version_suffix, PlatformTable, SharedPlatforms,
+    TRACKS_VERSION_MARKER,
 };
+use crate::static_names::{SharedNames, StationNames, NAMES_VERSION_MARKER};
 use crate::static_repair::repair_static;
 use async_trait::async_trait;
 use gtfs_structures::Gtfs;
@@ -239,8 +241,9 @@ pub async fn fetch_static(
     url: &str,
     validator: &dyn StaticStandardsValidator,
     platforms: &[PlatformTable],
+    names: Option<&StationNames>,
 ) -> Result<StaticSnapshot, StaticError> {
-    fetch_static_at(url, validator, platforms, SystemTime::now()).await
+    fetch_static_at(url, validator, platforms, names, SystemTime::now()).await
 }
 
 /// The `ETag` and `Last-Modified` Amtrak sent with the official ZIP a snapshot was built from.
@@ -336,10 +339,13 @@ async fn fetch_static_at(
     url: &str,
     validator: &dyn StaticStandardsValidator,
     platforms: &[PlatformTable],
+    names: Option<&StationNames>,
     now: SystemTime,
 ) -> Result<StaticSnapshot, StaticError> {
     match download_static(url, None).await? {
-        Download::Body(official, _) => build_static(official, validator, platforms, now).await,
+        Download::Body(official, _) => {
+            build_static(official, validator, platforms, names, now).await
+        }
         Download::NotModified => Err(StaticError("static fetch status failed".into())),
     }
 }
@@ -348,12 +354,14 @@ async fn build_static(
     official: Arc<[u8]>,
     validator: &dyn StaticStandardsValidator,
     platforms: &[PlatformTable],
+    names: Option<&StationNames>,
     now: SystemTime,
 ) -> Result<StaticSnapshot, StaticError> {
     let repaired = repair_static(official.as_ref());
     let upstream = repaired.as_deref().unwrap_or(official.as_ref());
     for table in platforms {
-        if let Some(mut snapshot) = augmented_snapshot(upstream, table, validator, now).await {
+        if let Some(mut snapshot) = augmented_snapshot(upstream, table, names, validator, now).await
+        {
             stamp_official(&mut snapshot, official);
             return Ok(snapshot);
         }
@@ -376,18 +384,18 @@ async fn build_static(
 async fn augmented_snapshot(
     upstream: &[u8],
     table: &PlatformTable,
+    names: Option<&StationNames>,
     validator: &dyn StaticStandardsValidator,
     now: SystemTime,
 ) -> Option<StaticSnapshot> {
-    let augmented = match augment_static(upstream, table) {
-        Ok(bytes) => bytes,
+    let (augmented, suffix) = match augment_static_versioned(upstream, table, names) {
+        Ok(built) => built,
         Err(error) => {
             tracing::warn!(%error, stage = "static", "platform augmentation failed");
             return None;
         }
     };
     let zip: Arc<[u8]> = Arc::from(augmented);
-    let suffix = tracks_version_suffix(table);
     let snapshot = match snapshot_from_bytes(zip.clone(), now, Some(&suffix)) {
         Ok(snapshot) => snapshot,
         Err(error) => {
@@ -402,15 +410,23 @@ async fn augmented_snapshot(
     Some(snapshot)
 }
 
-/// Whether a snapshot `version` was built for the current track configuration: augmented with
-/// one of the candidate `tables` when tracks are on, and not augmented when there are none.
-pub fn matches_platforms(version: &str, tables: &[PlatformTable]) -> bool {
+/// Whether a snapshot `version` was built for the current static configuration: augmented with
+/// one of the candidate `tables` when tracks are on, and not augmented when there are none; and
+/// carrying a `+names.{digest}` suffix exactly when `names_applied`.
+pub fn matches_static_config(version: &str, tables: &[PlatformTable], names_applied: bool) -> bool {
+    let (tracks_part, has_names) = match version.find(NAMES_VERSION_MARKER) {
+        Some(at) => (&version[..at], true),
+        None => (version, false),
+    };
+    if has_names != names_applied {
+        return false;
+    }
     if tables.is_empty() {
-        return !version.contains(TRACKS_VERSION_MARKER);
+        return !tracks_part.contains(TRACKS_VERSION_MARKER);
     }
     tables
         .iter()
-        .any(|table| version.ends_with(&tracks_version_suffix(table)))
+        .any(|table| tracks_part.ends_with(&tracks_version_suffix(table)))
 }
 
 /// Parses retained bytes into a snapshot whose version is `feed_version` plus `suffix`.
@@ -510,8 +526,9 @@ pub async fn stage_static(
     url: &str,
     validator: &dyn StaticStandardsValidator,
     platforms: &[PlatformTable],
+    names: Option<&StationNames>,
 ) -> Result<Option<Arc<StaticSnapshot>>, StaticError> {
-    let candidate = Arc::new(fetch_static(url, validator, platforms).await?);
+    let candidate = Arc::new(fetch_static(url, validator, platforms, names).await?);
     if candidate.zip.as_ref() == comparison.zip.as_ref() {
         return Ok(None);
     }
@@ -614,11 +631,12 @@ pub async fn bootstrap_static(
     static_url: &str,
     validator: &dyn StaticStandardsValidator,
     platforms: &[PlatformTable],
+    names: Option<&StationNames>,
 ) -> Result<StaticSnapshotState, StaticError> {
     let Download::Body(official, validators) = download_static(static_url, None).await? else {
         return Err(StaticError("static fetch status failed".into()));
     };
-    let snapshot = build_static(official, validator, platforms, SystemTime::now()).await?;
+    let snapshot = build_static(official, validator, platforms, names, SystemTime::now()).await?;
     let state = StaticSnapshotState::new(Arc::new(snapshot));
     state.set_validators(validators);
     Ok(state)
@@ -646,13 +664,14 @@ async fn stage_conditional(
     url: &str,
     validator: &dyn StaticStandardsValidator,
     platforms: &[PlatformTable],
+    names: Option<&StationNames>,
     validators: Option<&StaticValidators>,
 ) -> Result<Staged, StaticError> {
     let Download::Body(official, received) = download_static(url, validators).await? else {
         return Ok(Staged::NotModified);
     };
     let candidate =
-        Arc::new(build_static(official, validator, platforms, SystemTime::now()).await?);
+        Arc::new(build_static(official, validator, platforms, names, SystemTime::now()).await?);
     if candidate.zip.as_ref() == comparison.zip.as_ref() {
         return Ok(Staged::Unchanged(received));
     }
@@ -672,6 +691,7 @@ pub async fn refresh_snapshot_once(
     static_url: &str,
     validator: &dyn StaticStandardsValidator,
     platforms: &[PlatformTable],
+    names: Option<&StationNames>,
 ) -> StaticRefreshOutcome {
     let comparison = match state.pending().await {
         Some(pending) => pending,
@@ -683,7 +703,7 @@ pub async fn refresh_snapshot_once(
     // before any track was observed) still lacks the observed platforms, and a `304` would keep
     // it that way until Amtrak happens to publish a new feed.
     let preferred = &platforms[..platforms.len().min(1)];
-    let validators = if matches_platforms(&comparison.version, preferred) {
+    let validators = if matches_static_config(&comparison.version, preferred, names.is_some()) {
         state.validators()
     } else {
         None
@@ -693,6 +713,7 @@ pub async fn refresh_snapshot_once(
         static_url,
         validator,
         platforms,
+        names,
         validators.as_ref(),
     )
     .await
@@ -762,6 +783,9 @@ fn platform_refresh_delay(
 /// once per 10 minutes) so the platform stop is published before the next daily
 /// static poll. Each staged snapshot also refreshes which stations may be observed.
 ///
+/// With `names`, a change of the applied names wakes this loop at once, with no debounce, and
+/// that rebuild downloads again instead of sending validators.
+///
 /// The first attempt waits one `interval`, except when the active snapshot was built for a
 /// different track configuration (typically one recovered from a run with tracks toggled); then
 /// it runs immediately so the published static matches the configuration without a day's delay.
@@ -771,6 +795,7 @@ pub async fn run_snapshot_refresh(
     interval: Duration,
     validator: Arc<dyn StaticStandardsValidator>,
     platforms: Option<SharedPlatforms>,
+    names: Option<SharedNames>,
 ) {
     run_snapshot_refresh_with(
         state,
@@ -778,9 +803,18 @@ pub async fn run_snapshot_refresh(
         interval,
         validator,
         platforms,
+        names,
         PLATFORM_REFRESH,
     )
     .await;
+}
+
+/// Resolves when `notify` is signaled, and never when there is none.
+async fn wait_for(notify: &Option<Arc<tokio::sync::Notify>>) {
+    match notify {
+        Some(notify) => notify.notified().await,
+        None => std::future::pending().await,
+    }
 }
 
 async fn run_snapshot_refresh_with(
@@ -789,9 +823,11 @@ async fn run_snapshot_refresh_with(
     interval: Duration,
     validator: Arc<dyn StaticStandardsValidator>,
     platforms: Option<SharedPlatforms>,
+    names: Option<SharedNames>,
     timing: PlatformRefreshTiming,
 ) {
     let notify = platforms.as_ref().map(SharedPlatforms::changed);
+    let names_notify = names.as_ref().map(SharedNames::changed);
     let mut ticker = tokio::time::interval(interval);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let active_version = state.active().await.version.clone();
@@ -799,7 +835,8 @@ async fn run_snapshot_refresh_with(
         .as_ref()
         .map(SharedPlatforms::candidates)
         .unwrap_or_default();
-    if matches_platforms(&active_version, &startup_tables) {
+    let startup_names = names.as_ref().and_then(SharedNames::applied).is_some();
+    if matches_static_config(&active_version, &startup_tables, startup_names) {
         ticker.tick().await;
     } else {
         tracing::info!(
@@ -810,23 +847,28 @@ async fn run_snapshot_refresh_with(
     }
     let mut previous_platform_refresh = None;
     loop {
-        if let Some(notify) = &notify {
-            tokio::select! {
-                _ = ticker.tick() => {}
-                _ = notify.notified() => {
-                    let now = tokio::time::Instant::now();
-                    let delay = platform_refresh_delay(timing, previous_platform_refresh, now);
-                    tracing::info!(
-                        stage = "static",
-                        delay_secs = delay.as_secs(),
-                        "new track observed; static rebuild scheduled"
-                    );
-                    tokio::time::sleep(delay).await;
-                    previous_platform_refresh = Some(tokio::time::Instant::now());
-                }
+        let mut names_changed = false;
+        tokio::select! {
+            _ = ticker.tick() => {}
+            () = wait_for(&notify) => {
+                let now = tokio::time::Instant::now();
+                let delay = platform_refresh_delay(timing, previous_platform_refresh, now);
+                tracing::info!(
+                    stage = "static",
+                    delay_secs = delay.as_secs(),
+                    "new track observed; static rebuild scheduled"
+                );
+                tokio::time::sleep(delay).await;
+                previous_platform_refresh = Some(tokio::time::Instant::now());
             }
-        } else {
-            ticker.tick().await;
+            () = wait_for(&names_notify) => {
+                tracing::info!(stage = "static", "station names changed; static rebuild now");
+                names_changed = true;
+            }
+        }
+        if names_changed {
+            // A `304` would keep the old names, so the rebuild downloads again.
+            state.set_validators(None);
         }
         if let Some(platforms) = &platforms {
             platforms.reload_observed();
@@ -835,7 +877,10 @@ async fn run_snapshot_refresh_with(
             .as_ref()
             .map(SharedPlatforms::candidates)
             .unwrap_or_default();
-        match refresh_snapshot_once(&state, &static_url, validator.as_ref(), &tables).await {
+        let applied = names.as_ref().and_then(SharedNames::applied);
+        let inputs = applied.as_deref().map(|applied| &applied.inputs);
+        match refresh_snapshot_once(&state, &static_url, validator.as_ref(), &tables, inputs).await
+        {
             StaticRefreshOutcome::Staged(version) => {
                 if let (Some(platforms), Some(staged)) = (&platforms, state.pending().await) {
                     platforms.set_known_stations(staged.parsed.stops.keys().map(String::as_str));
@@ -1024,6 +1069,7 @@ fn validate_report(report: &[u8]) -> Result<(), StaticValidationError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::static_augment::augment_static;
     use std::io::Write;
     use std::sync::atomic::AtomicUsize;
     use std::sync::Mutex;
@@ -1159,6 +1205,7 @@ mod tests {
             &format!("http://{address}/static.zip"),
             &validator,
             &[],
+            None,
         )
         .await
         .unwrap()
@@ -1194,8 +1241,13 @@ mod tests {
             result: Err(StaticValidationError("fixture error".into())),
         };
 
-        let result =
-            bootstrap_static(&format!("http://{address}/static.zip"), &validator, &[]).await;
+        let result = bootstrap_static(
+            &format!("http://{address}/static.zip"),
+            &validator,
+            &[],
+            None,
+        )
+        .await;
         server.await.unwrap();
 
         assert!(result.is_err());
@@ -1315,6 +1367,7 @@ mod tests {
             &format!("http://{address}/static.zip"),
             &validator,
             &[],
+            None,
         )
         .await;
         server.await.unwrap();
@@ -1396,7 +1449,7 @@ t,10:00:00,10:00:00,NWK,1\nt,10:30:00,10:30:00,OSM,2\n";
             result: Ok(()),
         };
         let table = PlatformTable::parse("NWK=1").unwrap();
-        let snapshot = fetch_static(&url, &validator, std::slice::from_ref(&table))
+        let snapshot = fetch_static(&url, &validator, std::slice::from_ref(&table), None)
             .await
             .unwrap();
         assert_eq!(
@@ -1406,7 +1459,7 @@ t,10:00:00,10:00:00,NWK,1\nt,10:30:00,10:30:00,OSM,2\n";
         assert!(snapshot.parsed.stops.contains_key("NWK:track:1"));
         assert_eq!(snapshot.parsed.trips["t"].stop_times.len(), 1);
 
-        let plain = fetch_static(&url, &validator, &[]).await.unwrap();
+        let plain = fetch_static(&url, &validator, &[], None).await.unwrap();
         assert_eq!(plain.version, "20261018");
         server.abort();
     }
@@ -1438,7 +1491,7 @@ t,10:00:00,10:00:00,NWK,1\nt,10:30:00,10:30:00,OSM,2\n";
             result: Ok(()),
         };
         let table = PlatformTable::parse("NWK=1-2").unwrap();
-        let snapshot = fetch_static(&url, &validator, std::slice::from_ref(&table))
+        let snapshot = fetch_static(&url, &validator, std::slice::from_ref(&table), None)
             .await
             .unwrap();
         assert_eq!(
@@ -1463,17 +1516,17 @@ t,10:00:00,10:00:00,NWK,1\nt,10:30:00,10:30:00,OSM,2\n";
         }
 
         let other = PlatformTable::parse("NWK=1-3").unwrap();
-        let changed = fetch_static(&url, &validator, std::slice::from_ref(&other))
+        let changed = fetch_static(&url, &validator, std::slice::from_ref(&other), None)
             .await
             .unwrap();
         assert_ne!(changed.version, snapshot.version);
-        let same = fetch_static(&url, &validator, std::slice::from_ref(&table))
+        let same = fetch_static(&url, &validator, std::slice::from_ref(&table), None)
             .await
             .unwrap();
         assert_eq!(same.version, snapshot.version);
         assert_eq!(same.zip.as_ref(), snapshot.zip.as_ref());
 
-        let disabled = fetch_static(&url, &validator, &[]).await.unwrap();
+        let disabled = fetch_static(&url, &validator, &[], None).await.unwrap();
         assert_eq!(disabled.version, "20260927");
         assert_eq!(disabled.zip.as_ref(), upstream.as_slice());
         server.abort();
@@ -1487,7 +1540,7 @@ t,10:00:00,10:00:00,NWK,1\nt,10:30:00,10:30:00,OSM,2\n";
             seen: Mutex::new(Vec::new()),
         };
         let table = PlatformTable::parse("NWK=1").unwrap();
-        let snapshot = fetch_static(&url, &validator, std::slice::from_ref(&table))
+        let snapshot = fetch_static(&url, &validator, std::slice::from_ref(&table), None)
             .await
             .unwrap();
         assert_eq!(snapshot.zip.as_ref(), upstream.as_slice());
@@ -1506,7 +1559,7 @@ t,10:00:00,10:00:00,NWK,1\nt,10:30:00,10:30:00,OSM,2\n";
             )
             .unwrap();
         let broken = archive.finish().unwrap().into_inner();
-        assert!(augment_static(&broken, &colliding).is_err());
+        assert!(augment_static(&broken, &colliding, None).is_err());
         server.abort();
     }
 
@@ -1531,7 +1584,7 @@ t,10:00:00,10:00:00,NWK,1\nt,10:30:00,10:30:00,OSM,2\n";
         let observed = PlatformTable::parse("NWK=1,9").unwrap();
         let configured = PlatformTable::parse("NWK=1").unwrap();
         let validator = RejectPlatform("NWK:track:9");
-        let snapshot = fetch_static(&url, &validator, &[observed, configured.clone()])
+        let snapshot = fetch_static(&url, &validator, &[observed, configured.clone()], None)
             .await
             .unwrap();
         assert_eq!(
@@ -1654,17 +1707,34 @@ t,10:00:00,10:00:00,NWK,1\nt,10:30:00,10:30:00,OSM,2\n";
         let table = PlatformTable::parse("NWK=1-2").unwrap();
         let other = PlatformTable::parse("NWK=1-3").unwrap();
         let augmented = format!("20260927+tracks.{}", table.digest());
-        assert!(matches_platforms("20260927", &[]));
-        assert!(!matches_platforms(&augmented, &[]));
-        assert!(matches_platforms(&augmented, std::slice::from_ref(&table)));
-        assert!(!matches_platforms(&augmented, std::slice::from_ref(&other)));
-        assert!(!matches_platforms("20260927", std::slice::from_ref(&table)));
-        let configured = PlatformTable::parse("NWK=1").unwrap();
-        assert!(matches_platforms(
+        assert!(matches_static_config("20260927", &[], false));
+        assert!(!matches_static_config(&augmented, &[], false));
+        assert!(matches_static_config(
             &augmented,
-            &[other.clone(), table.clone()]
+            std::slice::from_ref(&table),
+            false
         ));
-        assert!(!matches_platforms(&augmented, &[other, configured]));
+        assert!(!matches_static_config(
+            &augmented,
+            std::slice::from_ref(&other),
+            false
+        ));
+        assert!(!matches_static_config(
+            "20260927",
+            std::slice::from_ref(&table),
+            false
+        ));
+        let configured = PlatformTable::parse("NWK=1").unwrap();
+        assert!(matches_static_config(
+            &augmented,
+            &[other.clone(), table.clone()],
+            false
+        ));
+        assert!(!matches_static_config(
+            &augmented,
+            &[other, configured],
+            false
+        ));
     }
 
     /// Runs the refresh task for up to two seconds with a day-long interval and returns what it
@@ -1687,6 +1757,7 @@ t,10:00:00,10:00:00,NWK,1\nt,10:30:00,10:30:00,OSM,2\n";
             Duration::from_secs(86_400),
             validator,
             platforms.map(|table| SharedPlatforms::new(table, None)),
+            None,
         ));
         let _ = tokio::time::timeout(Duration::from_secs(2), async {
             while state.pending().await.is_none() {
@@ -1718,7 +1789,7 @@ t,10:00:00,10:00:00,NWK,1\nt,10:30:00,10:30:00,OSM,2\n";
     async fn recovered_static_with_platforms_is_refreshed_when_tracks_are_off() {
         let upstream = augmentable_zip("20260927");
         let table = PlatformTable::parse("NWK=1-2").unwrap();
-        let augmented = augment_static(&upstream, &table).unwrap();
+        let augmented = augment_static(&upstream, &table, None).unwrap();
         let recovered_version = format!("20260927+tracks.{}", table.digest());
         let staged = staged_by_refresh_task(augmented, &recovered_version, upstream.clone(), None)
             .await
@@ -1736,7 +1807,7 @@ t,10:00:00,10:00:00,NWK,1\nt,10:30:00,10:30:00,OSM,2\n";
         let configured = PlatformTable::parse("NWK=1").unwrap();
         // Recovered static already matches the configured platforms, so only the notifier
         // (not the startup mismatch check or the day-long ticker) can stage anything.
-        let recovered = augment_static(&upstream, &configured).unwrap();
+        let recovered = augment_static(&upstream, &configured, None).unwrap();
         let recovered_version = format!("20260927+tracks.{}", configured.digest());
         let (url, server) = served_zip(upstream);
         let state = recover_static(Arc::from(recovered), recovered_version.clone()).unwrap();
@@ -1752,6 +1823,7 @@ t,10:00:00,10:00:00,NWK,1\nt,10:30:00,10:30:00,OSM,2\n";
             Duration::from_secs(86_400),
             validator,
             Some(platforms.clone()),
+            None,
             PlatformRefreshTiming {
                 debounce,
                 min_gap: Duration::from_secs(600),
@@ -1840,7 +1912,7 @@ t,10:00:00,10:00:00,NWK,1\nt,10:30:00,10:30:00,OSM,2\n";
             result: Ok(()),
         };
         // Bootstrap is unconditional and records the validators Amtrak sent.
-        let state = bootstrap_static(&url, &validator, &[]).await.unwrap();
+        let state = bootstrap_static(&url, &validator, &[], None).await.unwrap();
         assert_eq!(
             state.validators().and_then(|validators| validators.etag),
             Some("\"v1\"".to_string())
@@ -1849,7 +1921,7 @@ t,10:00:00,10:00:00,NWK,1\nt,10:30:00,10:30:00,OSM,2\n";
         assert_eq!(validator.seen.lock().unwrap().len(), 1);
 
         // The next refresh is conditional; a 304 keeps the snapshot and never validates.
-        let outcome = refresh_snapshot_once(&state, &url, &validator, &[]).await;
+        let outcome = refresh_snapshot_once(&state, &url, &validator, &[], None).await;
         assert_eq!(outcome, StaticRefreshOutcome::Unchanged);
         assert!(Arc::ptr_eq(&state.active().await, &active));
         assert!(state.pending().await.is_none());
@@ -1872,11 +1944,12 @@ t,10:00:00,10:00:00,NWK,1\nt,10:30:00,10:30:00,OSM,2\n";
             seen: Mutex::new(Vec::new()),
             result: Ok(()),
         };
-        let state = bootstrap_static(&url, &validator, &[]).await.unwrap();
+        let state = bootstrap_static(&url, &validator, &[], None).await.unwrap();
         // Same upstream bytes, but a new platform table: the rebuild needs the body.
         let table = PlatformTable::parse("NWK=1").unwrap();
         let outcome =
-            refresh_snapshot_once(&state, &url, &validator, std::slice::from_ref(&table)).await;
+            refresh_snapshot_once(&state, &url, &validator, std::slice::from_ref(&table), None)
+                .await;
         assert!(
             matches!(outcome, StaticRefreshOutcome::Staged(_)),
             "{outcome:?}"
@@ -1925,7 +1998,7 @@ t,10:00:00,10:00:00,NWK,1\nt,10:30:00,10:30:00,OSM,2\n";
         };
         let configured = PlatformTable::parse("NWK=1").unwrap();
         let full = PlatformTable::parse("NWK=1,9").unwrap();
-        let state = bootstrap_static(&url, &validator, std::slice::from_ref(&configured))
+        let state = bootstrap_static(&url, &validator, std::slice::from_ref(&configured), None)
             .await
             .unwrap();
         assert!(state.validators().is_some());
@@ -1936,7 +2009,8 @@ t,10:00:00,10:00:00,NWK,1\nt,10:30:00,10:30:00,OSM,2\n";
             .ends_with(&tracks_version_suffix(&configured)));
 
         let outcome =
-            refresh_snapshot_once(&state, &url, &validator, &[full.clone(), configured]).await;
+            refresh_snapshot_once(&state, &url, &validator, &[full.clone(), configured], None)
+                .await;
         let expected = format!("20260927{}", tracks_version_suffix(&full));
         assert_eq!(outcome, StaticRefreshOutcome::Staged(expected));
         assert!(state
@@ -1953,7 +2027,7 @@ t,10:00:00,10:00:00,NWK,1\nt,10:30:00,10:30:00,OSM,2\n";
         );
 
         // Built from the preferred table, the next refresh is conditional again.
-        let outcome = refresh_snapshot_once(&state, &url, &validator, &[full]).await;
+        let outcome = refresh_snapshot_once(&state, &url, &validator, &[full], None).await;
         assert_eq!(outcome, StaticRefreshOutcome::Unchanged);
         assert_eq!(
             requests.lock().unwrap().last().cloned().flatten(),
@@ -1969,5 +2043,146 @@ t,10:00:00,10:00:00,NWK,1\nt,10:30:00,10:30:00,OSM,2\n";
         assert!(staged_by_refresh_task(upstream, "20260927", newer, None)
             .await
             .is_none());
+    }
+
+    fn nwk_names(display: &str) -> StationNames {
+        let mut names = StationNames::default();
+        names.seen.insert(
+            "NWK".into(),
+            crate::static_names::SeenStation {
+                display_name: Some(display.into()),
+                ..Default::default()
+            },
+        );
+        names
+    }
+
+    fn validator() -> RecordingValidator {
+        RecordingValidator {
+            seen: Mutex::new(Vec::new()),
+            result: Ok(()),
+        }
+    }
+
+    #[tokio::test]
+    async fn names_applied_version_has_both_suffixes() {
+        let (url, server) = served_zip(augmentable_zip("20260927"));
+        let table = PlatformTable::parse("NWK=1-2").unwrap();
+        let names = nwk_names("Newark Penn");
+        let validator = validator();
+        let snapshot = fetch_static(&url, &validator, std::slice::from_ref(&table), Some(&names))
+            .await
+            .unwrap();
+        let (head, digest) = snapshot.version.rsplit_once(NAMES_VERSION_MARKER).unwrap();
+        assert_eq!(digest.len(), 8, "{}", snapshot.version);
+        assert_eq!(head, format!("20260927+tracks.{}", table.digest()));
+        assert_eq!(validator.seen.lock().unwrap().len(), 1);
+        assert_eq!(
+            snapshot.parsed.stops["NWK"].name.as_deref(),
+            Some("Newark Penn")
+        );
+        assert_eq!(
+            snapshot.parsed.stops["NWK:track:1"].name.as_deref(),
+            Some("Newark Penn Track 1")
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn names_off_output_unchanged() {
+        let upstream = augmentable_zip("20260927");
+        let (url, server) = served_zip(upstream.clone());
+        let table = PlatformTable::parse("NWK=1-2").unwrap();
+        let snapshot = fetch_static(&url, &validator(), std::slice::from_ref(&table), None)
+            .await
+            .unwrap();
+        assert_eq!(
+            snapshot.zip.as_ref(),
+            augment_static(&upstream, &table, None).unwrap().as_slice()
+        );
+        assert!(!snapshot.version.contains(NAMES_VERSION_MARKER));
+        server.abort();
+    }
+
+    #[test]
+    fn restored_snapshot_without_names_is_rebuilt() {
+        let table = PlatformTable::parse("NWK=1-2").unwrap();
+        let plain = format!("20260927+tracks.{}", table.digest());
+        let named = format!("{plain}+names.0123abcd");
+        let tables = std::slice::from_ref(&table);
+        assert!(!matches_static_config(&plain, tables, true));
+        assert!(matches_static_config(&named, tables, true));
+        assert!(matches_static_config(&plain, tables, false));
+        assert!(!matches_static_config(&named, tables, false));
+        assert!(!matches_static_config(
+            "20260927+names.0123abcd",
+            tables,
+            true
+        ));
+    }
+
+    #[tokio::test]
+    async fn names_change_forces_full_download() {
+        let (url, requests, server) = conditional_upstream(augmentable_zip("20260927"));
+        let table = PlatformTable::parse("NWK=1-2").unwrap();
+        let path = std::env::temp_dir().join(format!(
+            "amtrak-names-refresh-{}-{:?}/station-names-applied.json",
+            std::process::id(),
+            SystemTime::now()
+        ));
+        let first = crate::static_names::AppliedNames {
+            inputs: nwk_names("Newark Penn"),
+            applied_at_unix: 1,
+        };
+        SharedNames::load(path.clone())
+            .set_applied(first.clone())
+            .unwrap();
+        // Reloaded, so no earlier change is waiting to wake the loop.
+        let shared = SharedNames::load(path);
+        assert!(shared.applied().is_some());
+        let validator: Arc<dyn StaticStandardsValidator> = Arc::new(validator());
+        let state = bootstrap_static(
+            &url,
+            validator.as_ref(),
+            std::slice::from_ref(&table),
+            Some(&first.inputs),
+        )
+        .await
+        .unwrap();
+        assert!(state.validators().is_some());
+        let task = tokio::spawn(run_snapshot_refresh_with(
+            state.clone(),
+            url,
+            Duration::from_secs(86_400),
+            validator,
+            Some(SharedPlatforms::new(table, None)),
+            Some(shared.clone()),
+            PLATFORM_REFRESH,
+        ));
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(requests.lock().unwrap().len(), 1, "nothing refreshes yet");
+        shared
+            .set_applied(crate::static_names::AppliedNames {
+                inputs: nwk_names("Newark Station"),
+                applied_at_unix: 2,
+            })
+            .unwrap();
+        let staged = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Some(staged) = state.pending().await {
+                    return staged;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the new names were not staged");
+        task.abort();
+        server.abort();
+        assert_eq!(*requests.lock().unwrap(), vec![None, None]);
+        assert_eq!(
+            staged.parsed.stops["NWK"].name.as_deref(),
+            Some("Newark Station")
+        );
     }
 }

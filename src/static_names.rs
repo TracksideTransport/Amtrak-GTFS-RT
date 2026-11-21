@@ -7,9 +7,12 @@
 //! `location_type` or `0`, no `parent_station`) and returns the digest that
 //! [`names_version_suffix`] turns into the `+names.{digest}` version suffix.
 
-use crate::static_augment::{read_stops, write_stops, AugmentError};
+use crate::static_augment::{read_stops, write_atomically, write_stops, AugmentError};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
+use std::path::PathBuf;
+use std::sync::{Arc, RwLock};
+use tokio::sync::Notify;
 
 /// Marks the names digest inside a static version, after `+tracks.{digest}`.
 pub const NAMES_VERSION_MARKER: &str = "+names.";
@@ -413,6 +416,119 @@ pub fn apply_names(
     Ok((bytes, names_digest(&resolved)))
 }
 
+/// The name inputs the service applied, and when.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct AppliedNames {
+    /// What the ladder resolves from.
+    pub inputs: StationNames,
+    /// Seconds since the Unix epoch when the inputs were applied.
+    pub applied_at_unix: u64,
+}
+
+impl AppliedNames {
+    /// The persisted JSON form: `{"applied_at_unix": N, "inputs": {..}}`.
+    pub fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "applied_at_unix": self.applied_at_unix,
+            "inputs": self.inputs.to_json(),
+        })
+    }
+
+    /// Parses the form [`AppliedNames::to_json`] writes.
+    ///
+    /// # Errors
+    ///
+    /// Returns a message naming the malformed part.
+    pub fn from_json(value: &serde_json::Value) -> Result<AppliedNames, String> {
+        let applied_at_unix = value
+            .get("applied_at_unix")
+            .and_then(serde_json::Value::as_u64)
+            .ok_or("applied_at_unix is not a number")?;
+        let inputs = StationNames::from_json(value.get("inputs").ok_or("inputs is missing")?)?;
+        Ok(AppliedNames {
+            inputs,
+            applied_at_unix,
+        })
+    }
+}
+
+/// The applied names, shared by the renamer and the static refresh, and persisted at `path`.
+///
+/// A change is signaled on [`Self::changed`] so static refresh can rebuild at once.
+#[derive(Clone)]
+pub struct SharedNames {
+    inner: Arc<RwLock<Option<Arc<AppliedNames>>>>,
+    changed: Arc<Notify>,
+    path: PathBuf,
+}
+
+impl SharedNames {
+    /// Shares the names persisted at `path`.
+    ///
+    /// A missing file is nothing applied. A file that does not parse is renamed to `*.invalid`
+    /// and ignored, so a corrupt record cannot fail startup or be silently overwritten.
+    pub fn load(path: PathBuf) -> SharedNames {
+        let applied = match std::fs::read_to_string(&path) {
+            Ok(text) => match serde_json::from_str::<serde_json::Value>(&text)
+                .map_err(|error| error.to_string())
+                .and_then(|value| AppliedNames::from_json(&value))
+            {
+                Ok(applied) => Some(Arc::new(applied)),
+                Err(error) => {
+                    let mut invalid = path.clone().into_os_string();
+                    invalid.push(".invalid");
+                    let renamed = std::fs::rename(&path, &invalid);
+                    tracing::warn!(
+                        %error,
+                        renamed = renamed.is_ok(),
+                        path = %path.display(),
+                        "ignoring unreadable applied station names"
+                    );
+                    None
+                }
+            },
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => {
+                tracing::warn!(%error, path = %path.display(), "cannot read applied station names");
+                None
+            }
+        };
+        SharedNames {
+            inner: Arc::new(RwLock::new(applied)),
+            changed: Arc::new(Notify::new()),
+            path,
+        }
+    }
+
+    /// The names applied now, or `None` when none were applied.
+    pub fn applied(&self) -> Option<Arc<AppliedNames>> {
+        self.inner
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Persists `names` atomically, then makes them current and signals [`Self::changed`].
+    ///
+    /// # Errors
+    ///
+    /// Returns the write error; nothing changes in that case.
+    pub fn set_applied(&self, names: AppliedNames) -> std::io::Result<()> {
+        write_atomically(&self.path, &names.to_json().to_string())?;
+        *self
+            .inner
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::new(names));
+        self.changed.notify_one();
+        Ok(())
+    }
+
+    /// Wakes [`crate::static_gtfs::run_snapshot_refresh`] after the applied names change.
+    pub fn changed(&self) -> Arc<Notify> {
+        self.changed.clone()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -715,5 +831,53 @@ BOS:track:1,Boston South Track 1,0,BOS:station,,\n"
         assert_eq!(r["LKL"].stop_name, "Lakeland, FL (LKL)");
         assert_eq!(r["LAK"].stop_desc, "Lakeland, FL – North side");
         assert_eq!(r["LKL"].stop_desc, "Lakeland, FL – South side");
+    }
+
+    fn temp_file(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "amtrak-names-{name}-{}-{:?}",
+            std::process::id(),
+            std::time::SystemTime::now()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.join("station-names-applied.json")
+    }
+
+    #[test]
+    fn corrupt_applied_file_is_ignored() {
+        let path = temp_file("corrupt");
+        std::fs::write(&path, "{ not json").unwrap();
+        let shared = SharedNames::load(path.clone());
+        assert!(shared.applied().is_none());
+        assert!(!path.exists());
+        let mut invalid = path.clone().into_os_string();
+        invalid.push(".invalid");
+        assert_eq!(std::fs::read_to_string(invalid).unwrap(), "{ not json");
+        // A well-formed document of the wrong shape is ignored too.
+        std::fs::write(&path, "[]").unwrap();
+        assert!(SharedNames::load(path).applied().is_none());
+    }
+
+    #[test]
+    fn missing_applied_file_is_nothing_applied() {
+        assert!(SharedNames::load(temp_file("missing")).applied().is_none());
+    }
+
+    #[tokio::test]
+    async fn applied_names_persist_and_notify() {
+        let path = temp_file("persist");
+        let shared = SharedNames::load(path.clone());
+        let applied = AppliedNames {
+            inputs: inputs(&[("NHV", seen(None, Some("New Haven")))], &[]),
+            applied_at_unix: 42,
+        };
+        let changed = shared.changed();
+        shared.set_applied(applied.clone()).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(1), changed.notified())
+            .await
+            .expect("set_applied must notify");
+        assert_eq!(shared.applied().as_deref(), Some(&applied));
+        let reloaded = SharedNames::load(path);
+        assert_eq!(reloaded.applied().as_deref(), Some(&applied));
     }
 }

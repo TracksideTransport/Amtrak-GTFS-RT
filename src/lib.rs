@@ -34,6 +34,7 @@ use crate::static_gtfs::{
     bootstrap_static, recover_static, CachedStaticValidator, MobilityDataStaticValidator,
     StaticSnapshotState, StaticStandardsValidator,
 };
+use crate::static_names::StationNames;
 use crate::writer::GenerationStore;
 use async_trait::async_trait;
 use std::collections::HashMap;
@@ -358,6 +359,7 @@ async fn initial_snapshots(
     static_url: &str,
     validator: &dyn StaticStandardsValidator,
     platforms: &[PlatformTable],
+    names: Option<&StationNames>,
 ) -> Result<StaticSnapshotState, FatalError> {
     if let Some(generation) = store.current().await {
         return recover_static(
@@ -366,7 +368,7 @@ async fn initial_snapshots(
         )
         .at_stage("static GTFS recovery");
     }
-    bootstrap_static(static_url, validator, platforms)
+    bootstrap_static(static_url, validator, platforms, names)
         .await
         .at_stage("static GTFS bootstrap")
 }
@@ -562,6 +564,7 @@ pub async fn run_combined() -> Result<(), FatalError> {
         &config.static_url,
         validator.as_ref(),
         &bootstrap_tables,
+        None,
     )
     .await?;
     if let Some(platforms) = &platforms {
@@ -723,6 +726,7 @@ pub async fn run_combined() -> Result<(), FatalError> {
                 static_refresh_interval,
                 validator,
                 platforms,
+                None,
             )
             .await;
             Ok(())
@@ -1183,6 +1187,7 @@ mod tests {
             "http://127.0.0.1:1/unavailable.zip",
             &RejectIfCalled,
             &[],
+            None,
         )
         .await
         .unwrap();
@@ -1380,7 +1385,7 @@ mod tests {
     async fn bootstrap_failure(label: &str, url: &str) -> FatalError {
         let output = output_directory(label);
         let store = GenerationStore::open(&output).await.unwrap();
-        let error = match initial_snapshots(&store, url, &RejectIfCalled, &[]).await {
+        let error = match initial_snapshots(&store, url, &RejectIfCalled, &[], None).await {
             Ok(_) => panic!("the download must fail"),
             Err(error) => error,
         };

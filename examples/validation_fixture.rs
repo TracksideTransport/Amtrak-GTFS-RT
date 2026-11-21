@@ -246,7 +246,8 @@ fn main() {
     let official = zip_of(STATIC_FILES);
     // New York: a parent station, platform 7 boarded through gate A, and platform 8.
     let table = PlatformTable::parse(PLATFORM_TABLE).expect("platform table");
-    let combined = augment_static(&official, &table).expect("augment the fixture static feed");
+    let combined =
+        augment_static(&official, &table, None).expect("augment the fixture static feed");
     let parsed = Gtfs::from_reader(Cursor::new(combined.clone())).expect("parse the combined feed");
     for stop in ["NYP:station", PLATFORM, "NYP:track:8"] {
         assert!(

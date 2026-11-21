@@ -187,7 +187,8 @@ mod tests {
     fn repair_and_platforms_overlay_back_onto_the_official_zip() {
         let official = mardi_gras_zip(DANGLING);
         let repaired = repair_static(&official).unwrap();
-        let combined = augment_static(&repaired, &PlatformTable::parse("NHV=1").unwrap()).unwrap();
+        let combined =
+            augment_static(&repaired, &PlatformTable::parse("NHV=1").unwrap(), None).unwrap();
         let (addon, version) = build_addon(&official, &combined);
         assert!(version.starts_with(&format!("{ADDON_SCHEMA}.")));
         let files = listed_files(&addon);
