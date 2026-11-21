@@ -44,6 +44,7 @@ Checked-in paths, until the split replaces them:
 | `src/sources/advisories.rs` | Optional notices scraper |
 | `src/sources/tracks/` | Track and gate stamp, RailData, Hartford, Amtrak status, refresher |
 | `src/sources/tracks/names.rs` | Reads the worker's `/stations.json` at most every `AMTRAK_STOP_NAMES_REFRESH_SECS` and hands names to the static rebuild. Never applies an empty set; keeps applied names on failure |
+| `src/main.rs` subcommand | `amtrak-gtfs-rt-service refresh-station-names` runs `request_station_names_refresh` (`src/lib.rs`): it writes `{AMTRAK_OUTPUT_DIR}/tracks/station-names-refresh-requested` (Unix seconds), starts nothing, and exits `2` when names are off. The names refresher wakes every minute for it; the worker refetches the directory once per request and never deletes the file |
 | `src/static_augment.rs` | Adds platform stops to the published static ZIP when tracks are on |
 | `src/static_names.rs` | Station naming ladder for `stops.txt` (`stop_name`, `stop_desc`, `tts_stop_name`), the applied-names file, and the `+names.{digest}` digest. Pure and deterministic; the ladder runs on every build |
 | `src/static_repair.rs` | Drops stop times whose `stop_id` is missing from `stops.txt` |

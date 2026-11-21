@@ -114,7 +114,8 @@ The service names stops from this worker (see [Station names](../README.md#stati
 
 - The worker fetches Amtrak's station directory, `https://www.amtrak.com/services/data.stations.json`,
   inside the resident status page with `Accept: application/json`, every `STATIONS_REFRESH_SECS`
-  (default `1209600`). A failed fetch is retried hourly, and a response that is not a non-empty JSON
+  (default `1209600`; when the service starts the worker, it passes its own
+  `AMTRAK_STOP_NAMES_REFRESH_SECS` unless `STATIONS_REFRESH_SECS` is already set). A failed fetch is retried hourly, and a response that is not a non-empty JSON
   array of objects with a 3-letter `code` is rejected and the previous copy kept.
 - It also records, for every stored status document, each station's `code`, `name`, `displayName`,
   `facility` and `audioName`. A later document updates fields; an absent field never erases a known
@@ -125,6 +126,12 @@ The service names stops from this worker (see [Station names](../README.md#stati
   `{AMTRAK_OUTPUT_DIR}/tracks/stations-seen.json`. Writes are atomic (temp file plus rename), and a
   corrupt file is renamed to `*.invalid` and ignored. A restart reuses them, so it neither refetches
   the directory nor resets the interval.
+- A manual refresh: the service's `refresh-station-names` command writes the request time (Unix
+  seconds) to `{AMTRAK_OUTPUT_DIR}/tracks/station-names-refresh-requested`. Each poll cycle, the
+  worker compares it with the last request it acted on (kept in memory). A newer request fetches
+  the directory at once, ignoring `STATIONS_REFRESH_SECS` and the hourly failure backoff, and is
+  acted on once whether the fetch succeeds or fails. A file that is not a number counts as
+  requested at its modification time. The worker never deletes the file; the service does.
 - The poll log names the next station as `next={code} ({display})`, and the `worker.tracks.dump`
   rows carry `station_display`.
 
@@ -179,7 +186,7 @@ Tracks:
 | `MAX_FETCHES_PER_CYCLE` | `24` | Cap on status requests per cycle |
 | `AMTRAK_TRACKS_LEAD_TIME_FILE` | empty | `amtrak-station-lead-time/v1` profile; see [Station coverage](#station-coverage) |
 | `DOCUMENT_TTL_SECS` | `7200` | How long a fetched document stays in `/tracks.json` |
-| `STATIONS_REFRESH_SECS` | `1209600` | Seconds between fetches of Amtrak's station directory (14 days). A failed fetch is retried hourly |
+| `STATIONS_REFRESH_SECS` | `1209600` | Seconds between fetches of Amtrak's station directory (14 days). A failed fetch is retried hourly. When the service starts the worker, it defaults to the service's `AMTRAK_STOP_NAMES_REFRESH_SECS` |
 | `FETCH_TIMEOUT_SECS` | `20` | Abort one status request after this many seconds |
 | `BROWSER_MAX_AGE_SECS` | `1800` | Recycle the status page after this long, between poll cycles. This recycle is what bounds the renderer, which grows by hundreds of MiB over hours of status fetches; a value near the old `21600` lets it grow larger than in v0.8.0 |
 | `RELAUNCH_BACKOFF_MAX_SECS` | `900` | Longest wait before relaunching after a browser failure |

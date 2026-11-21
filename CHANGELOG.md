@@ -18,6 +18,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   gains `GET /stations.json`, `STATIONS_REFRESH_SECS` (`1209600`), and station names in its logs and
   `worker.tracks.dump` output. Board names persist: each renaming merges new names over the applied
   ones, so a reset worker cannot erase them.
+- **Refresh station names now.** `docker compose exec amtrak-gtfs-rt amtrak-gtfs-rt-service
+  refresh-station-names` renames stops from Amtrak's current names within about two minutes instead
+  of at the next 14-day renaming, and restarts that clock. `AMTRAK_STOP_NAMES_REFRESH_SECS` is now
+  the single refresh setting: the service passes it to the worker it starts as
+  `STATIONS_REFRESH_SECS`, which still overrides the worker's refetch when set.
 
 ### Changed
 

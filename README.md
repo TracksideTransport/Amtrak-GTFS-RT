@@ -647,7 +647,7 @@ Restart=on-failure
 | `AMTRAK_TRACKS_AMTRAK` | on | Amtrak's own track and gate status documents, read through the browser worker. Set `off` to skip them |
 | `AMTRAK_TRACKS_AMTRAK_URL` | `http://127.0.0.1:8081/tracks.json` (built-in browser worker) | Override for Amtrak's status JSON. Setting it empty also skips that source and logs a warning at startup. This is not `www.amtrak.com`; that host blocks plain HTTP |
 | `AMTRAK_STOP_NAMES` | on | Renames `stops.txt` from Amtrak's station names (see [Station names](#station-names)). Takes effect only when `AMTRAK_TRACKS` and `AMTRAK_TRACKS_AMTRAK` are on. Set `off` to publish Amtrak's own names with no `+names` suffix |
-| `AMTRAK_STOP_NAMES_REFRESH_SECS` | `1209600` | Seconds between renamings (14 days). The first renaming comes 24 hours after the worker's first successful directory fetch. The service reads the worker's `/stations.json` at most this often |
+| `AMTRAK_STOP_NAMES_REFRESH_SECS` | `1209600` | Seconds between renamings (14 days), and, when the service starts the browser worker, how often the worker refetches Amtrak's station directory (it passes this as `STATIONS_REFRESH_SECS`, unless that is set). The first renaming comes 24 hours after the worker's first successful directory fetch. The service reads the worker's `/stations.json` at most this often. `604800` is weekly. See [Station names](#station-names) |
 | `AMTRAK_TRACKS_RETAIN_GRACE_SECS` | `900` | How long an Amtrak track stays published after the stop's latest time |
 | `AMTRAK_TRACKS_BASE_INTERVAL_SECS` | `900` | Seconds between full track polls. Hot stations, including a lead-time profile such as PVD, are still checked every `POLL_INTERVAL_SECS` between them. Read by the browser worker |
 | `AMTRAK_TRACKS_LEAD_TIME_FILE` | empty | An `amtrak-station-lead-time/v1` JSON file. Only `confidence=observed` with `compared_to_default=wider` changes a station's lookahead and hot window. Read by the browser worker |
@@ -1149,10 +1149,38 @@ from the worker's `GET /stations.json`. The directory has no board or announceme
 accumulate as trains are seen.
 
 **Cadence.** Names change at most once per `AMTRAK_STOP_NAMES_REFRESH_SECS` (default `1209600`, 14
-days), so the static version does not churn. The worker refetches the directory every
-`STATIONS_REFRESH_SECS` (default `1209600`) and retries hourly after a failure. The first renaming
-comes 24 hours (`86400` s) after the directory's first successful fetch. A failed or empty read
-keeps the names already applied, and an empty set is never applied.
+days), so the static version does not churn. The worker retries a failed directory fetch hourly. The
+first renaming comes 24 hours (`86400` s) after the directory's first successful fetch. A failed or
+empty read keeps the names already applied, and an empty set is never applied.
+
+**How often.** `AMTRAK_STOP_NAMES_REFRESH_SECS` is the one setting: it sets how often the service
+renames stops and how often the worker refetches Amtrak's station directory, because the service
+passes it to the worker it starts as `STATIONS_REFRESH_SECS`. For example,
+`AMTRAK_STOP_NAMES_REFRESH_SECS=604800` renames and refetches weekly. Setting
+`STATIONS_REFRESH_SECS` yourself overrides only the worker's refetch (the service's own value is
+left alone), which matters when the worker runs apart from the service.
+
+**Refresh now.** To rename stops from Amtrak's current station names without waiting for the
+schedule, run
+
+```bash
+docker compose exec amtrak-gtfs-rt amtrak-gtfs-rt-service refresh-station-names
+```
+
+(`amtrak-gtfs-rt` is the Compose service name; with plain `docker exec`, use the container name.)
+The command writes the request time to `{AMTRAK_OUTPUT_DIR}/tracks/station-names-refresh-requested`
+on the data volume, prints that a refresh was requested, and exits `0`. It starts no service and
+needs no network. With station names off (`AMTRAK_STOP_NAMES`, `AMTRAK_TRACKS` or
+`AMTRAK_TRACKS_AMTRAK`), or when the file cannot be written, it prints the reason to stderr, writes
+nothing and exits `2`. The worker then refetches the directory on its next poll cycle, ignoring its
+interval and the hourly failure backoff, and acts on each request once. The service checks every
+minute and renames as soon as the worker's directory is newer than the request, or ten minutes
+after the request even if it is not, skipping the 14-day and first-24-hour waits. The guards still
+apply: an empty set is never applied, and an empty directory never replaces applied names. In
+practice, fresh names are published within about two minutes. The service deletes the request file
+once the renaming is applied. It retries every minute after a failed read, and gives up, deletes
+the file and logs a warning one hour after the request. A manual renaming restarts the 14-day
+clock.
 
 **Board names persist.** Each renaming merges what the worker knows over the names already
 applied: a new value wins, so a board name Amtrak changes is updated, but a field or station the
@@ -1167,7 +1195,9 @@ directory.
 logged.
 
 **Files.** The worker keeps `{AMTRAK_OUTPUT_DIR}/tracks/stations-directory.json` and
-`stations-seen.json`. The service keeps the names it applied in
+`stations-seen.json`. The refresh command's request file,
+`{AMTRAK_OUTPUT_DIR}/tracks/station-names-refresh-requested`, sits beside them. The service keeps
+the names it applied in
 `{AMTRAK_OUTPUT_DIR}/tracks/station-names-applied.json`, so a restart rebuilds the same names. Every
 write is atomic, and a corrupt file is renamed to `*.invalid` and ignored.
 
