@@ -145,10 +145,10 @@ turning sources off. To upgrade, download the newer release's `docker-compose.ym
   train CLI, root-level Compose and Bake packaging for the one image, and live track and platform
   assignments (on by default; `AMTRAK_TRACKS=off` turns them off). Changes merged after a release are
   listed under **Unreleased** in [CHANGELOG.md](CHANGELOG.md).
-- **Releases:** `v0.9.0` (2026-11-20) is the current release; `v0.8.0` was the first release of
+- **Releases:** `v0.10.0` (2026-11-21) is the current release; `v0.8.0` was the first release of
   the one image. A release is complete when its GitHub Release carries `image-release.txt` with
   the tag, revisions, manifest digest, and both platform digests; until a newer release completes,
-  `v0.9.0` stays the stable image. `v0.7.0` and
+  `v0.10.0` stays the stable image. `v0.7.0` and
   `v0.7.1` also published `amtrak-gtfs-rt-track-fetcher` and `amtrak-gtfs-rt-advisory-fetcher`.
   Those two are deprecated and get no further releases: from `v0.8.0` the release publishes only
   `amtrak-gtfs-rt`, which contains the browser worker. Pull the version tag, and pin the manifest
