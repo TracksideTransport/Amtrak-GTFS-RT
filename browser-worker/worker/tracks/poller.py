@@ -563,9 +563,16 @@ def take_early_hints() -> tuple[set[str], set[str]]:
 async def refresh_directory(
     stations: StationsStore, browser: ResidentBrowser, cfg: Config, now: float
 ) -> None:
-    """Fetch Amtrak's station directory when it is due. A failure is logged, never raised."""
-    if not stations.directory_due(now, cfg.stations_refresh_secs):
+    """Fetch Amtrak's station directory when it is due, or at once for a new manual request.
+
+    A request (``stations.take_request``) skips the interval and the failure backoff and is acted
+    on once, whether the fetch succeeds or fails. A failure is logged, never raised.
+    """
+    requested = stations.take_request() is not None
+    if not requested and not stations.directory_due(now, cfg.stations_refresh_secs):
         return
+    if requested:
+        logger.info("station directory fetch requested by the operator")
     try:
         status, body = await browser.fetch_json(DIRECTORY_URL, cfg.fetch_timeout_secs)
     except BrowserUnavailable as error:

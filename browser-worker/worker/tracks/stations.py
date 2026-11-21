@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import re
 import tempfile
@@ -24,13 +25,14 @@ import time
 
 from .store import iso_utc
 
-__all__ = ["DIRECTORY_URL", "StationsStore"]
+__all__ = ["DIRECTORY_URL", "REFRESH_REQUEST_FILE", "StationsStore"]
 
 DIRECTORY_URL = "https://www.amtrak.com/services/data.stations.json"
 SEEN_FIELDS = ("name", "displayName", "facility", "audioName")
 RETRY_AFTER_FAILURE_SECS = 3600
 _SEEN_FILE = "stations-seen.json"
 _DIRECTORY_FILE = "stations-directory.json"
+REFRESH_REQUEST_FILE = "station-names-refresh-requested"
 _CODE = re.compile(r"[A-Za-z]{3}")
 
 logger = logging.getLogger(__name__)
@@ -64,6 +66,7 @@ class StationsStore:
         self._directory: list[dict] = []
         self._directory_fetched_at: float | None = None
         self._last_failure: float | None = None
+        self._handled_request: float | None = None
         if self._root is not None:
             self._load()
 
@@ -108,6 +111,44 @@ class StationsStore:
             if self._directory_fetched_at is None or not self._directory:
                 return True
             return now - self._directory_fetched_at >= refresh_secs
+
+    def refresh_requested(self) -> float | None:
+        """When an operator asked for a refresh (Unix seconds), or ``None``.
+
+        The service's ``refresh-station-names`` command writes the time to
+        ``station-names-refresh-requested`` beside the other station files. ``None`` without a
+        root, with no file, or when it cannot be read. A file that does not hold a number counts
+        as requested when it was last modified.
+        """
+        if self._root is None:
+            return None
+        path = self._path(REFRESH_REQUEST_FILE)
+        try:
+            with open(path, encoding="utf-8") as handle:
+                text = handle.read().strip()
+            try:
+                requested = float(text)
+                if math.isfinite(requested):
+                    return requested
+            except ValueError:
+                pass
+            return os.stat(path).st_mtime
+        except (OSError, ValueError):
+            return None
+
+    def take_request(self) -> float | None:
+        """The pending request time, marked handled so it is acted on once.
+
+        ``None`` when there is no request, or it is not newer than the last one handled.
+        """
+        requested = self.refresh_requested()
+        if requested is None:
+            return None
+        with self._lock:
+            if self._handled_request is not None and requested <= self._handled_request:
+                return None
+            self._handled_request = requested
+        return requested
 
     def accept_directory(self, body: str, now: float) -> bool:
         """Store a valid directory body. A bad one records the failure and keeps the old copy."""

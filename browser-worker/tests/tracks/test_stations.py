@@ -138,3 +138,69 @@ def test_snapshot_is_detached_from_later_records():
     store.record_document(_doc("NYP", name="New York"))
     assert taken["seen"] == {"BOS": {"name": "Boston"}}
     assert store.snapshot()["seen"]["BOS"]["facility"] == "South Station"
+
+
+class _Browser:
+    def __init__(self, status, body):
+        self.reply, self.calls = (status, body), []
+
+    async def fetch_json(self, url, timeout_secs):
+        self.calls.append(url)
+        return self.reply
+
+
+def test_manual_request_fetches_once_despite_backoff(tmp_path):
+    import asyncio
+
+    from worker.tracks.config import Config
+    from worker.tracks.poller import refresh_directory
+
+    f = 1_000_000.0
+    store = StationsStore(str(tmp_path))
+    cfg = Config()
+    bad = _Browser(503, "")
+    asyncio.run(refresh_directory(store, bad, cfg, f))
+    assert len(bad.calls) == 1
+    # Not due by backoff at f+20, and no request yet: nothing is fetched.
+    asyncio.run(refresh_directory(store, bad, cfg, f + 20))
+    assert len(bad.calls) == 1
+    (tmp_path / "station-names-refresh-requested").write_text(f"{int(f + 10)}\n")
+    assert store.refresh_requested() == f + 10
+    asyncio.run(refresh_directory(store, bad, cfg, f + 20))
+    assert len(bad.calls) == 2
+    # The same request is acted on once, even though that fetch failed.
+    asyncio.run(refresh_directory(store, bad, cfg, f + 30))
+    assert len(bad.calls) == 2
+    # The worker never deletes the file.
+    assert (tmp_path / "station-names-refresh-requested").exists()
+    # A newer request fetches again, and a good answer is stored.
+    good = _Browser(200, _directory("BOS"))
+    (tmp_path / "station-names-refresh-requested").write_text(f"{int(f + 40)}\n")
+    asyncio.run(refresh_directory(store, good, cfg, f + 50))
+    assert len(good.calls) == 1
+    assert store.snapshot()["directory"][0]["code"] == "BOS"
+
+
+def test_refresh_requested_reads_time_mtime_or_none(tmp_path):
+    assert StationsStore(None).refresh_requested() is None
+    store = StationsStore(str(tmp_path))
+    assert store.refresh_requested() is None
+    path = tmp_path / "station-names-refresh-requested"
+    path.write_text("1234\n")
+    assert store.refresh_requested() == 1234.0
+    path.write_text("garbage")
+    os.utime(path, (5000, 5000))
+    assert store.refresh_requested() == 5000.0
+
+
+def test_no_request_file_behaves_as_before(tmp_path):
+    import asyncio
+
+    from worker.tracks.config import Config
+    from worker.tracks.poller import refresh_directory
+
+    store = StationsStore(str(tmp_path))
+    good = _Browser(200, _directory("BOS"))
+    asyncio.run(refresh_directory(store, good, Config(), 100.0))
+    asyncio.run(refresh_directory(store, good, Config(), 160.0))
+    assert len(good.calls) == 1
