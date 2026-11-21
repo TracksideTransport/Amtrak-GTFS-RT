@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Fixed feed URLs.** `/v1/current/{artifact}` serves each file (`static.zip`,
+  `official-static.zip`, `platform-addon.zip`, `trip-updates.pb`, `vehicle-positions.pb`,
+  `alerts.pb`) from the generation that is current when the request arrives, with the same
+  `ETag`/`304` behaviour as the generation URLs and an `X-Generation-Id` header. It is for apps and
+  routing backends configured with fixed URLs. Separate requests can straddle a new generation;
+  `feed-set.json` still gives one consistent set (#111).
+- **Generation URLs also carry `X-Generation-Id`.**
+
 ### Changed
 
 - **The catenary crate is updated from 0.9.1 (`f3a83db`) to 0.10.1 (`dd6f9ef`)** (#171). It
