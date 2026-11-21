@@ -26,7 +26,8 @@ use crate::endpoints::AnnounceFirstGeneration;
 use crate::orchestrator::{GenerationCommitter, StoreGenerationCommitter};
 use crate::sources::advisories::{Notices, WithAdvisories};
 use crate::sources::amtrak::AmtrakSource;
-use crate::sources::tracks::refresher::run_board_refresher;
+use crate::sources::tracks::names::run_names_refresher;
+use crate::sources::tracks::refresher::{board_client, run_board_refresher};
 use crate::sources::tracks::{AssignmentStore, WithTracks};
 use crate::sources::{RtBatch, RtSource, SourceError};
 use crate::static_augment::{PlatformTable, SharedPlatforms};
@@ -34,7 +35,7 @@ use crate::static_gtfs::{
     bootstrap_static, recover_static, CachedStaticValidator, MobilityDataStaticValidator,
     StaticSnapshotState, StaticStandardsValidator,
 };
-use crate::static_names::StationNames;
+use crate::static_names::{SharedNames, StationNames};
 use crate::writer::GenerationStore;
 use async_trait::async_trait;
 use std::collections::HashMap;
@@ -559,14 +560,39 @@ pub async fn run_combined() -> Result<(), FatalError> {
         .as_ref()
         .map(SharedPlatforms::candidates)
         .unwrap_or_default();
+    // The same handle reaches the bootstrap and the refresh, so names applied before a restart are
+    // used at once. Off, `stops.txt` stays as Amtrak publishes it.
+    let names = track_config.names_enabled().then(|| {
+        SharedNames::load(
+            config
+                .output_dir
+                .join("tracks")
+                .join("station-names-applied.json"),
+        )
+    });
+    let startup_names = names.as_ref().and_then(SharedNames::applied);
     let snapshots = initial_snapshots(
         &store,
         &config.static_url,
         validator.as_ref(),
         &bootstrap_tables,
-        None,
+        startup_names.as_deref().map(|applied| &applied.inputs),
     )
     .await?;
+    drop(startup_names);
+    if let (Some(names), Some(url)) = (&names, &track_config.stations_url) {
+        tokio::spawn(run_names_refresher(
+            board_client(&track_config),
+            url.clone(),
+            names.clone(),
+            track_config.stop_names_refresh,
+        ));
+    } else if names.is_some() {
+        tracing::warn!(
+            source = "amtrak",
+            "AMTRAK_TRACKS_AMTRAK_URL does not end in /tracks.json; stop names are not renewed"
+        );
+    }
     if let Some(platforms) = &platforms {
         let active = snapshots.active().await;
         platforms.set_known_stations(active.parsed.stops.keys().map(String::as_str));
@@ -726,7 +752,7 @@ pub async fn run_combined() -> Result<(), FatalError> {
                 static_refresh_interval,
                 validator,
                 platforms,
-                None,
+                names,
             )
             .await;
             Ok(())

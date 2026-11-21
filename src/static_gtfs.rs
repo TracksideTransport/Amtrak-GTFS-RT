@@ -836,6 +836,11 @@ async fn run_snapshot_refresh_with(
         .map(SharedPlatforms::candidates)
         .unwrap_or_default();
     let startup_names = names.as_ref().and_then(SharedNames::applied).is_some();
+    if startup_names {
+        // The version marker cannot tell whether a recovered snapshot predates the last renaming,
+        // so the first scheduled refresh downloads again rather than accepting a `304`.
+        state.set_validators(None);
+    }
     if matches_static_config(&active_version, &startup_tables, startup_names) {
         ticker.tick().await;
     } else {
@@ -2184,5 +2189,54 @@ t,10:00:00,10:00:00,NWK,1\nt,10:30:00,10:30:00,OSM,2\n";
             staged.parsed.stops["NWK"].name.as_deref(),
             Some("Newark Station")
         );
+    }
+    /// A snapshot recovered with names applied may predate the last renaming, so the first
+    /// scheduled refresh downloads again instead of asking for a `304`.
+    #[tokio::test]
+    async fn first_refresh_with_names_applied_is_unconditional() {
+        let (url, requests, server) = conditional_upstream(augmentable_zip("20260927"));
+        let table = PlatformTable::parse("NWK=1-2").unwrap();
+        let path = std::env::temp_dir().join(format!(
+            "amtrak-names-restart-{}-{:?}/station-names-applied.json",
+            std::process::id(),
+            SystemTime::now()
+        ));
+        let applied = crate::static_names::AppliedNames {
+            inputs: nwk_names("Newark Penn"),
+            applied_at_unix: 1,
+        };
+        SharedNames::load(path.clone())
+            .set_applied(applied.clone())
+            .unwrap();
+        let shared = SharedNames::load(path);
+        let validator: Arc<dyn StaticStandardsValidator> = Arc::new(validator());
+        let state = bootstrap_static(
+            &url,
+            validator.as_ref(),
+            std::slice::from_ref(&table),
+            Some(&applied.inputs),
+        )
+        .await
+        .unwrap();
+        assert!(state.validators().is_some());
+        let task = tokio::spawn(run_snapshot_refresh_with(
+            state,
+            url,
+            Duration::from_millis(300),
+            validator,
+            Some(SharedPlatforms::new(table, None)),
+            Some(shared),
+            PLATFORM_REFRESH,
+        ));
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while requests.lock().unwrap().len() < 2 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the first scheduled refresh did not run");
+        task.abort();
+        server.abort();
+        assert_eq!(*requests.lock().unwrap(), vec![None, None]);
     }
 }
