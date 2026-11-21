@@ -189,6 +189,30 @@ exact figure depends on which stations the worker has seen, so tests must not pi
     fetch, so the seen table already holds a day of board names (433 stations after one day on
     2026-11-21). Until then, stop names are unchanged and there is no `+names` suffix. This avoids
     a directory-only first round followed by a board-name round two weeks later.
+- **Manual refresh** (owner decision, 2026-11-21, option A of three: a subcommand, a signal, or an
+  HTTP endpoint):
+  - **Command:** `amtrak-gtfs-rt-service refresh-station-names`, run in the container, for example
+    `docker compose exec gtfs amtrak-gtfs-rt-service refresh-station-names`.
+    - It writes the request time (Unix seconds) atomically to
+      `{AMTRAK_OUTPUT_DIR}/tracks/station-names-refresh-requested`, prints that the refresh was
+      requested, and exits `0`.
+    - It exits `2` with a message, and writes nothing, when names are off (`AMTRAK_STOP_NAMES`,
+      `AMTRAK_TRACKS` or `AMTRAK_TRACKS_AMTRAK`) or `AMTRAK_OUTPUT_DIR` is unusable.
+    - It starts no service, opens no port and needs no network.
+  - **Worker:** each poll cycle, it compares the request time with the last request it acted on. A
+    newer request fetches the directory at once, ignoring the 14-day interval and the hourly failure
+    backoff. It is acted on once whether the fetch succeeds or fails, and the worker never deletes
+    the file.
+  - **Service:** the names refresher wakes every minute, and keeps the hourly cadence check. When
+    the request file exists, it reads `/stations.json` and renames immediately, skipping the 14-day
+    and first-24-hour waits. That happens once the directory was fetched at or after the request, or
+    10 minutes after the request, whichever comes first. The merge and every guard still apply.
+    - It deletes the file after a renaming is applied.
+    - A failed read or a guarded empty read keeps the file and retries the next minute.
+    - An hour after the request, the service gives up, deletes the file and logs a warning.
+    - A manual renaming resets the 14-day clock.
+  - **Result:** fresh names published within about two minutes. There is no new route or port, and
+    it works with the read-only root filesystem, because the request file is on the data volume.
 - **Failure.** If renaming fails, or the renamed feed fails parsing or validation, the build logs a
   warning and publishes without names. That is the same fallback augmentation already uses.
 - **Configuration.** `AMTRAK_STOP_NAMES` (`on` | `off`, default `on`) takes effect only when the
