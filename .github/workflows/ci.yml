@@ -52,6 +52,13 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         if: steps.scope.outputs.logic == 'true'
 
+      # #142: a fixture was once built from stale code after a cache restore, and the restored
+      # target/ does hold this crate's old artifacts (the first run of this step removed 5 GiB).
+      # Delete them so this crate and its examples always compile from the checkout.
+      - name: Rebuild this crate from the checkout
+        if: steps.scope.outputs.logic == 'true'
+        run: cargo clean --locked --package amtrak-gtfs-rt-service
+
       - name: Build
         if: steps.scope.outputs.logic == 'true'
         run: cargo build --locked --all-targets --all-features --verbose
@@ -278,6 +285,13 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         if: steps.paths.outputs.run == 'true'
 
+      # #142: a fixture was once built from stale code after a cache restore, and the restored
+      # target/ does hold this crate's old artifacts (the first run of this step removed 5 GiB).
+      # Delete them so this crate and its examples always compile from the checkout.
+      - name: Rebuild this crate from the checkout
+        if: steps.paths.outputs.run == 'true'
+        run: cargo clean --locked --package amtrak-gtfs-rt-service
+
       - name: Set up Java 17
         if: steps.paths.outputs.run == 'true'
         uses: actions/setup-java@v5
@@ -305,6 +319,10 @@ jobs:
             ~/.m2/repository
           key: validators-${{ steps.pins.outputs.key }}
           restore-keys: validators-
+
+      - name: Build the validation fixture
+        if: steps.paths.outputs.run == 'true'
+        run: cargo build --locked --example validation_fixture
 
       - name: Validate the fixture feed set (zero ERROR notices)
         if: steps.paths.outputs.run == 'true'
