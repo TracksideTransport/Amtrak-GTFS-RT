@@ -192,7 +192,7 @@ exact figure depends on which stations the worker has seen, so tests must not pi
 - **Manual refresh** (owner decision, 2026-11-21, option A of three: a subcommand, a signal, or an
   HTTP endpoint):
   - **Command:** `amtrak-gtfs-rt-service refresh-station-names`, run in the container, for example
-    `docker compose exec gtfs amtrak-gtfs-rt-service refresh-station-names`.
+    `docker compose exec amtrak-gtfs-rt amtrak-gtfs-rt-service refresh-station-names` (the release Compose file's service name).
     - It writes the request time (Unix seconds) atomically to
       `{AMTRAK_OUTPUT_DIR}/tracks/station-names-refresh-requested`, prints that the refresh was
       requested, and exits `0`.
