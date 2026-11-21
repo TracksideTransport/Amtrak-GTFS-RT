@@ -549,6 +549,13 @@ fn station_names_refresh_request<F: Fn(&str) -> Option<String>>(
                 .to_string(),
         );
     }
+    if track_config.stations_url.is_none() {
+        return Err(
+            "AMTRAK_TRACKS_AMTRAK_URL does not end in /tracks.json, so the service never \
+                    renames from the worker; nothing would act on a refresh"
+                .to_string(),
+        );
+    }
     // The same default as `Config`, so the command and the service agree on the directory.
     let output_dir = get("AMTRAK_OUTPUT_DIR").unwrap_or_else(|| "./out".to_string());
     if output_dir.trim().is_empty() {
@@ -850,6 +857,16 @@ mod tests {
     use std::path::PathBuf;
     use std::pin::Pin;
     use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+    use zip::write::SimpleFileOptions;
+
+    struct CancellationFlag(Arc<AtomicBool>);
+
+    impl Drop for CancellationFlag {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
 
     #[test]
     fn request_command_writes_the_file_and_refuses_when_off() {
@@ -875,6 +892,17 @@ mod tests {
             assert!(error.contains("station names are off"), "{off}: {error}");
             assert!(!file.exists(), "{off}");
         }
+        // Names on, but the worker URL is not a /tracks.json one: nothing would act on a request.
+        let leaked: &'static [(&'static str, &'static str)] = Box::leak(
+            vec![(
+                "AMTRAK_TRACKS_AMTRAK_URL",
+                "http://worker.internal:8081/other",
+            )]
+            .into_boxed_slice(),
+        );
+        let error = station_names_refresh_request(env(leaked), now).unwrap_err();
+        assert!(error.contains("/tracks.json"), "{error}");
+        assert!(!file.exists());
         station_names_refresh_request(env(&[]), now).unwrap();
         assert_eq!(std::fs::read_to_string(&file).unwrap(), "1793534400\n");
         std::fs::remove_dir_all(&dir).unwrap();
@@ -890,17 +918,6 @@ mod tests {
         .unwrap_err();
         assert!(error.starts_with("could not write"), "{error}");
         std::fs::remove_file(&blocker).unwrap();
-    }
-
-    use std::time::{Duration, SystemTime, UNIX_EPOCH};
-    use zip::write::SimpleFileOptions;
-
-    struct CancellationFlag(Arc<AtomicBool>);
-
-    impl Drop for CancellationFlag {
-        fn drop(&mut self) {
-            self.0.store(true, Ordering::SeqCst);
-        }
     }
 
     type TestFuture = Pin<Box<dyn Future<Output = Result<(), ServiceError>> + Send + 'static>>;

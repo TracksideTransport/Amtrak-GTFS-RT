@@ -43,18 +43,30 @@ pub fn write_refresh_request(
     Ok(path)
 }
 
+/// How far ahead of the clock a request time may be before it is treated as bogus.
+const REQUEST_CLOCK_SKEW: Duration = Duration::from_secs(60);
+
 /// When the request file asks for a refresh, or `None` when there is no file. A file that does not
-/// hold a number counts as requested at its modification time, else at `now`.
+/// hold a number counts as requested at its modification time, else at `now`. A time more than a
+/// minute ahead of `now` (a hand-written file, or a clock that stepped back) could never be
+/// answered or given up on, so that file is deleted with a warning and there is no request.
 fn read_refresh_request(path: &Path, now: SystemTime) -> Option<SystemTime> {
     let text = std::fs::read_to_string(path).ok();
-    if let Some(seconds) = text
+    let requested = match text
         .as_deref()
         .and_then(|text| text.trim().parse::<u64>().ok())
     {
-        return UNIX_EPOCH.checked_add(Duration::from_secs(seconds));
+        Some(seconds) => UNIX_EPOCH.checked_add(Duration::from_secs(seconds)),
+        None => Some(std::fs::metadata(path).ok()?.modified().unwrap_or(now)),
+    };
+    match requested {
+        Some(requested) if requested <= now + REQUEST_CLOCK_SKEW => Some(requested),
+        _ => {
+            tracing::warn!("the station names refresh request is dated in the future; discarded");
+            remove_request(path);
+            None
+        }
     }
-    let metadata = std::fs::metadata(path).ok()?;
-    Some(metadata.modified().unwrap_or(now))
 }
 
 /// Converts the worker's `/stations.json` into names, plus when the directory was fetched.
@@ -733,13 +745,19 @@ mod tests {
         assert_eq!(file, dir.join("station-names-refresh-requested"));
         assert_eq!(std::fs::read_to_string(&file).unwrap(), "1793534400\n");
         assert!(!dir.join("station-names-refresh-requested.tmp").exists());
-        assert_eq!(read_refresh_request(&file, at(1)), Some(at(1_793_534_400)));
+        assert_eq!(
+            read_refresh_request(&file, SystemTime::now()),
+            Some(at(1_793_534_400))
+        );
         // An unparseable file is requested at its modification time; no file is no request.
         std::fs::write(&file, "garbage").unwrap();
         let modified = std::fs::metadata(&file).unwrap().modified().unwrap();
-        assert_eq!(read_refresh_request(&file, at(1)), Some(modified));
+        assert_eq!(
+            read_refresh_request(&file, SystemTime::now()),
+            Some(modified)
+        );
         std::fs::remove_file(&file).unwrap();
-        assert_eq!(read_refresh_request(&file, at(1)), None);
+        assert_eq!(read_refresh_request(&file, SystemTime::now()), None);
     }
 
     #[tokio::test]
@@ -855,5 +873,28 @@ mod tests {
         assert_eq!(outcome, Some(NamesOutcome::Kept));
         assert!(file.exists());
         assert_eq!(names.applied().unwrap().applied_at_unix, 100);
+    }
+
+    #[tokio::test]
+    async fn future_request_time_is_discarded() {
+        let dir = path("manual-future").parent().unwrap().to_path_buf();
+        let file = write_refresh_request(&dir, at(R + 3_600)).unwrap();
+        let names = SharedNames::load(dir.join("station-names-applied.json"));
+        // The worker address is unreachable and unused: the request is dropped before any read.
+        let outcome = manual_refresh_step(
+            &client(),
+            "http://127.0.0.1:1/stations.json",
+            &names,
+            FOURTEEN_DAYS,
+            at(R),
+            &file,
+        )
+        .await;
+        assert_eq!(outcome, None);
+        assert!(!file.exists());
+        // A request a few seconds ahead (clock skew) is still honored.
+        let file = write_refresh_request(&dir, at(R + 30)).unwrap();
+        assert_eq!(read_refresh_request(&file, at(R)), Some(at(R + 30)));
+        assert!(file.exists());
     }
 }
