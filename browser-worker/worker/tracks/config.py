@@ -53,6 +53,7 @@ class Config:
     block_third_party: bool = True
     lead_time_file: str = ""
     base_interval_secs: int = 900
+    stations_refresh_secs: int = 1209600
 
     @staticmethod
     def from_env(env: Mapping[str, str]) -> "Config":
@@ -78,5 +79,6 @@ class Config:
             block_third_party=flag(env, "BLOCK_THIRD_PARTY", True),
             lead_time_file=env.get("AMTRAK_TRACKS_LEAD_TIME_FILE", ""),
             base_interval_secs=pos_int(env, "AMTRAK_TRACKS_BASE_INTERVAL_SECS", 900),
+            stations_refresh_secs=pos_int(env, "STATIONS_REFRESH_SECS", 1209600),
         )
 

@@ -26,6 +26,7 @@ from .notices import poller as notices_poller
 from .notices.store import SnapshotStore
 from .server import Snapshots, make_server
 from .tracks import poller as tracks_poller
+from .tracks.stations import StationsStore
 from .tracks.store import TrackStore
 
 logger = logging.getLogger("browser_worker")
@@ -52,6 +53,15 @@ def build_components(env: Mapping[str, str]) -> Components | None:
     snapshots = Snapshots(
         config=config,
         tracks=TrackStore() if config.tracks is not None else None,
+        stations=(
+            StationsStore(
+                os.path.join(env["AMTRAK_OUTPUT_DIR"], "tracks")
+                if env.get("AMTRAK_OUTPUT_DIR")
+                else None
+            )
+            if config.tracks is not None
+            else None
+        ),
         notices=SnapshotStore(config.notices.snapshot_dir) if config.notices is not None else None,
     )
     return Components(config, snapshots, make_server(snapshots))
@@ -87,7 +97,12 @@ async def _serve(components: Components) -> None:
     if config.tracks is not None and snapshots.tracks is not None:
         polls.add(
             asyncio.create_task(
-                tracks_poller.run_forever(snapshots.tracks, config.tracks, shared=shared)
+                tracks_poller.run_forever(
+                    snapshots.tracks,
+                    config.tracks,
+                    shared=shared,
+                    stations=snapshots.stations,
+                )
             )
         )
     if config.notices is not None and snapshots.notices is not None:
