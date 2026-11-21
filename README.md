@@ -1171,7 +1171,8 @@ docker compose exec amtrak-gtfs-rt amtrak-gtfs-rt-service refresh-station-names
 The command writes the request time to `{AMTRAK_OUTPUT_DIR}/tracks/station-names-refresh-requested`
 on the data volume, prints that a refresh was requested, and exits `0`. It starts no service and
 needs no network. With station names off (`AMTRAK_STOP_NAMES`, `AMTRAK_TRACKS` or
-`AMTRAK_TRACKS_AMTRAK`), or when the file cannot be written, it prints the reason to stderr, writes
+`AMTRAK_TRACKS_AMTRAK`), when `AMTRAK_TRACKS_AMTRAK_URL` does not end in `/tracks.json` (no worker
+would act on the request), or when the file cannot be written, it prints the reason to stderr, writes
 nothing and exits `2`. The worker then refetches the directory on its next poll cycle, ignoring its
 interval and the hourly failure backoff, and acts on each request once. The service checks every
 minute and renames as soon as the worker's directory was fetched at or after the request, or ten minutes
