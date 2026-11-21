@@ -511,6 +511,57 @@ pub async fn run_service() -> Result<(), FatalError> {
     run_combined().await
 }
 
+/// The `refresh-station-names` subcommand: asks the running service to rename stops from Amtrak's
+/// current station names now, instead of at the next scheduled renaming.
+///
+/// It reads the same environment as the service, writes the request time to
+/// `{AMTRAK_OUTPUT_DIR}/tracks/station-names-refresh-requested` and exits `0`. It starts no
+/// service and needs no network. When station names are off, or the file cannot be written, it
+/// prints why to stderr and exits `2`.
+pub fn request_station_names_refresh() -> std::process::ExitCode {
+    match station_names_refresh_request(|key| std::env::var(key).ok(), std::time::SystemTime::now())
+    {
+        Ok(()) => {
+            println!(
+                "station names refresh requested; the worker refetches Amtrak's station \
+                 directory and the service renames stops within about two minutes"
+            );
+            std::process::ExitCode::from(0)
+        }
+        Err(message) => {
+            eprintln!("{message}");
+            std::process::ExitCode::from(2)
+        }
+    }
+}
+
+/// [`request_station_names_refresh`] with an injected environment and clock.
+fn station_names_refresh_request<F: Fn(&str) -> Option<String>>(
+    get: F,
+    now: std::time::SystemTime,
+) -> Result<(), String> {
+    let track_config = crate::config::TrackConfig::from_map(&get)
+        .map_err(|error| format!("cannot read the station names configuration: {error}"))?;
+    if !track_config.names_enabled() {
+        return Err(
+            "station names are off (AMTRAK_STOP_NAMES, AMTRAK_TRACKS or \
+                    AMTRAK_TRACKS_AMTRAK); nothing to refresh"
+                .to_string(),
+        );
+    }
+    // The same default as `Config`, so the command and the service agree on the directory.
+    let output_dir = get("AMTRAK_OUTPUT_DIR").unwrap_or_else(|| "./out".to_string());
+    if output_dir.trim().is_empty() {
+        return Err("AMTRAK_OUTPUT_DIR is empty".to_string());
+    }
+    crate::sources::tracks::names::write_refresh_request(
+        &std::path::Path::new(&output_dir).join("tracks"),
+        now,
+    )
+    .map(drop)
+    .map_err(|error| format!("could not write the refresh request: {error}"))
+}
+
 /// Stage name for every environment-configuration failure.
 const CONFIGURATION: &str = "configuration";
 
@@ -586,6 +637,10 @@ pub async fn run_combined() -> Result<(), FatalError> {
             url.clone(),
             names.clone(),
             track_config.stop_names_refresh,
+            config
+                .output_dir
+                .join("tracks")
+                .join(crate::sources::tracks::names::REFRESH_REQUEST_FILE),
         ));
     } else if names.is_some() {
         tracing::warn!(
@@ -610,8 +665,18 @@ pub async fn run_combined() -> Result<(), FatalError> {
     let worker_plan =
         worker::WorkerPlan::from_configs(&track_config, &advisory_config, worker_root).map(
             |plan| {
-                plan.with_fleet_trains_file(fleet_trains_file.clone())
-                    .with_output_dir(config.output_dir.clone())
+                let plan = plan
+                    .with_fleet_trains_file(fleet_trains_file.clone())
+                    .with_output_dir(config.output_dir.clone());
+                // One setting renews both: the worker refetches the directory as often as the
+                // service renames, unless the operator set the worker's own variable.
+                let worker_own = std::env::var("STATIONS_REFRESH_SECS")
+                    .is_ok_and(|value| !value.trim().is_empty());
+                if track_config.names_enabled() && !worker_own {
+                    plan.with_stations_refresh(track_config.stop_names_refresh)
+                } else {
+                    plan
+                }
             },
         );
     if worker_plan.is_none()
@@ -785,6 +850,48 @@ mod tests {
     use std::path::PathBuf;
     use std::pin::Pin;
     use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[test]
+    fn request_command_writes_the_file_and_refuses_when_off() {
+        let dir = std::env::temp_dir().join(format!("amtrak-refresh-cmd-{}", std::process::id()));
+        let out = dir.display().to_string();
+        let env = |extra: &'static [(&'static str, &'static str)]| {
+            let out = out.clone();
+            move |key: &str| {
+                extra
+                    .iter()
+                    .find(|(name, _)| *name == key)
+                    .map(|(_, value)| (*value).to_string())
+                    .or_else(|| (key == "AMTRAK_OUTPUT_DIR").then(|| out.clone()))
+            }
+        };
+        let now = std::time::UNIX_EPOCH + Duration::from_secs(1_793_534_400);
+        let file = dir.join("tracks").join("station-names-refresh-requested");
+        // Off by any of the three switches: exit-2 reason, and nothing written.
+        for off in ["AMTRAK_STOP_NAMES", "AMTRAK_TRACKS", "AMTRAK_TRACKS_AMTRAK"] {
+            let leaked: &'static [(&'static str, &'static str)] =
+                Box::leak(vec![(off, "off")].into_boxed_slice());
+            let error = station_names_refresh_request(env(leaked), now).unwrap_err();
+            assert!(error.contains("station names are off"), "{off}: {error}");
+            assert!(!file.exists(), "{off}");
+        }
+        station_names_refresh_request(env(&[]), now).unwrap();
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "1793534400\n");
+        std::fs::remove_dir_all(&dir).unwrap();
+        // An unwritable directory is an error without a URL.
+        let blocker =
+            std::env::temp_dir().join(format!("amtrak-refresh-blocker-{}", std::process::id()));
+        std::fs::write(&blocker, "a file, not a directory").unwrap();
+        let blocked = blocker.display().to_string();
+        let error = station_names_refresh_request(
+            |key| (key == "AMTRAK_OUTPUT_DIR").then(|| blocked.clone()),
+            now,
+        )
+        .unwrap_err();
+        assert!(error.starts_with("could not write"), "{error}");
+        std::fs::remove_file(&blocker).unwrap();
+    }
+
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
     use zip::write::SimpleFileOptions;
 

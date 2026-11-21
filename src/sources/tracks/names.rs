@@ -7,12 +7,55 @@
 
 use crate::static_names::{AppliedNames, DirectoryStation, SeenStation, SharedNames, StationNames};
 use chrono::{DateTime, NaiveDateTime, Utc};
+use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// The first renaming waits this long after the directory's first successful fetch.
 const FIRST_RENAMING_DELAY: Duration = Duration::from_secs(86_400);
-/// How often the task checks whether a renaming is due.
-const CHECK_EVERY: Duration = Duration::from_secs(3_600);
+/// How often the task wakes, to look for a manual refresh request.
+const CHECK_EVERY: Duration = Duration::from_secs(60);
+/// How often the task checks whether a scheduled renaming is due.
+const CADENCE_CHECK_EVERY: Duration = Duration::from_secs(3_600);
+/// File under `{AMTRAK_OUTPUT_DIR}/tracks/` that asks for a manual refresh: the request time in
+/// Unix seconds. The `refresh-station-names` command writes it, the worker reads it, and this task
+/// deletes it once the renaming is applied or the request is given up on.
+pub const REFRESH_REQUEST_FILE: &str = "station-names-refresh-requested";
+/// A manual request renames after this long even when the worker's directory is no fresher.
+const MANUAL_WAIT_FOR_DIRECTORY: Duration = Duration::from_secs(600);
+/// A manual request that has not been applied after this long is dropped.
+const MANUAL_GIVE_UP: Duration = Duration::from_secs(3_600);
+
+/// Writes a manual refresh request into `tracks_dir` (created if needed): `now` in Unix seconds,
+/// then a newline, atomically. Returns the file's path.
+///
+/// # Errors
+///
+/// Returns the I/O error when the directory or file cannot be written.
+pub fn write_refresh_request(
+    tracks_dir: &Path,
+    now: SystemTime,
+) -> std::io::Result<std::path::PathBuf> {
+    let seconds = now
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |since| since.as_secs());
+    let path = tracks_dir.join(REFRESH_REQUEST_FILE);
+    crate::static_augment::write_atomically(&path, &format!("{seconds}\n"))?;
+    Ok(path)
+}
+
+/// When the request file asks for a refresh, or `None` when there is no file. A file that does not
+/// hold a number counts as requested at its modification time, else at `now`.
+fn read_refresh_request(path: &Path, now: SystemTime) -> Option<SystemTime> {
+    let text = std::fs::read_to_string(path).ok();
+    if let Some(seconds) = text
+        .as_deref()
+        .and_then(|text| text.trim().parse::<u64>().ok())
+    {
+        return UNIX_EPOCH.checked_add(Duration::from_secs(seconds));
+    }
+    let metadata = std::fs::metadata(path).ok()?;
+    Some(metadata.modified().unwrap_or(now))
+}
 
 /// Converts the worker's `/stations.json` into names, plus when the directory was fetched.
 ///
@@ -138,9 +181,37 @@ pub async fn refresh_names_once(
     every: Duration,
     now: SystemTime,
 ) -> NamesOutcome {
+    check_names(http, url, names, every, now, None).await
+}
+
+/// One manual check for a refresh requested at `requested`: renames now, skipping the cadence and
+/// the first-24-hour waits, once the worker's directory was fetched at or after the request or
+/// ten minutes have passed. The merge over the applied names and every guard of
+/// [`refresh_names_once`] still apply; until then it returns [`NamesOutcome::Kept`].
+pub async fn force_names_once(
+    http: &reqwest::Client,
+    url: &str,
+    names: &SharedNames,
+    every: Duration,
+    now: SystemTime,
+    requested: SystemTime,
+) -> NamesOutcome {
+    check_names(http, url, names, every, now, Some(requested)).await
+}
+
+/// The shared check. `manual` is the request time of a manual refresh.
+async fn check_names(
+    http: &reqwest::Client,
+    url: &str,
+    names: &SharedNames,
+    every: Duration,
+    now: SystemTime,
+    manual: Option<SystemTime>,
+) -> NamesOutcome {
     let applied = names.applied();
     // With names applied the due time is known without asking the worker.
-    if applied.is_some() && !renaming_due(applied.as_deref(), None, now, every) {
+    if manual.is_none() && applied.is_some() && !renaming_due(applied.as_deref(), None, now, every)
+    {
         return NamesOutcome::NotDue;
     }
     let body = match read_stations(http, url).await {
@@ -166,7 +237,14 @@ pub async fn refresh_names_once(
         tracing::warn!("station directory is empty; keeping the applied names");
         return NamesOutcome::Kept;
     }
-    if !renaming_due(applied.as_deref(), fetched_at, now, every) {
+    let ready = match manual {
+        Some(requested) => {
+            fetched_at.is_some_and(|at| at >= requested)
+                || now.duration_since(requested).unwrap_or_default() >= MANUAL_WAIT_FOR_DIRECTORY
+        }
+        None => renaming_due(applied.as_deref(), fetched_at, now, every),
+    };
+    if !ready {
         return NamesOutcome::Kept;
     }
     // Board names persist: the read is merged over the applied names, never replacing them.
@@ -192,6 +270,38 @@ pub async fn refresh_names_once(
     }
 }
 
+/// Acts on the manual request file at `request`, if there is one. Deletes it once the renaming is
+/// applied, or an hour after the request when it never was; otherwise keeps it for the next
+/// minute. Returns `None` when there is no request.
+pub async fn manual_refresh_step(
+    http: &reqwest::Client,
+    url: &str,
+    names: &SharedNames,
+    every: Duration,
+    now: SystemTime,
+    request: &Path,
+) -> Option<NamesOutcome> {
+    let requested = read_refresh_request(request, now)?;
+    let outcome = force_names_once(http, url, names, every, now, requested).await;
+    if outcome == NamesOutcome::Applied {
+        remove_request(request);
+    } else if now.duration_since(requested).unwrap_or_default() >= MANUAL_GIVE_UP {
+        tracing::warn!(
+            "the manual station names refresh gave up; names were not applied in an hour"
+        );
+        remove_request(request);
+    }
+    Some(outcome)
+}
+
+fn remove_request(request: &Path) {
+    if let Err(error) = std::fs::remove_file(request) {
+        if error.kind() != std::io::ErrorKind::NotFound {
+            tracing::warn!(%error, "could not delete the station names refresh request");
+        }
+    }
+}
+
 async fn read_stations(http: &reqwest::Client, url: &str) -> Result<String, String> {
     let response = http
         .get(url)
@@ -208,19 +318,26 @@ async fn read_stations(http: &reqwest::Client, url: &str) -> Result<String, Stri
         .map_err(|error| format!("body read failed: {}", error.without_url()))
 }
 
-/// Checks hourly and renames when due. A failed read keeps the applied names and retries at the
-/// next check.
+/// Wakes every minute for a manual refresh request (`request`, see [`REFRESH_REQUEST_FILE`]) and
+/// checks hourly whether a scheduled renaming is due. A failed read keeps the applied names and
+/// retries at the next check.
 pub async fn run_names_refresher(
     http: reqwest::Client,
     url: String,
     names: SharedNames,
     every: Duration,
+    request: std::path::PathBuf,
 ) {
     let mut ticker = tokio::time::interval(CHECK_EVERY);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut last_cadence: Option<tokio::time::Instant> = None;
     loop {
         ticker.tick().await;
-        refresh_names_once(&http, &url, &names, every, SystemTime::now()).await;
+        manual_refresh_step(&http, &url, &names, every, SystemTime::now(), &request).await;
+        if last_cadence.is_none_or(|at| at.elapsed() >= CADENCE_CHECK_EVERY) {
+            last_cadence = Some(tokio::time::Instant::now());
+            refresh_names_once(&http, &url, &names, every, SystemTime::now()).await;
+        }
     }
 }
 
@@ -586,5 +703,157 @@ mod tests {
             Some("New York")
         );
         assert!(current.inputs.directory.contains_key("NYP"));
+    }
+
+    const R: u64 = 1_793_534_400;
+
+    /// A tracks directory holding a request made at `R`, and its request file.
+    fn requested(label: &str) -> (PathBuf, PathBuf) {
+        let dir = path(label).parent().unwrap().to_path_buf();
+        let file = write_refresh_request(&dir, at(R)).unwrap();
+        (dir, file)
+    }
+
+    async fn manual(url: &str, names: &SharedNames, file: &Path, now: u64) -> Option<NamesOutcome> {
+        manual_refresh_step(
+            &client(),
+            &format!("{url}/stations.json"),
+            names,
+            FOURTEEN_DAYS,
+            at(now),
+            file,
+        )
+        .await
+    }
+
+    #[test]
+    fn write_refresh_request_writes_seconds_and_newline_atomically() {
+        let dir = path("request").parent().unwrap().join("not-yet-created");
+        let file = write_refresh_request(&dir, at(1_793_534_400)).unwrap();
+        assert_eq!(file, dir.join("station-names-refresh-requested"));
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "1793534400\n");
+        assert!(!dir.join("station-names-refresh-requested.tmp").exists());
+        assert_eq!(read_refresh_request(&file, at(1)), Some(at(1_793_534_400)));
+        // An unparseable file is requested at its modification time; no file is no request.
+        std::fs::write(&file, "garbage").unwrap();
+        let modified = std::fs::metadata(&file).unwrap().modified().unwrap();
+        assert_eq!(read_refresh_request(&file, at(1)), Some(modified));
+        std::fs::remove_file(&file).unwrap();
+        assert_eq!(read_refresh_request(&file, at(1)), None);
+    }
+
+    #[tokio::test]
+    async fn manual_request_waits_for_the_worker_directory() {
+        let url = serve(Router::new().route(
+            "/stations.json",
+            get(|| async { body("2026-11-01T11:59:00+00:00") }),
+        ))
+        .await;
+        let (_, file) = requested("manual-wait");
+        let names = SharedNames::load(path("manual-wait"));
+        names.set_applied(applied(R - 100)).unwrap();
+        let outcome = manual(&url, &names, &file, R + 60).await;
+        assert_eq!(outcome, Some(NamesOutcome::Kept));
+        assert!(file.exists());
+        assert_eq!(names.applied().unwrap().applied_at_unix, R - 100);
+    }
+
+    #[tokio::test]
+    async fn manual_request_applies_once_directory_is_fresh() {
+        let url = serve(Router::new().route(
+            "/stations.json",
+            get(|| async { body("2026-11-01T12:00:00+00:00") }),
+        ))
+        .await;
+        let (dir, file) = requested("manual-fresh");
+        let names = SharedNames::load(dir.join("station-names-applied.json"));
+        // Applied a minute ago: the 14-day cadence is nowhere near due.
+        names.set_applied(applied(R - 60)).unwrap();
+        let outcome = manual(&url, &names, &file, R + 60).await;
+        assert_eq!(outcome, Some(NamesOutcome::Applied));
+        assert!(!file.exists());
+        let current = names.applied().unwrap();
+        assert_eq!(current.applied_at_unix, R + 60);
+        assert!(current.inputs.directory.contains_key("NYP"));
+        // With no request left there is nothing more to do.
+        assert_eq!(manual(&url, &names, &file, R + 120).await, None);
+    }
+
+    #[tokio::test]
+    async fn manual_request_skips_the_first_day_wait() {
+        let url = serve(Router::new().route(
+            "/stations.json",
+            get(|| async { body("2026-11-01T12:00:00+00:00") }),
+        ))
+        .await;
+        let (dir, file) = requested("manual-first");
+        let names = SharedNames::load(dir.join("station-names-applied.json"));
+        // Nothing applied and the directory is a minute old: the scheduled path would wait a day.
+        let outcome = manual(&url, &names, &file, R + 60).await;
+        assert_eq!(outcome, Some(NamesOutcome::Applied));
+        assert!(names.applied().is_some() && !file.exists());
+    }
+
+    #[tokio::test]
+    async fn manual_request_applies_after_ten_minutes_anyway() {
+        let url = serve(Router::new().route(
+            "/stations.json",
+            get(|| async { body("2026-10-01T00:00:00+00:00") }),
+        ))
+        .await;
+        let (dir, file) = requested("manual-ten");
+        let names = SharedNames::load(dir.join("station-names-applied.json"));
+        names.set_applied(applied(R - 100)).unwrap();
+        assert_eq!(
+            manual(&url, &names, &file, R + 599).await,
+            Some(NamesOutcome::Kept)
+        );
+        assert!(file.exists());
+        assert_eq!(
+            manual(&url, &names, &file, R + 600).await,
+            Some(NamesOutcome::Applied)
+        );
+        assert!(!file.exists());
+    }
+
+    #[tokio::test]
+    async fn manual_request_gives_up_after_an_hour() {
+        let url = serve(Router::new().route(
+            "/stations.json",
+            get(|| async { StatusCode::SERVICE_UNAVAILABLE }),
+        ))
+        .await;
+        let (dir, file) = requested("manual-giveup");
+        let names = SharedNames::load(dir.join("station-names-applied.json"));
+        names.set_applied(applied(100)).unwrap();
+        assert_eq!(
+            manual(&url, &names, &file, R + 3_599).await,
+            Some(NamesOutcome::Kept)
+        );
+        assert!(file.exists(), "retried every minute until the hour is up");
+        assert_eq!(
+            manual(&url, &names, &file, R + 3_600).await,
+            Some(NamesOutcome::Kept)
+        );
+        assert!(!file.exists());
+        assert_eq!(names.applied().unwrap().applied_at_unix, 100);
+    }
+
+    #[tokio::test]
+    async fn manual_request_keeps_guards() {
+        let url = serve(Router::new().route(
+            "/stations.json",
+            get(|| async {
+                r#"{"directory":[],"directory_fetched_at":null,"seen":{"BOS":{"name":"Boston South"}}}"#
+            }),
+        ))
+        .await;
+        let (dir, file) = requested("manual-guard");
+        let names = SharedNames::load(dir.join("station-names-applied.json"));
+        names.set_applied(applied(100)).unwrap();
+        let outcome = manual(&url, &names, &file, R + 700).await;
+        assert_eq!(outcome, Some(NamesOutcome::Kept));
+        assert!(file.exists());
+        assert_eq!(names.applied().unwrap().applied_at_unix, 100);
     }
 }

@@ -54,6 +54,9 @@ pub struct WorkerPlan {
     /// The service's output directory (`AMTRAK_OUTPUT_DIR`): the notices snapshots and the
     /// early-refresh queue live under it.
     pub output_dir: Option<PathBuf>,
+    /// How often the worker refetches Amtrak's station directory, passed as
+    /// `STATIONS_REFRESH_SECS`: the service's `AMTRAK_STOP_NAMES_REFRESH_SECS`.
+    pub stations_refresh: Option<Duration>,
 }
 
 impl WorkerPlan {
@@ -86,6 +89,7 @@ impl WorkerPlan {
             root: root.to_path_buf(),
             fleet_trains_file: None,
             output_dir: None,
+            stations_refresh: None,
         })
     }
 
@@ -98,6 +102,13 @@ impl WorkerPlan {
     /// Shares the service's output directory with the worker.
     pub fn with_output_dir(mut self, path: PathBuf) -> Self {
         self.output_dir = Some(path);
+        self
+    }
+
+    /// Has the track source refetch the station directory every `every` (whole seconds), unless the
+    /// plan runs no track source.
+    pub fn with_stations_refresh(mut self, every: Duration) -> Self {
+        self.stations_refresh = Some(every);
         self
     }
 
@@ -121,6 +132,9 @@ impl WorkerPlan {
         }
         if let Some(path) = &self.output_dir {
             env.push(("AMTRAK_OUTPUT_DIR", absolute(path)));
+        }
+        if let (true, Some(every)) = (self.tracks, self.stations_refresh) {
+            env.push(("STATIONS_REFRESH_SECS", every.as_secs().to_string()));
         }
         if !self.notices {
             env.push(("AMTRAK_ADVISORIES", "off".to_string()));
@@ -343,11 +357,25 @@ mod tests {
         assert!(tracks_only
             .env()
             .contains(&("AMTRAK_ADVISORIES", "off".to_string())));
-        let with_list = tracks_only.with_fleet_trains_file(PathBuf::from("/data/tracks/f.json"));
+        let with_list = tracks_only
+            .clone()
+            .with_fleet_trains_file(PathBuf::from("/data/tracks/f.json"));
         assert!(with_list.env().contains(&(
             "AMTRAK_FLEET_TRAINS_FILE",
             "/data/tracks/f.json".to_string()
         )));
+
+        // The service's refresh interval reaches the worker in whole seconds, and only if given.
+        let week = Duration::from_secs(604_800);
+        assert!(tracks_only
+            .clone()
+            .with_stations_refresh(week)
+            .env()
+            .contains(&("STATIONS_REFRESH_SECS", "604800".to_string())));
+        assert!(!tracks_only
+            .env()
+            .iter()
+            .any(|(key, _)| *key == "STATIONS_REFRESH_SECS"));
 
         // Tracks on but Amtrak's own documents off: only notices need a browser.
         let (tracks, advisories) = configs(&[("AMTRAK_TRACKS_AMTRAK", "off")]);
