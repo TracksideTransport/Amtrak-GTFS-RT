@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-11-21
+
+Fixed feed URLs for apps and routing backends, and the catenary crate's new trip matching.
+
+### Upgrading from 0.9.0
+
+No configuration changes. Pull the new image and recreate the container.
+
+- **New, optional: `/v1/current/{artifact}`.** These are stable URLs for consumers configured once
+  with fixed feed URLs. `feed-set.json` and the generation URLs are unchanged (#111).
+- **New header: `X-Generation-Id`.** Every artifact response carries it, on the generation URLs
+  too (#111).
+- **Some trains change id or start date.** A train whose trip began on the previous GTFS service
+  day now carries that day in `trip.start_date`, the entity id and `vehicle.id`. For example,
+  `20261119-448`, not `20261120-448` (#171).
+- **Some trains reappear.** Trains whose route id 0.9.0 got wrong (seen: 486, 63, 64) now carry
+  the matched trip's route and are published again (#171).
+- **Known regression: Amtrak Cascades trains from Vancouver BC are left out.** The catenary crate
+  reads Amtrak's Mountain-time `VAC` times as Pacific, so these trains miss their trip by an hour
+  (#171).
+- **More log lines.** Per unmatched train, the catenary crate writes `Amtrak schedule match
+  failed` to stderr and `Possible trips for this train` to stdout (#171).
+
 ### Added
 
 - **Fixed feed URLs.** `/v1/current/{artifact}` serves each file (`static.zip`,
