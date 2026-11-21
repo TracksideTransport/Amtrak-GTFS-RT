@@ -115,7 +115,7 @@ Java, or checkout is needed. With Docker Engine and the Compose plugin:
 
 ```bash
 mkdir amtrak-gtfs-rt && cd amtrak-gtfs-rt
-curl -fsSLO https://github.com/sohampatwardhan/Amtrak-GTFS-RT/releases/download/v0.9.0/docker-compose.yml
+curl -fsSLO https://github.com/sohampatwardhan/Amtrak-GTFS-RT/releases/download/v0.10.0/docker-compose.yml
 docker compose pull
 docker compose up -d
 curl -fsS http://127.0.0.1:8090/v1/feed-set.json   # once the first generation is published
@@ -129,7 +129,7 @@ works without credentials. Without Compose, the image alone does the same with n
 ```bash
 docker run -d --name amtrak-gtfs-rt --restart unless-stopped \
   -p 127.0.0.1:8090:8080 -v amtrak-data:/data \
-  ghcr.io/sohampatwardhan/amtrak-gtfs-rt:0.9.0
+  ghcr.io/sohampatwardhan/amtrak-gtfs-rt:0.10.0
 ```
 
 The first generation appears once the static feed has downloaded and passed validation; until
@@ -155,7 +155,7 @@ turning sources off. To upgrade, download the newer release's `docker-compose.ym
   digest from that release's `image-release.txt`:
 
   ```bash
-  docker pull ghcr.io/sohampatwardhan/amtrak-gtfs-rt:0.9.0
+  docker pull ghcr.io/sohampatwardhan/amtrak-gtfs-rt:0.10.0
   docker pull ghcr.io/sohampatwardhan/amtrak-gtfs-rt@sha256:<release-manifest-digest>
   ```
 
@@ -331,13 +331,13 @@ Versioned releases are published for `linux/amd64` and `linux/arm64` at
 without a registry login:
 
 ```bash
-docker pull ghcr.io/sohampatwardhan/amtrak-gtfs-rt:0.9.0
+docker pull ghcr.io/sohampatwardhan/amtrak-gtfs-rt:0.10.0
 ```
 
 `amtrak-gtfs-rt` is the only package this repository publishes. From `v0.8.0` it is one image,
 built from the root `Dockerfile`, that contains the service, the browser worker, and the
-validator, so there is nothing else to pull. Each release pushes the version tag (`0.9.0`), a
-minor tag (`0.9`), and `latest`; `docker compose pull` fetches the version the Compose file names,
+validator, so there is nothing else to pull. Each release pushes the version tag (`0.10.0`), a
+minor tag (`0.10`), and `latest`; `docker compose pull` fetches the version the Compose file names,
 and `image-release.txt` records the manifest digest and both platform digests.
 
 > [!WARNING]
@@ -376,7 +376,7 @@ It is about 1 GB uncompressed on linux/arm64, most of it Chromium.
 
 ```bash
 docker run -d -p 127.0.0.1:8090:8080 -v amtrak-data:/data \
-  ghcr.io/sohampatwardhan/amtrak-gtfs-rt:0.9.0
+  ghcr.io/sohampatwardhan/amtrak-gtfs-rt:0.10.0
 curl -fsS http://127.0.0.1:8090/v1/feed-set.json
 ```
 
@@ -396,7 +396,7 @@ gateway; list their exact IPs beside the keyword (`gateway,172.31.240.10`).
 >
 > ```bash
 > docker run -d --network host -e AMTRAK_BIND_ADDR=127.0.0.1:8080 -e AMTRAK_ALLOWED_PEER_IPS= \
->   -v amtrak-data:/data ghcr.io/sohampatwardhan/amtrak-gtfs-rt:0.9.0
+>   -v amtrak-data:/data ghcr.io/sohampatwardhan/amtrak-gtfs-rt:0.10.0
 > ```
 
 Turn browser sources off with their flags (`-e AMTRAK_TRACKS_AMTRAK=off -e AMTRAK_ADVISORIES=off`).
@@ -681,7 +681,7 @@ release:
 
 ```bash
 docker compose up -d --build                         # build from this checkout
-AMTRAK_IMAGE_TAG=local docker compose up -d --build  # ...tagged :local instead of :0.9.0
+AMTRAK_IMAGE_TAG=local docker compose up -d --build  # ...tagged :local instead of :0.10.0
 ```
 
 ```mermaid
@@ -747,7 +747,7 @@ Without Compose, run the image by itself (no hardening defaults, every source on
 
 ```bash
 docker run -d -p 127.0.0.1:8090:8080 -v amtrak-data:/data \
-  ghcr.io/sohampatwardhan/amtrak-gtfs-rt:0.9.0
+  ghcr.io/sohampatwardhan/amtrak-gtfs-rt:0.10.0
 ```
 
 ### Upgrading from the three-container layout
