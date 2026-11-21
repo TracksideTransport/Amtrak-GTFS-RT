@@ -16,6 +16,7 @@ pub mod sources;
 pub mod static_addon;
 pub mod static_augment;
 pub mod static_gtfs;
+pub mod static_names;
 pub mod static_repair;
 pub mod worker;
 pub mod writer;
