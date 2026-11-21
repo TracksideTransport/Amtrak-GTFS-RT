@@ -128,3 +128,13 @@ def test_refresh_directory_fetches_once_and_backs_off_on_failure():
     asyncio.run(refresh_directory(store, good, cfg, 100.0 + 3700))
     assert good.calls == [DIRECTORY_URL]
     assert store.snapshot()["directory"][0]["code"] == "BOS"
+
+
+def test_snapshot_is_detached_from_later_records():
+    store = StationsStore(None)
+    store.record_document(_doc(name="Boston"))
+    taken = store.snapshot()
+    store.record_document(_doc(facility="South Station"))
+    store.record_document(_doc("NYP", name="New York"))
+    assert taken["seen"] == {"BOS": {"name": "Boston"}}
+    assert store.snapshot()["seen"]["BOS"]["facility"] == "South Station"

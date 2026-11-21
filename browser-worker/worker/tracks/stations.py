@@ -131,9 +131,9 @@ class StationsStore:
             if not self._directory and not self._seen:
                 return None
             return {
-                "directory": self._directory,
+                "directory": list(self._directory),
                 "directory_fetched_at": _iso(self._directory_fetched_at),
-                "seen": self._seen,
+                "seen": {code: dict(fields) for code, fields in self._seen.items()},
                 "seen_updated_at": _iso(self._seen_updated_at),
             }
 
