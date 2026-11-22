@@ -79,7 +79,9 @@ COPY container/validator-verification-metadata.xml /opt/amtrak/validator-verific
 
 WORKDIR /build
 RUN --mount=type=cache,target=/root/.gradle \
-    curl --fail --location --silent --show-error \
+    # GitHub can answer one request with a transient 403 (#177); the digest check below still
+    # guards the bytes, so retrying cannot let a different archive through.
+    curl --fail --location --silent --show-error --retry 3 --retry-delay 10 --retry-all-errors \
       --output /tmp/validator-source.tar.gz "${VALIDATOR_SOURCE_URL}" && \
     echo "651872b1a7abbde5b999d7261f875532eebaee22a9d7ce4946b8f764cdf7b8a3  /tmp/validator-source.tar.gz" \
       | sha256sum --check --strict && \

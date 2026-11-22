@@ -39,7 +39,8 @@ install_tool() {
   local archive="${name}_${version}_${PLATFORM}.tar.gz"
   local url="https://github.com/anchore/${name}/releases/download/v${version}/${archive}"
 
-  curl --fail --location --silent --show-error --output "$WORKDIR/$archive" "$url"
+  # Retry transient GitHub errors (#177); the checksum below still guards the bytes.
+  curl --fail --location --silent --show-error --retry 3 --retry-delay 10 --retry-all-errors --output "$WORKDIR/$archive" "$url"
   printf '%s  %s\n' "$expected" "$WORKDIR/$archive" | shasum -a 256 --check --strict
   tar -xzf "$WORKDIR/$archive" -C "$DESTDIR" "$name"
   chmod 0755 "$DESTDIR/$name"
