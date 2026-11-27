@@ -6,7 +6,7 @@
 //! reads the store, so a slow or failing board cannot delay the feed; a failure simply leaves that
 //! station's earlier rows to expire.
 
-use super::amtrak::groups_from_status;
+use super::amtrak::{audio_names_from_status, groups_from_status};
 use super::hartford::{parse_hartford_board, BOARD_MARKER};
 use super::raildata::{assignments_for_station, BoardError, RailDataClient};
 use super::store::{Assignment, AssignmentStore};
@@ -120,6 +120,9 @@ pub async fn refresh_once(
         match fetch_amtrak(http, url).await {
             Ok(body) => {
                 let now = SystemTime::now();
+                for (code, audio) in audio_names_from_status(&body) {
+                    platforms.observe_audio(&code, &audio);
+                }
                 match groups_from_status(&body, config.retain_grace, now) {
                     Ok(groups) => {
                         for group in groups {

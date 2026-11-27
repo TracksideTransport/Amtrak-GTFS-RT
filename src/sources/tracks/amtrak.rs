@@ -16,6 +16,7 @@
 use super::store::Assignment;
 use super::{is_gate_label, is_track_label, normalize_train_number, platform_label};
 use serde_json::Value;
+use std::collections::BTreeMap;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// One train-day's assignments, already keyed for the [`super::store::AssignmentStore`].
@@ -63,6 +64,42 @@ pub fn groups_from_status(
         }
     }
     Ok(groups)
+}
+
+/// Amtrak's spoken station names, `code` to `audioName`, from a status document or sidecar bundle.
+///
+/// A station carries `audioName` only where its written name reads badly aloud: `NWK` is "Newark
+/// New Jersey", `MET` is "Metro park". Every stop is read, not only those with a track, so a
+/// train with no posted track still reports its stations. A body that is not a status document, a
+/// station without a code, and an empty or non-text `audioName` contribute nothing.
+pub fn audio_names_from_status(body: &str) -> BTreeMap<String, String> {
+    let mut names = BTreeMap::new();
+    let Ok(value) = serde_json::from_str::<Value>(body.trim()) else {
+        return names;
+    };
+    let documents = match value.get("documents") {
+        Some(Value::Array(documents)) => documents.clone(),
+        _ => vec![value],
+    };
+    let stops = documents
+        .iter()
+        .filter_map(|document| document.get("data").and_then(Value::as_array))
+        .flatten()
+        .filter_map(|train| train.get("stops").and_then(Value::as_array))
+        .flatten();
+    for stop in stops {
+        let Some(station) = stop.get("station") else {
+            continue;
+        };
+        let code = station.get("code").and_then(Value::as_str).map(str::trim);
+        let audio = station.get("audioName").and_then(Value::as_str);
+        if let (Some(code), Some(audio)) = (code, audio) {
+            if !code.is_empty() && !code.contains(':') && !audio.trim().is_empty() {
+                names.insert(code.to_uppercase(), audio.trim().to_string());
+            }
+        }
+    }
+    names
 }
 
 fn group_from_train(train: &Value, grace: Duration, now: SystemTime) -> Option<StatusGroup> {
@@ -324,6 +361,30 @@ mod tests {
         assert!(groups_from_status("<html>", Duration::from_secs(1), now).is_err());
         assert!(groups_from_status("{}", Duration::from_secs(1), now).is_err());
         assert!(groups_from_status(r#"{"documents":[]}"#, Duration::from_secs(1), now).is_ok());
+    }
+
+    #[test]
+    fn spoken_names_come_from_every_stop_of_a_bundle_or_a_single_document() {
+        let train = r#"{"stops":[
+            {"station":{"code":"nwk","name":"Newark, NJ","audioName":"Newark New Jersey"}},
+            {"station":{"code":"MET","audioName":" Metro park "},"departure":{"track":{"number":"2"}}},
+            {"station":{"code":"PHL","name":"Philadelphia, PA"}},
+            {"station":{"code":"STS","audioName":""}},
+            {"station":{"code":"X:1","audioName":"Generated"}},
+            {"station":{"audioName":"No code"}},
+            {"station":{"code":"TRE","audioName":7}}
+        ]}"#;
+        let single = format!(r#"{{"data":[{train}]}}"#);
+        let bundle = format!(r#"{{"documents":[{single},{single}]}}"#);
+        for body in [&single, &bundle] {
+            let names = audio_names_from_status(body);
+            assert_eq!(names.len(), 2, "{names:?}");
+            assert_eq!(names["NWK"], "Newark New Jersey");
+            assert_eq!(names["MET"], "Metro park");
+        }
+        assert!(audio_names_from_status("<html>").is_empty());
+        assert!(audio_names_from_status("{}").is_empty());
+        assert!(audio_names_from_status(r#"{"documents":[]}"#).is_empty());
     }
 
     #[test]

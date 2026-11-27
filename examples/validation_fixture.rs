@@ -39,7 +39,7 @@ use zip::write::SimpleFileOptions;
 
 /// The platform stop the fixture's train is stamped with, and the table that creates it.
 const PLATFORM: &str = "NYP:track:7:gate:A";
-const PLATFORM_TABLE: &str = "NYP=7@A,8";
+const PLATFORM_TABLE: &str = "NYP=7@A,8;NYP~New York Penn";
 
 const STATIC_FILES: &[(&str, &str)] = &[
     (

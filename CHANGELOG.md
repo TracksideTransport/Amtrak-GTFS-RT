@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`static.zip` carries Amtrak's spoken station names as `tts_stop_name`.** Amtrak's train-status
+  documents give a few stations a spoken form (`NWK` is "Newark New Jersey", `MET` is "Metro park",
+  `STS` is "New Haven State Street"). The service reads it from the documents the browser worker
+  already fetches and writes it to `stops.txt` on the station, its generated parent station, and
+  each generated platform stop ("Newark New Jersey Track 1"). The column is added only once a name
+  is seen. **Consumer note:** the `+tracks.{digest}` suffix changes once when the first name is
+  observed and again whenever a name changes, so a consumer that pins the static version sees a
+  new version without a platform change. Names are recorded in `observed-platforms.txt` as
+  `STOP~spoken name`; a file written by an earlier release has none and reads as before.
+
 ### Fixed
 
 - **Observed tracks reach `static.zip` while the service runs.** A static snapshot built

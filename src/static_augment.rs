@@ -40,6 +40,32 @@ pub(crate) const UTF8_BOM: &[u8] = b"\xEF\xBB\xBF";
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct PlatformTable {
     stations: BTreeMap<String, Vec<String>>,
+    /// Amtrak's spoken form of a station name (`NWK` is "Newark New Jersey"), written to
+    /// `stops.txt` as `tts_stop_name`. Part of the canonical form, so it moves the digest.
+    audio: BTreeMap<String, String>,
+}
+
+/// Longest spoken name kept. Amtrak's longest is under 40 characters.
+const MAX_AUDIO_NAME_LEN: usize = 100;
+
+/// A spoken name with whitespace collapsed, or `None` when it is empty, too long, or holds a
+/// character the canonical form reserves (`;`, `~`) or a control character.
+fn clean_audio_name(raw: &str) -> Option<String> {
+    let name = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+    let usable = !name.is_empty()
+        && name.chars().count() <= MAX_AUDIO_NAME_LEN
+        && !name
+            .chars()
+            .any(|character| character == ';' || character == '~' || character.is_control());
+    usable.then_some(name)
+}
+
+/// Whether `stop` can be a station code: 2 to 5 ASCII letters or digits.
+fn is_station_code(stop: &str) -> bool {
+    (2..=5).contains(&stop.len())
+        && stop
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric())
 }
 
 impl PlatformTable {
@@ -51,11 +77,24 @@ impl PlatformTable {
     /// Returns a message naming the malformed entry, range, or label.
     pub fn parse(raw: &str) -> Result<PlatformTable, String> {
         let mut stations = BTreeMap::new();
+        let mut audio = BTreeMap::new();
         for entry in raw
             .split(';')
             .map(str::trim)
             .filter(|entry| !entry.is_empty())
         {
+            // `STOP~spoken name`, before the `=` check because a name may contain `=`.
+            if let Some((stop, name)) = entry
+                .split_once('~')
+                .filter(|(stop, _)| !stop.contains('='))
+            {
+                let stop = stop.trim().to_uppercase();
+                let Some(name) = clean_audio_name(name).filter(|_| is_station_code(&stop)) else {
+                    return Err(format!("entry {entry:?} must be STOP~spoken name"));
+                };
+                audio.insert(stop, name);
+                continue;
+            }
             let Some((stop, labels)) = entry.split_once('=') else {
                 return Err(format!("entry {entry:?} must be STOP=tracks"));
             };
@@ -80,7 +119,29 @@ impl PlatformTable {
             }
             stations.insert(stop, tracks);
         }
-        Ok(PlatformTable { stations })
+        Ok(PlatformTable { stations, audio })
+    }
+
+    /// Records the spoken form of station `stop_id`. Returns whether the table changed.
+    ///
+    /// The stop id is uppercased. An invalid stop id or name (see [`clean_audio_name`]) is
+    /// ignored, and so is a name that equals the one already held.
+    pub fn insert_audio(&mut self, stop_id: &str, name: &str) -> bool {
+        let stop = stop_id.trim().to_uppercase();
+        let Some(name) = clean_audio_name(name).filter(|_| is_station_code(&stop)) else {
+            return false;
+        };
+        self.audio.insert(stop, name.clone()) != Some(name)
+    }
+
+    /// The spoken form of station `stop_id`, if one is held.
+    pub fn audio_name(&self, stop_id: &str) -> Option<&str> {
+        self.audio.get(&stop_id.to_uppercase()).map(String::as_str)
+    }
+
+    /// Number of stations with a spoken name.
+    pub fn audio_count(&self) -> usize {
+        self.audio.len()
     }
 
     /// First 8 hex digits of SHA-256 over the canonical form (`NHV=1,2;NWK=A,1`), used to make
@@ -145,13 +206,25 @@ impl PlatformTable {
                 }
             }
         }
+        for (stop, name) in &other.audio {
+            self.audio
+                .entry(stop.clone())
+                .or_insert_with(|| name.clone());
+        }
     }
 
-    /// Canonical form (`NHV=1,2;NWK=A,1`), also the on-disk record of observed platforms.
+    /// Canonical form (`NHV=1,2;NWK=A,1;NWK~Newark New Jersey`), also the on-disk record of
+    /// observed platforms and spoken names. Spoken names follow the platforms, so a table without
+    /// any keeps the form, and the digest, it had before they existed.
     pub fn canonical(&self) -> String {
         self.stations
             .iter()
             .map(|(stop, tracks)| format!("{stop}={}", tracks.join(",")))
+            .chain(
+                self.audio
+                    .iter()
+                    .map(|(stop, name)| format!("{stop}~{name}")),
+            )
             .collect::<Vec<_>>()
             .join(";")
     }
@@ -181,6 +254,19 @@ fn expand(part: &str) -> Result<Vec<String>, String> {
 
 /// Most observed labels kept, so a misbehaving source cannot grow the static feed without bound.
 pub const MAX_OBSERVED_PLATFORMS: usize = 1000;
+
+/// Most spoken station names kept from observation. Amtrak's static feed has about 650 stops.
+pub const MAX_OBSERVED_AUDIO: usize = 1000;
+
+/// Copies the spoken names of `saved` into `observed`, skipping any that `configured` already
+/// holds and stopping at [`MAX_OBSERVED_AUDIO`].
+fn carry_audio(saved: &PlatformTable, configured: &PlatformTable, observed: &mut PlatformTable) {
+    for (stop, name) in &saved.audio {
+        if configured.audio.get(stop) != Some(name) && observed.audio.len() < MAX_OBSERVED_AUDIO {
+            observed.insert_audio(stop, name);
+        }
+    }
+}
 
 struct PlatformState {
     configured: PlatformTable,
@@ -259,6 +345,7 @@ impl SharedPlatforms {
                 }
             }
         }
+        carry_audio(&saved, &configured, &mut observed);
         let dirty = observed != saved;
         SharedPlatforms {
             inner: Arc::new(RwLock::new(PlatformState {
@@ -358,6 +445,44 @@ impl SharedPlatforms {
         true
     }
 
+    /// Records the spoken form of station `stop_id`. Returns whether it was new or changed.
+    ///
+    /// A name equal to the configured or observed one, a station outside the static feed, an
+    /// invalid name, and anything past [`MAX_OBSERVED_AUDIO`] stations are ignored. Like
+    /// [`Self::observe`], nothing is written to disk here.
+    pub fn observe_audio(&self, stop_id: &str, name: &str) -> bool {
+        let stop = stop_id.trim().to_uppercase();
+        {
+            let mut state = self.write();
+            if state
+                .known
+                .as_ref()
+                .is_some_and(|known| !known.contains(&stop))
+            {
+                return false;
+            }
+            let Some(cleaned) = clean_audio_name(name) else {
+                return false;
+            };
+            if state.configured.audio.get(&stop) == Some(&cleaned)
+                || state.observed.audio.get(&stop) == Some(&cleaned)
+            {
+                return false;
+            }
+            if !state.observed.audio.contains_key(&stop)
+                && state.observed.audio.len() >= MAX_OBSERVED_AUDIO
+            {
+                return false;
+            }
+            if !state.observed.insert_audio(&stop, &cleaned) {
+                return false;
+            }
+            state.dirty = true;
+        }
+        self.changed.notify_one();
+        true
+    }
+
     /// Writes the observed delta to `path` if it changed, atomically and outside the table lock.
     /// A failure is logged and retried on the next call.
     pub async fn persist(&self) {
@@ -419,6 +544,7 @@ impl SharedPlatforms {
                     }
                 }
             }
+            carry_audio(&saved, &state.configured, &mut incoming);
             if incoming == state.observed {
                 return false;
             }
@@ -641,6 +767,10 @@ fn augment_stops(raw: &[u8], table: &PlatformTable) -> Result<Vec<u8>, AugmentEr
             headers.push(column.to_string());
         }
     }
+    // Only when a spoken name is held, so a feed without any keeps its columns byte-for-byte.
+    if table.audio_count() > 0 && !headers.iter().any(|header| header == "tts_stop_name") {
+        headers.push("tts_stop_name".to_string());
+    }
     for row in &mut rows {
         row.resize(headers.len(), String::new());
     }
@@ -650,7 +780,15 @@ fn augment_stops(raw: &[u8], table: &PlatformTable) -> Result<Vec<u8>, AugmentEr
     let parent = column("parent_station").unwrap_or_default();
     let platform = column("platform_code").unwrap_or_default();
     let name = column("stop_name");
+    let tts = column("tts_stop_name");
     let existing: HashSet<String> = rows.iter().map(|row| row[id].clone()).collect();
+    if let Some(tts) = tts {
+        for row in &mut rows {
+            if let Some(spoken) = table.audio_name(&row[id]) {
+                row[tts] = spoken.to_string();
+            }
+        }
+    }
 
     let mut added = Vec::new();
     for stop in table.station_ids() {
@@ -690,6 +828,7 @@ fn augment_stops(raw: &[u8], table: &PlatformTable) -> Result<Vec<u8>, AugmentEr
                 "stop_lon",
                 "stop_timezone",
                 "stop_url",
+                "tts_stop_name",
             ],
         );
         station[id].clone_from(&station_id);
@@ -705,6 +844,9 @@ fn augment_stops(raw: &[u8], table: &PlatformTable) -> Result<Vec<u8>, AugmentEr
             row[id] = platform_stop_id(stop, label);
             if let Some(name) = name {
                 row[name] = format!("{} {}", template[name], platform_name(label));
+            }
+            if let (Some(tts), Some(spoken)) = (tts, table.audio_name(stop)) {
+                row[tts] = format!("{spoken} {}", platform_name(label));
             }
             row[location] = "0".into();
             row[parent].clone_from(&station_id);
@@ -805,6 +947,132 @@ NYP,NYP,\"Ny Moynihan Train Hall At Penn Station\",https://www.amtrak.com/statio
             Some("1")
         );
         assert!(!gtfs.stops.keys().any(|id| id.contains('@')));
+    }
+
+    fn stops_text(zip: &[u8]) -> String {
+        String::from_utf8(read_entry(zip, STOPS_FILE).unwrap()).unwrap()
+    }
+
+    /// `tts_stop_name` by stop id, from the augmented `stops.txt`.
+    fn spoken_names(zip: &[u8]) -> BTreeMap<String, String> {
+        let text = stops_text(zip);
+        let mut reader = csv::Reader::from_reader(text.as_bytes());
+        let headers = reader.headers().unwrap().clone();
+        let id = headers.iter().position(|h| h == "stop_id").unwrap();
+        let tts = headers.iter().position(|h| h == "tts_stop_name").unwrap();
+        reader
+            .records()
+            .map(|record| record.unwrap())
+            .map(|record| (record[id].to_string(), record[tts].to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn a_spoken_name_round_trips_and_moves_the_digest() {
+        let plain = PlatformTable::parse("NWK=1").unwrap();
+        let spoken = PlatformTable::parse("NWK=1;nwk~ Newark  New Jersey ;MET~Metro park").unwrap();
+        assert_eq!(spoken.audio_name("NWK"), Some("Newark New Jersey"));
+        assert_eq!(
+            spoken.canonical(),
+            "NWK=1;MET~Metro park;NWK~Newark New Jersey"
+        );
+        assert_eq!(PlatformTable::parse(&spoken.canonical()).unwrap(), spoken);
+        assert_ne!(spoken.digest(), plain.digest());
+        // A table with no spoken names keeps the form, and the digest, it had before they existed.
+        assert_eq!(plain.canonical(), "NWK=1");
+        assert_eq!(plain.audio_count(), 0);
+
+        for bad in ["NWK~", "~Newark", "NWK~a~b", "TOOLONG~x", "NWK:1~x"] {
+            assert!(
+                PlatformTable::parse(bad).is_err(),
+                "{bad:?} should not parse"
+            );
+        }
+        let mut table = PlatformTable::default();
+        assert!(table.insert_audio("nwk", "Newark New Jersey"));
+        assert!(!table.insert_audio("NWK", "Newark New Jersey"), "unchanged");
+        assert!(
+            table.insert_audio("NWK", "Newark N J"),
+            "a new name replaces"
+        );
+        assert!(!table.insert_audio("NWK", "a;b"));
+        assert!(!table.insert_audio("NWK", &"x".repeat(MAX_AUDIO_NAME_LEN + 1)));
+        assert!(!table.insert_audio("N:K", "x"));
+    }
+
+    #[test]
+    fn tts_stop_name_is_written_for_a_station_its_parent_and_its_platforms() {
+        let table = PlatformTable::parse("NWK=1;NWK~Newark New Jersey;NYP~New York Penn").unwrap();
+        let augmented = augment_static(&fixture_zip(STOPS.as_bytes()), &table).unwrap();
+        let spoken = spoken_names(&augmented);
+        assert_eq!(spoken["NWK"], "Newark New Jersey");
+        assert_eq!(spoken["NWK:station"], "Newark New Jersey");
+        assert_eq!(spoken["NWK:track:1"], "Newark New Jersey Track 1");
+        // NYP has a spoken name but no platforms: it is still annotated, and nothing is added.
+        assert_eq!(spoken["NYP"], "New York Penn");
+        assert!(!spoken.contains_key("NYP:station"));
+        // The augmented archive still parses as GTFS.
+        Gtfs::from_reader(Cursor::new(augmented)).unwrap();
+    }
+
+    #[test]
+    fn no_spoken_name_leaves_stops_txt_without_the_column() {
+        let table = PlatformTable::parse("NWK=1").unwrap();
+        let augmented = augment_static(&fixture_zip(STOPS.as_bytes()), &table).unwrap();
+        assert!(!stops_text(&augmented).contains("tts_stop_name"));
+    }
+
+    #[test]
+    fn an_existing_tts_column_is_filled_not_duplicated() {
+        let stops = "stop_id,stop_name,tts_stop_name\nNWK,Newark,Existing\nNYP,New York,Kept\n";
+        let table = PlatformTable::parse("NWK~Newark New Jersey").unwrap();
+        let augmented = augment_static(&fixture_zip(stops.as_bytes()), &table).unwrap();
+        let text = stops_text(&augmented);
+        assert_eq!(text.matches("tts_stop_name").count(), 1);
+        let spoken = spoken_names(&augmented);
+        assert_eq!(spoken["NWK"], "Newark New Jersey");
+        assert_eq!(
+            spoken["NYP"], "Kept",
+            "a station without a spoken name is untouched"
+        );
+    }
+
+    #[tokio::test]
+    async fn observed_spoken_names_are_filtered_deduped_and_recorded() {
+        let path = temp_path("audio");
+        let shared = SharedPlatforms::load(PlatformTable::default(), path.clone());
+        shared.set_known_stations(["NWK", "MET"]);
+        assert!(shared.observe_audio("nwk", "Newark New Jersey"));
+        assert!(
+            !shared.observe_audio("NWK", " Newark  New Jersey "),
+            "same name"
+        );
+        assert!(
+            !shared.observe_audio("XYZ", "Elsewhere"),
+            "outside the static feed"
+        );
+        assert!(!shared.observe_audio("MET", "  "));
+        assert!(shared.observe_audio("MET", "Metro park"));
+        assert!(
+            shared.observe_audio("MET", "Metro Park"),
+            "a changed name is new"
+        );
+        shared.persist().await;
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "MET~Metro Park;NWK~Newark New Jersey"
+        );
+
+        let reloaded = SharedPlatforms::load(PlatformTable::default(), path);
+        assert_eq!(
+            reloaded.snapshot().audio_name("MET"),
+            Some("Metro Park"),
+            "observations survive a restart"
+        );
+        // A configured name that matches is not duplicated into the delta.
+        let configured = PlatformTable::parse("MET~Metro Park").unwrap();
+        let other = SharedPlatforms::load(configured, temp_path("audio-configured"));
+        assert!(!other.observe_audio("MET", "Metro Park"));
     }
 
     #[test]

@@ -780,7 +780,7 @@ flowchart TD
 ```
 
 The published static version becomes `{feed_version}+tracks.{digest}`, where the digest changes
-only when the platform list changes. `feed_info.txt`'s `feed_version` carries the same value, so it
+only when the platform list or a [spoken station name](#spoken-station-names) changes. `feed_info.txt`'s `feed_version` carries the same value, so it
 matches the `feed_version` in every GTFS-Realtime header, as the reference requires;
 `official-static.zip` keeps Amtrak's own version. Nothing else in Amtrak's feed changes, and the
 other files are copied byte-for-byte (after the [stop-reference repair](#validation-gate), when one
@@ -788,6 +788,29 @@ applies). The augmented bytes go through the same MobilityData validator gate; i
 augmentation fails or is rejected, Amtrak's feed is published unchanged and no tracks are stamped.
 The only new validator notice is a `stop_without_stop_time` warning per platform stop, because no
 scheduled trip calls at a platform directly.
+
+### Spoken station names
+
+Amtrak's written station names read badly aloud: `NWK` is "Newark, NJ", which a speech engine says
+as "Newark N J". Where that is so, Amtrak's train-status documents carry the spoken form as
+`station.audioName`: `NWK` is "Newark New Jersey", `MET` is "Metro park", `STS` is "New Haven State
+Street". Only a few stations have one, and `data.stations.json` does not list it.
+
+The service reads `audioName` from the status documents the browser worker already fetches, so it
+adds no request. Each name becomes `tts_stop_name` in `stops.txt`, the GTFS column for a stop's
+spoken form:
+
+- on the station's own stop (`NWK`) and on its generated parent station (`NWK:station`), the name as
+  Amtrak gives it;
+- on each generated platform stop, the name plus the platform (`NWK:track:1` is "Newark New Jersey
+  Track 1");
+- nothing for a station Amtrak gives no spoken name, so a consumer falls back to `stop_name`.
+
+The column is added only once a name is seen, and only stations in the static feed are recorded.
+Names are kept in `{AMTRAK_OUTPUT_DIR}/tracks/observed-platforms.txt` beside observed tracks, as
+`STOP~spoken name` entries, so they survive a restart. `AMTRAK_TRACKS=off` records none. The first
+name that is seen changes the `+tracks.{digest}` suffix once; a later change to a name changes it
+again.
 
 ### Platform list and observed tracks
 
