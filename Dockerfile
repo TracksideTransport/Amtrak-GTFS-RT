@@ -288,8 +288,8 @@ COPY --chmod=u=rwX,go=rX browser-worker/worker/ /app/worker/
 # `licenses` is the project's own license. Third-party components keep theirs; see /licenses/README.
 LABEL org.opencontainers.image.title="Amtrak GTFS-RT" \
       org.opencontainers.image.description="Validated static GTFS and GTFS-Realtime feeds for Amtrak, with the browser worker and GTFS validator they use" \
-      org.opencontainers.image.source="https://github.com/sohampatwardhan/Amtrak-GTFS-RT" \
-      org.opencontainers.image.documentation="https://github.com/sohampatwardhan/Amtrak-GTFS-RT#container" \
+      org.opencontainers.image.source="https://github.com/TracksideTransport/Amtrak-GTFS-RT" \
+      org.opencontainers.image.documentation="https://github.com/TracksideTransport/Amtrak-GTFS-RT#container" \
       org.opencontainers.image.licenses="AGPL-3.0-only" \
       org.opencontainers.image.base.name="docker.io/library/python:3.12-slim-bookworm" \
       org.opencontainers.image.version="$OCI_VERSION" \

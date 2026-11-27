@@ -79,7 +79,7 @@ const STATIC_FILES: &[(&str, &str)] = &[
     (
         "feed_info.txt",
         "feed_publisher_name,feed_publisher_url,feed_lang,feed_start_date,feed_end_date,feed_version\n\
-         Amtrak GTFS-RT validation fixture,https://github.com/sohampatwardhan/Amtrak-GTFS-RT,en,20200101,20991231,FIXTURE\n",
+         Amtrak GTFS-RT validation fixture,https://github.com/TracksideTransport/Amtrak-GTFS-RT,en,20200101,20991231,FIXTURE\n",
     ),
 ];
 

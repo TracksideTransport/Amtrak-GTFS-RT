@@ -1,7 +1,7 @@
 # Amtrak GTFS-RT
 
-[![CI](https://github.com/sohampatwardhan/Amtrak-GTFS-RT/actions/workflows/ci.yml/badge.svg)](https://github.com/sohampatwardhan/Amtrak-GTFS-RT/actions/workflows/ci.yml)
-[![Validate feeds](https://github.com/sohampatwardhan/Amtrak-GTFS-RT/actions/workflows/validate-feeds.yml/badge.svg)](https://github.com/sohampatwardhan/Amtrak-GTFS-RT/actions/workflows/validate-feeds.yml)
+[![CI](https://github.com/TracksideTransport/Amtrak-GTFS-RT/actions/workflows/ci.yml/badge.svg)](https://github.com/TracksideTransport/Amtrak-GTFS-RT/actions/workflows/ci.yml)
+[![Validate feeds](https://github.com/TracksideTransport/Amtrak-GTFS-RT/actions/workflows/validate-feeds.yml/badge.svg)](https://github.com/TracksideTransport/Amtrak-GTFS-RT/actions/workflows/validate-feeds.yml)
 
 A small Rust service that produces **live GTFS-Realtime feeds for Amtrak** — TripUpdates,
 VehiclePositions, and Alerts — plus the static GTFS they bind to, for use in third-party
@@ -114,7 +114,7 @@ Java, or checkout is needed. With Docker Engine and the Compose plugin:
 
 ```bash
 mkdir amtrak-gtfs-rt && cd amtrak-gtfs-rt
-curl -fsSLO https://github.com/sohampatwardhan/Amtrak-GTFS-RT/releases/download/v0.8.0/docker-compose.yml
+curl -fsSLO https://github.com/TracksideTransport/Amtrak-GTFS-RT/releases/download/v0.8.0/docker-compose.yml
 docker compose pull
 docker compose up -d
 curl -fsS http://127.0.0.1:8090/v1/feed-set.json   # once the first generation is published

@@ -665,15 +665,15 @@ against Amtrak's production endpoints (145 trip updates, 145 vehicle positions,
 - 21 tests, including live integration tests against Amtrak's real endpoints
   (run with `cargo test -- --include-ignored`).
 
-[Unreleased]: https://github.com/sohampatwardhan/Amtrak-GTFS-RT/compare/v0.8.0...HEAD
-[0.8.0]: https://github.com/sohampatwardhan/Amtrak-GTFS-RT/compare/v0.7.1...v0.8.0
-[0.7.1]: https://github.com/sohampatwardhan/Amtrak-GTFS-RT/releases/tag/v0.7.1
-[0.7.0]: https://github.com/sohampatwardhan/Amtrak-GTFS-RT/compare/v0.6.2...v0.7.0
-[0.6.2]: https://github.com/sohampatwardhan/Amtrak-GTFS-RT/compare/v0.6.1...v0.6.2
-[0.6.1]: https://github.com/sohampatwardhan/Amtrak-GTFS-RT/compare/v0.6.0...v0.6.1
-[0.6.0]: https://github.com/sohampatwardhan/Amtrak-GTFS-RT/compare/v0.5.0...v0.6.0
-[0.5.0]: https://github.com/sohampatwardhan/Amtrak-GTFS-RT/releases/tag/v0.5.0
-[0.4.0]: https://github.com/sohampatwardhan/Amtrak-GTFS-RT/releases/tag/v0.4.0
-[0.3.0]: https://github.com/sohampatwardhan/Amtrak-GTFS-RT/compare/v0.2.0...v0.3.0
-[0.2.0]: https://github.com/sohampatwardhan/Amtrak-GTFS-RT/releases/tag/v0.2.0
-[0.1.0]: https://github.com/sohampatwardhan/Amtrak-GTFS-RT/releases/tag/v0.1.0
+[Unreleased]: https://github.com/TracksideTransport/Amtrak-GTFS-RT/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/TracksideTransport/Amtrak-GTFS-RT/compare/v0.7.1...v0.8.0
+[0.7.1]: https://github.com/TracksideTransport/Amtrak-GTFS-RT/releases/tag/v0.7.1
+[0.7.0]: https://github.com/TracksideTransport/Amtrak-GTFS-RT/compare/v0.6.2...v0.7.0
+[0.6.2]: https://github.com/TracksideTransport/Amtrak-GTFS-RT/compare/v0.6.1...v0.6.2
+[0.6.1]: https://github.com/TracksideTransport/Amtrak-GTFS-RT/compare/v0.6.0...v0.6.1
+[0.6.0]: https://github.com/TracksideTransport/Amtrak-GTFS-RT/compare/v0.5.0...v0.6.0
+[0.5.0]: https://github.com/TracksideTransport/Amtrak-GTFS-RT/releases/tag/v0.5.0
+[0.4.0]: https://github.com/TracksideTransport/Amtrak-GTFS-RT/releases/tag/v0.4.0
+[0.3.0]: https://github.com/TracksideTransport/Amtrak-GTFS-RT/compare/v0.2.0...v0.3.0
+[0.2.0]: https://github.com/TracksideTransport/Amtrak-GTFS-RT/releases/tag/v0.2.0
+[0.1.0]: https://github.com/TracksideTransport/Amtrak-GTFS-RT/releases/tag/v0.1.0

@@ -26,7 +26,7 @@ Built the shipped image (`docker build --platform linux/arm64`, ~364 MB) and ran
 
 ## Service side — real alerts via the fetcher (R2.4)
 
-After merging service-advisories [PR #8](https://github.com/sohampatwardhan/Amtrak-GTFS-RT/pull/8)
+After merging service-advisories [PR #8](https://github.com/TracksideTransport/Amtrak-GTFS-RT/pull/8)
 to `main` (advisory *consumption*: the parsers + `AdvisoryConfig`), the service's real advisory code
 path was run against the **live fetcher** in a throwaway `main` worktree:
 

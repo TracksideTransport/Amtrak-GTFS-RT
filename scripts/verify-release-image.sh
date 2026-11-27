@@ -35,8 +35,8 @@ expect() { [ "$2" = "$3" ] || fail "$1: expected '$3', got '$2'"; }
 # OCI labels.
 expect title "$(label title)" "Amtrak GTFS-RT"
 [ -n "$(label description)" ] || fail "description label is empty"
-expect source "$(label source)" "https://github.com/sohampatwardhan/Amtrak-GTFS-RT"
-expect documentation "$(label documentation)" "https://github.com/sohampatwardhan/Amtrak-GTFS-RT#container"
+expect source "$(label source)" "https://github.com/TracksideTransport/Amtrak-GTFS-RT"
+expect documentation "$(label documentation)" "https://github.com/TracksideTransport/Amtrak-GTFS-RT#container"
 expect licenses "$(label licenses)" "AGPL-3.0-only"
 expect base.name "$(label base.name)" "docker.io/library/python:3.12-slim-bookworm"
 expect version "$(label version)" "$VERSION"

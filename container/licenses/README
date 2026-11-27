@@ -51,5 +51,5 @@ Left in place
     The jlink'd Eclipse Temurin 17 runtime (GPL-2.0 with the Classpath Exception) and the
     third-party code in each module it includes.
 
-Source for the AGPL-3.0 service is at https://github.com/sohampatwardhan/Amtrak-GTFS-RT, at the
+Source for the AGPL-3.0 service is at https://github.com/TracksideTransport/Amtrak-GTFS-RT, at the
 revision in the image's org.opencontainers.image.revision label.
