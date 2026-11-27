@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **The image moves to `ghcr.io/tracksidetransport/amtrak-gtfs-rt`.** The repository now lives in the
+  TracksideTransport organization, and so does the one package. Pull from the new path. Tags and
+  digests published before the move are unchanged. `ghcr.io/sohampatwardhan/amtrak-gtfs-rt` stops
+  receiving releases.
+
 ### Fixed
 
 - **Observed tracks reach `static.zip` while the service runs.** A static snapshot built

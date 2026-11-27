@@ -3,7 +3,7 @@
 One Python process with one headless Chromium that reads the two Amtrak sources plain HTTP cannot
 reach, and serves both to the Rust service on `127.0.0.1:8081`. It replaces the former
 `track-fetcher/` and `advisory-fetcher/` sidecars, and ships inside the one
-`ghcr.io/sohampatwardhan/amtrak-gtfs-rt` image, which starts it; see
+`ghcr.io/tracksidetransport/amtrak-gtfs-rt` image, which starts it; see
 [Install with Docker](../README.md#install-with-docker) to run the GTFS server.
 
 `www.amtrak.com` sits behind Akamai Bot Manager, which resets a plain HTTP request that lacks a
@@ -251,7 +251,7 @@ chromium`). The released image already has both; the worker lives in `/app`:
 ```bash
 docker run --rm --read-only --tmpfs /tmp --tmpfs /home/amtrak:uid=10001,gid=10001 \
   --shm-size 64m --workdir /app --entrypoint python3 \
-  ghcr.io/sohampatwardhan/amtrak-gtfs-rt:0.8.0 -m worker.tracks.dump 66 2150
+  ghcr.io/tracksidetransport/amtrak-gtfs-rt:0.8.0 -m worker.tracks.dump 66 2150
 ```
 
 ## Station coverage

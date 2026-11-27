@@ -128,7 +128,7 @@ works without credentials. Without Compose, the image alone does the same with n
 ```bash
 docker run -d --name amtrak-gtfs-rt --restart unless-stopped \
   -p 127.0.0.1:8090:8080 -v amtrak-data:/data \
-  ghcr.io/sohampatwardhan/amtrak-gtfs-rt:0.8.0
+  ghcr.io/tracksidetransport/amtrak-gtfs-rt:0.8.0
 ```
 
 The first generation appears once the static feed has downloaded and passed validation; until
@@ -154,8 +154,8 @@ turning sources off. To upgrade, download the newer release's `docker-compose.ym
   digest from that release's `image-release.txt`:
 
   ```bash
-  docker pull ghcr.io/sohampatwardhan/amtrak-gtfs-rt:0.8.0
-  docker pull ghcr.io/sohampatwardhan/amtrak-gtfs-rt@sha256:<release-manifest-digest>
+  docker pull ghcr.io/tracksidetransport/amtrak-gtfs-rt:0.8.0
+  docker pull ghcr.io/tracksidetransport/amtrak-gtfs-rt@sha256:<release-manifest-digest>
   ```
 
 > [!CAUTION]
@@ -301,11 +301,11 @@ curl -fsS "http://127.0.0.1:8080${vehicle_url}" --output vehicle-positions.pb
 ## Container
 
 Versioned releases are published for `linux/amd64` and `linux/arm64` at
-`ghcr.io/sohampatwardhan/amtrak-gtfs-rt`. The image is public, so released tags can be pulled
+`ghcr.io/tracksidetransport/amtrak-gtfs-rt`. The image is public, so released tags can be pulled
 without a registry login:
 
 ```bash
-docker pull ghcr.io/sohampatwardhan/amtrak-gtfs-rt:0.8.0
+docker pull ghcr.io/tracksidetransport/amtrak-gtfs-rt:0.8.0
 ```
 
 `amtrak-gtfs-rt` is the only package this repository publishes. From `v0.8.0` it is one image,
@@ -329,7 +329,7 @@ and `image-release.txt` records the manifest digest and both platform digests.
 > manifest digest recorded in the release's `image-release.txt`:
 >
 > ```bash
-> docker pull ghcr.io/sohampatwardhan/amtrak-gtfs-rt@sha256:<release-manifest-digest>
+> docker pull ghcr.io/tracksidetransport/amtrak-gtfs-rt@sha256:<release-manifest-digest>
 > ```
 
 ### The one image
@@ -350,7 +350,7 @@ It is about 1 GB uncompressed on linux/arm64, most of it Chromium.
 
 ```bash
 docker run -d -p 127.0.0.1:8090:8080 -v amtrak-data:/data \
-  ghcr.io/sohampatwardhan/amtrak-gtfs-rt:0.8.0
+  ghcr.io/tracksidetransport/amtrak-gtfs-rt:0.8.0
 curl -fsS http://127.0.0.1:8090/v1/feed-set.json
 ```
 
@@ -370,7 +370,7 @@ gateway; list their exact IPs beside the keyword (`gateway,172.31.240.10`).
 >
 > ```bash
 > docker run -d --network host -e AMTRAK_BIND_ADDR=127.0.0.1:8080 -e AMTRAK_ALLOWED_PEER_IPS= \
->   -v amtrak-data:/data ghcr.io/sohampatwardhan/amtrak-gtfs-rt:0.8.0
+>   -v amtrak-data:/data ghcr.io/tracksidetransport/amtrak-gtfs-rt:0.8.0
 > ```
 
 Turn browser sources off with their flags (`-e AMTRAK_TRACKS_AMTRAK=off -e AMTRAK_ADVISORIES=off`).
@@ -483,7 +483,7 @@ docker rm -f <container>                       # keep the volume
 docker run -d --network amtrak-net -p 127.0.0.1:8080:8080 \
   -e AMTRAK_BIND_ADDR=0.0.0.0:8080 -e AMTRAK_ALLOWED_PEER_IPS=172.31.240.1 \
   -v amtrak-data:/data \
-  ghcr.io/sohampatwardhan/amtrak-gtfs-rt@sha256:<release-manifest-digest>
+  ghcr.io/tracksidetransport/amtrak-gtfs-rt@sha256:<release-manifest-digest>
 ```
 
 ### Smoke test
@@ -706,7 +706,7 @@ Without Compose, run the image by itself (no hardening defaults, every source on
 
 ```bash
 docker run -d -p 127.0.0.1:8090:8080 -v amtrak-data:/data \
-  ghcr.io/sohampatwardhan/amtrak-gtfs-rt:0.8.0
+  ghcr.io/tracksidetransport/amtrak-gtfs-rt:0.8.0
 ```
 
 ### Upgrading from the three-container layout

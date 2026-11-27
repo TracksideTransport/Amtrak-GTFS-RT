@@ -85,7 +85,7 @@ The owner should review the claims before approving.
 
 ## Mitigations and controls (one-container layout)
 
-- One image, `ghcr.io/sohampatwardhan/amtrak-gtfs-rt`, runs one service. Compose publishes only
+- One image, `ghcr.io/tracksidetransport/amtrak-gtfs-rt`, runs one service. Compose publishes only
   `127.0.0.1:8090`. The browser worker listens on `127.0.0.1:8081` inside the container and is
   never published.
 - The image is `python:3.12-slim-bookworm` with Chromium, a glibc Java 17 runtime, and the service

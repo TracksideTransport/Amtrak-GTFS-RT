@@ -23,7 +23,7 @@ variable "AMTRAK_IMAGE_TAG" {
 }
 
 variable "REGISTRY" {
-  default = "ghcr.io/sohampatwardhan"
+  default = "ghcr.io/tracksidetransport"
 }
 
 group "default" {

@@ -27,7 +27,7 @@ permissions:
   attestations: write
 
 env:
-  IMAGE: ghcr.io/sohampatwardhan/amtrak-gtfs-rt
+  IMAGE: ghcr.io/tracksidetransport/amtrak-gtfs-rt
 
 jobs:
   verify-and-attest:

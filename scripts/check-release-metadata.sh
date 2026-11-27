@@ -20,7 +20,7 @@ test -s "$ROOT/THIRD_PARTY_LICENSES.html"
 
 # The root compose file and bake default to this release's one GHCR image, and name no other
 # ghcr.io package (#74: amtrak-gtfs-rt is the only one).
-image_line="    image: ghcr.io/sohampatwardhan/amtrak-gtfs-rt:\${AMTRAK_IMAGE_TAG:-${VERSION}}"
+image_line="    image: ghcr.io/tracksidetransport/amtrak-gtfs-rt:\${AMTRAK_IMAGE_TAG:-${VERSION}}"
 grep -Fqx "$image_line" "$ROOT/docker-compose.yml"
 if grep -E '^ +image: ghcr\.io/' "$ROOT/docker-compose.yml" | grep -Fvx "$image_line"; then
   printf 'docker-compose.yml names a GHCR image other than amtrak-gtfs-rt\n' >&2

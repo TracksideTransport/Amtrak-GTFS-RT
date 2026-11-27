@@ -16,7 +16,7 @@ The binary already has the right shape. With `AMTRAK_ROLE` unset, `run_combined`
 
 ## The image
 
-One image, `ghcr.io/sohampatwardhan/amtrak-gtfs-rt`, for `linux/amd64` and `linux/arm64`.
+One image, `ghcr.io/tracksidetransport/amtrak-gtfs-rt`, for `linux/amd64` and `linux/arm64`.
 
 | Part | What it is | Notes |
 | --- | --- | --- |
@@ -88,12 +88,12 @@ These two decisions are written up as proposals in this document. Approving it a
 
 ### D1. `docker run` works without extra flags
 
-Today the image binds `127.0.0.1:8080`, and an empty `AMTRAK_ALLOWED_PEER_IPS` admits loopback clients only. So `docker run -p 8090:8080 ghcr.io/sohampatwardhan/amtrak-gtfs-rt` starts, but every request through the published port gets `403`. Requests through a published port arrive from the Docker bridge gateway, not from loopback.
+Today the image binds `127.0.0.1:8080`, and an empty `AMTRAK_ALLOWED_PEER_IPS` admits loopback clients only. So `docker run -p 8090:8080 ghcr.io/tracksidetransport/amtrak-gtfs-rt` starts, but every request through the published port gets `403`. Requests through a published port arrive from the Docker bridge gateway, not from loopback.
 
 **Proposed:** the image binds `0.0.0.0:8080`, and the allowlist accepts a new keyword, `gateway`, which the service resolves to the container's default gateway at startup. The image defaults `AMTRAK_ALLOWED_PEER_IPS=gateway`. Who can reach the service is then decided by the `-p` binding, which is how Docker users already expect to control exposure:
 
 ```bash
-docker run -d -p 127.0.0.1:8090:8080 -v amtrak-data:/data ghcr.io/sohampatwardhan/amtrak-gtfs-rt
+docker run -d -p 127.0.0.1:8090:8080 -v amtrak-data:/data ghcr.io/tracksidetransport/amtrak-gtfs-rt
 ```
 
 The README leads with this command. `-p 127.0.0.1:8090:8080` keeps the feed local. `-p 8090:8080` exposes it on every interface, with the same consequences as for any other container.

@@ -15,7 +15,7 @@
 #   the validator JAR         rebuilt from pinned MobilityData v8.0.1 source, digest-checked.
 #   /licenses                 license notices for all of the above; /licenses/README is the index.
 #
-# It is the repository's only package, ghcr.io/sohampatwardhan/amtrak-gtfs-rt (#74).
+# It is the repository's only package, ghcr.io/tracksidetransport/amtrak-gtfs-rt (#74).
 #
 # `docker build .` builds it; the last stage is `runtime`. Run it with:
 #

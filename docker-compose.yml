@@ -31,7 +31,7 @@
 #
 # Without Compose, the image alone:
 #
-#   docker run -d -p 127.0.0.1:8090:8080 -v amtrak-data:/data ghcr.io/sohampatwardhan/amtrak-gtfs-rt
+#   docker run -d -p 127.0.0.1:8090:8080 -v amtrak-data:/data ghcr.io/tracksidetransport/amtrak-gtfs-rt
 
 # Fixed so the volume and the pinned subnet below belong to one named project, whatever
 # directory the stack is started from.
@@ -45,7 +45,7 @@ services:
       target: runtime
       args:
         BROWSER_BUNDLE: ${FETCHER_BROWSER_BUNDLE:-headless-shell}
-    image: ghcr.io/sohampatwardhan/amtrak-gtfs-rt:${AMTRAK_IMAGE_TAG:-0.8.0}
+    image: ghcr.io/tracksidetransport/amtrak-gtfs-rt:${AMTRAK_IMAGE_TAG:-0.8.0}
     restart: unless-stopped
     environment:
       AMTRAK_TRACKS: ${AMTRAK_TRACKS:-on}
